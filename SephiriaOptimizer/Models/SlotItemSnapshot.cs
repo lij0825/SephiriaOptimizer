@@ -14,6 +14,7 @@ namespace SephiriaOptimizer.Models {
 		public int MaxLevel { get; }
 		public int RarityTier { get; }
 		public int CustomWeight { get; }
+		public ArtifactPriorityTier PriorityTier { get; }
 		public ArtifactConstraintType ConstraintType { get; }
 		public bool IsDisabledByWeaponOrDual { get; }
 		public bool IsMagicBook { get; }
@@ -22,8 +23,24 @@ namespace SephiriaOptimizer.Models {
 		public bool HasDependencyTarget { get; }
 		public sbyte DependencyOffsetX { get; }
 		public sbyte DependencyOffsetY { get; }
+		public bool HasDependencyCondition { get; }
+		public int DependencyMaxRarity { get; }
+		public int[] NeedleDamageBonusByLevel { get; }
+		public int[] NeedleDependencyBonusByLevel { get; }
 		public bool IsElementalByRowCharm { get; }
+		public int[] RowCategoryIds { get; }
+		public int[] RowElementalBonusByLevel { get; }
 		public bool IsWhitePaperCharm { get; }
+		public int WhitePaperMatchCount { get; }
+		public bool IsNearLevelDamageCharm { get; }
+		public bool IsCompanionChaosCharm { get; }
+		public bool IsCompanionCharm { get; }
+		public bool IsPlanetModuleCharm { get; }
+		public bool IsPlanetCharm { get; }
+		public bool IsNearMagicBulletCharm { get; }
+		public bool IsWoodenBoxCharm { get; }
+		public bool IsFireIcePositionCharm { get; }
+		public uint StaticCategoryMask { get; }
 		public string[] Categories { get; }
 		public TabletPlacementRule[] PlacementRules { get; }
 		public int SymmetryGroupId { get; }
@@ -53,7 +70,24 @@ namespace SephiriaOptimizer.Models {
 			bool isWhitePaperCharm,
 			string[] categories,
 			TabletPlacementRule[] placementRules,
-			int symmetryGroupId
+			int symmetryGroupId,
+			ArtifactPriorityTier priorityTier = ArtifactPriorityTier.Normal,
+			uint staticCategoryMask = 0u,
+			bool hasDependencyCondition = false,
+			int dependencyMaxRarity = 1,
+			int[]? needleDamageBonusByLevel = null,
+			int[]? needleDependencyBonusByLevel = null,
+			int[]? rowCategoryIds = null,
+			int[]? rowElementalBonusByLevel = null,
+			int whitePaperMatchCount = 2,
+			bool isNearLevelDamageCharm = false,
+			bool isCompanionChaosCharm = false,
+			bool isCompanionCharm = false,
+			bool isPlanetModuleCharm = false,
+			bool isPlanetCharm = false,
+			bool isNearMagicBulletCharm = false,
+			bool isWoodenBoxCharm = false,
+			bool isFireIcePositionCharm = false
 		) {
 			ItemIndex = itemIndex;
 			InstanceId = instanceId;
@@ -67,6 +101,7 @@ namespace SephiriaOptimizer.Models {
 			MaxLevel = Math.Max(0, maxLevel);
 			RarityTier = rarityTier;
 			CustomWeight = Math.Max(1, customWeight);
+			PriorityTier = priorityTier;
 			ConstraintType = constraintType;
 			IsDisabledByWeaponOrDual = isDisabledByWeaponOrDual;
 			IsMagicBook = isMagicBook;
@@ -75,8 +110,24 @@ namespace SephiriaOptimizer.Models {
 			HasDependencyTarget = hasDependencyTarget;
 			DependencyOffsetX = dependencyOffsetX;
 			DependencyOffsetY = dependencyOffsetY;
+			HasDependencyCondition = hasDependencyCondition;
+			DependencyMaxRarity = dependencyMaxRarity;
+			NeedleDamageBonusByLevel = needleDamageBonusByLevel ?? new[] { 5, 10, 15, 20, 30 };
+			NeedleDependencyBonusByLevel = needleDependencyBonusByLevel ?? new[] { 5, 10, 15, 20, 30 };
 			IsElementalByRowCharm = isElementalByRowCharm;
+			RowCategoryIds = rowCategoryIds ?? Array.Empty<int>();
+			RowElementalBonusByLevel = rowElementalBonusByLevel ?? new[] { 2, 4, 6, 8 };
 			IsWhitePaperCharm = isWhitePaperCharm;
+			WhitePaperMatchCount = Math.Max(1, whitePaperMatchCount);
+			IsNearLevelDamageCharm = isNearLevelDamageCharm;
+			IsCompanionChaosCharm = isCompanionChaosCharm;
+			IsCompanionCharm = isCompanionCharm;
+			IsPlanetModuleCharm = isPlanetModuleCharm;
+			IsPlanetCharm = isPlanetCharm;
+			IsNearMagicBulletCharm = isNearMagicBulletCharm;
+			IsWoodenBoxCharm = isWoodenBoxCharm;
+			IsFireIcePositionCharm = isFireIcePositionCharm;
+			StaticCategoryMask = staticCategoryMask;
 			Categories = categories ?? Array.Empty<string>();
 			PlacementRules = placementRules ?? Array.Empty<TabletPlacementRule>();
 			SymmetryGroupId = symmetryGroupId;
@@ -88,6 +139,24 @@ namespace SephiriaOptimizer.Models {
 				return PlacementRules[lookupIndex];
 			}
 			return TabletPlacementRule.Empty;
+		}
+
+		public int GetNeedleBonusPercent(int needleEffectiveLevel, int rootRarityTier) {
+			int levelIdx = Math.Clamp(needleEffectiveLevel, 0, Math.Max(0, NeedleDamageBonusByLevel.Length - 1));
+			int bonus = NeedleDamageBonusByLevel.Length > 0 ? NeedleDamageBonusByLevel[levelIdx] : 10;
+			if (HasDependencyCondition && rootRarityTier <= DependencyMaxRarity) {
+				int depIdx = Math.Clamp(needleEffectiveLevel, 0, Math.Max(0, NeedleDependencyBonusByLevel.Length - 1));
+				bonus += NeedleDependencyBonusByLevel.Length > 0 ? NeedleDependencyBonusByLevel[depIdx] : 10;
+			}
+			return bonus;
+		}
+
+		public int GetRowElementalBonus(int effectiveLevel) {
+			if (RowElementalBonusByLevel.Length == 0) {
+				return 2;
+			}
+			int idx = Math.Clamp(effectiveLevel, 0, RowElementalBonusByLevel.Length - 1);
+			return RowElementalBonusByLevel[idx];
 		}
 	}
 }

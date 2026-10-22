@@ -10,8 +10,28 @@ using UnityEngine;
 
 namespace SephiriaOptimizer.UI {
 	public sealed class SephiriaOptimizerController : MonoBehaviour {
+		private static readonly (string Id, string KorName)[] CommonComboTags = new[] {
+			("EMBER", "잉걸불"),
+			("GLACIER", "빙하"),
+			("MAGITECH", "마도공학"),
+			("STURDY", "견고함"),
+			("WINDSONG", "바람노래"),
+			("PLAGUE", "역병"),
+			("SHADOW", "그림자"),
+			("ARCANE", "비전"),
+			("GUARDIAN", "수호"),
+			("PRECISION", "정밀"),
+			("LIGHTNING", "번개"),
+			("LAKE", "호수"),
+			("COMPANION", "동료"),
+			("PLANET", "행성"),
+			("DRUNKEN", "만취"),
+			("CURSE", "저주")
+		};
+
 		private readonly HashSet<int> pinnedSlotIndices = new HashSet<int>();
 		private readonly Dictionary<int, int> customEntityWeights = new Dictionary<int, int>();
+		private readonly OptimizerUserSettings userSettings = new OptimizerUserSettings();
 		private readonly Vector3[] worldCornersBuffer = new Vector3[4];
 		private readonly OptimizationSolver solver = new OptimizationSolver();
 
@@ -24,15 +44,19 @@ namespace SephiriaOptimizer.UI {
 
 		private bool isOverlayEnabled = true;
 		private bool isPinModeEnabled;
+		private bool isConfigPanelOpen;
 		private bool isAutoSwapRunning;
 		private int lastObservedStateHash;
 		private int selectedSlotIndex = -1;
-		private string statusBannerText = "준비 완료 — [F5] 자동 배치 / [F6] 가이드 토글";
+		private Vector2 configScrollPos;
+		private string statusBannerText = "준비 완료 — [F5] 자동 배치 / [F6] 가이드 / [F7] 우선순위·콤보 설정";
 
 		private GUIStyle? panelBoxStyle;
 		private GUIStyle? headerLabelStyle;
+		private GUIStyle? subHeaderStyle;
 		private GUIStyle? buttonStyle;
 		private GUIStyle? activePinButtonStyle;
+		private GUIStyle? selectedButtonStyle;
 		private GUIStyle? badgeStyle;
 		private GUIStyle? coordBadgeStyle;
 		private GUIStyle? pinTagStyle;
@@ -75,6 +99,15 @@ namespace SephiriaOptimizer.UI {
 						: "시각적 오버레이 가이드가 숨겨졌습니다."
 				);
 			}
+
+			if (Input.GetKeyDown(KeyCode.F7)) {
+				isConfigPanelOpen = !isConfigPanelOpen;
+				SetStatusBanner(
+					isConfigPanelOpen
+						? "아티팩트 우선순위 / 목표 콤보 / 금빛침 설정 창이 열렸습니다."
+						: "설정 창이 닫혔습니다."
+				);
+			}
 		}
 
 		private void OnGUI() {
@@ -92,6 +125,10 @@ namespace SephiriaOptimizer.UI {
 			EnsureGuiStyles();
 			DrawTopSummaryControlPanel(statusPanel, avatar, inventory);
 
+			if (isConfigPanelOpen && latestSnapshot != null) {
+				DrawConfigPanel(latestSnapshot);
+			}
+
 			if (!isOverlayEnabled || latestSnapshot == null || latestResult == null) {
 				return;
 			}
@@ -105,7 +142,8 @@ namespace SephiriaOptimizer.UI {
 					avatar,
 					inventory,
 					pinnedSlotIndices,
-					customEntityWeights
+					customEntityWeights,
+					userSettings
 				);
 				pendingTaskSnapshot = snapshot;
 				activeSolveTask = Task.Run(() => solver.Solve(snapshot));
@@ -167,7 +205,8 @@ namespace SephiriaOptimizer.UI {
 				avatar,
 				inventory,
 				pinnedSlotIndices,
-				customEntityWeights
+				customEntityWeights,
+				userSettings
 			);
 			OptimizationResult result = solver.Solve(snapshot);
 			ExecutionPlan plan = CycleDecomposition.BuildExecutionPlan(
@@ -262,10 +301,10 @@ namespace SephiriaOptimizer.UI {
 			PlayerAvatar avatar,
 			GridInventory inventory
 		) {
-			float panelWidth = 680f;
-			float panelHeight = 88f;
+			float panelWidth = 760f;
+			float panelHeight = 92f;
 			float panelX = Mathf.Max(16f, (Screen.width - panelWidth) * 0.5f);
-			float panelY = 14f;
+			float panelY = 12f;
 
 			if (TryGetInventoryGridBounds(statusPanel, inventory, out Rect gridBounds)) {
 				panelX = Mathf.Clamp(
@@ -273,7 +312,7 @@ namespace SephiriaOptimizer.UI {
 					12f,
 					Mathf.Max(12f, Screen.width - panelWidth - 12f)
 				);
-				panelY = Mathf.Max(10f, gridBounds.yMin - panelHeight - 12f);
+				panelY = Mathf.Max(10f, gridBounds.yMin - panelHeight - 10f);
 			}
 
 			Rect panelRect = new Rect(panelX, panelY, panelWidth, panelHeight);
@@ -290,42 +329,51 @@ namespace SephiriaOptimizer.UI {
 				: "-";
 			string deltaStr = delta >= 0 ? $"+{delta}" : delta.ToString();
 
-			string scoreHeader = $"[Sephiria Optimizer] 현재 배치 점수: {curScore}  vs  "
-				+ $"최적 배치 점수: {optScore} ({deltaStr})  |  {solverMode} ({timeStr})";
+			string talentInfo = BuildTalentSummaryBadge(latestSnapshot);
+			string scoreHeader = $"[Sephiria Optimizer] 현재: {curScore} vs 최적: {optScore} ({deltaStr}) "
+				+ $"| {solverMode} ({timeStr}){talentInfo}";
 
-			GUI.Label(new Rect(panelX + 12f, panelY + 8f, panelWidth - 24f, 22f), scoreHeader, headerLabelStyle!);
+			GUI.Label(new Rect(panelX + 12f, panelY + 6f, panelWidth - 24f, 22f), scoreHeader, headerLabelStyle!);
 
-			float btnY = panelY + 34f;
+			float btnY = panelY + 32f;
 			float btnH = 26f;
 
-			if (GUI.Button(new Rect(panelX + 12f, btnY, 155f, btnH), "[F5] 자동 정렬 실행", buttonStyle!)) {
+			if (GUI.Button(new Rect(panelX + 12f, btnY, 138f, btnH), "[F5] 자동 정렬 실행", buttonStyle!)) {
 				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
 			}
 
-			string f6Label = isOverlayEnabled
-				? "[F6] 가이드 오버레이: 켜짐"
-				: "[F6] 가이드 오버레이: 꺼짐";
-			if (GUI.Button(new Rect(panelX + 175f, btnY, 175f, btnH), f6Label, buttonStyle!)) {
+			string f6Label = isOverlayEnabled ? "[F6] 가이드: 켜짐" : "[F6] 가이드: 꺼짐";
+			if (GUI.Button(new Rect(panelX + 156f, btnY, 132f, btnH), f6Label, buttonStyle!)) {
 				isOverlayEnabled = !isOverlayEnabled;
 			}
 
+			string f7Label = isConfigPanelOpen ? "[F7] 빌드 설정: 닫기" : "[F7] 우선순위·콤보 설정";
+			GUIStyle cfgBtnStyle = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(panelX + 294f, btnY, 162f, btnH), f7Label, cfgBtnStyle)) {
+				isConfigPanelOpen = !isConfigPanelOpen;
+			}
+
+			int pinCount = pinnedSlotIndices.Count;
 			string pinLabel = isPinModeEnabled
-				? $"[Pin 모드: ON] (우클릭 고정: {pinnedSlotIndices.Count}개)"
-				: $"[Pin 모드: OFF] (고정됨: {pinnedSlotIndices.Count}개)";
+				? $"[Pin: ON] (고정:{pinCount})"
+				: $"[Pin: OFF] (고정:{pinCount})";
 			GUIStyle currentPinStyle = isPinModeEnabled ? activePinButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 358f, btnY, 210f, btnH), pinLabel, currentPinStyle)) {
+			if (GUI.Button(new Rect(panelX + 462f, btnY, 165f, btnH), pinLabel, currentPinStyle)) {
 				isPinModeEnabled = !isPinModeEnabled;
 				SetStatusBanner(
 					isPinModeEnabled
-						? "슬롯 고정(Pin) 모드 켜짐: 슬롯 위에서 우클릭하면 해당 위치가 고정됩니다."
-						: "슬롯 고정(Pin) 모드 꺼짐."
+						? "Pin 모드 ON: 슬롯 우클릭 시 위치 고정 (OFF일 땐 우클릭으로 아티팩트 우선순위 변경)"
+						: "Pin 모드 OFF: 아티팩트 슬롯 우클릭 시 강화 우선순위(★/▲/●/▼/✕)가 순환됩니다."
 				);
 			}
 
-			if (GUI.Button(new Rect(panelX + 576f, btnY, 92f, btnH), "고정 초기화", buttonStyle!)) {
+			if (GUI.Button(new Rect(panelX + 633f, btnY, 115f, btnH), "설정/고정 초기화", buttonStyle!)) {
 				pinnedSlotIndices.Clear();
+				userSettings.InstancePriorities.Clear();
+				userSettings.TargetComboCategories.Clear();
+				userSettings.PreferredNeedleTargetInstanceId = -1;
 				lastObservedStateHash = 0;
-				SetStatusBanner("모든 슬롯 고정(Pin)이 해제되었습니다.");
+				SetStatusBanner("모든 슬롯 고정 및 우선순위/콤보 설정이 초기화되었습니다.");
 			}
 
 			GUI.Label(
@@ -333,6 +381,167 @@ namespace SephiriaOptimizer.UI {
 				$"상태: {statusBannerText}",
 				badgeStyle!
 			);
+		}
+
+		private void DrawConfigPanel(InventorySnapshot snapshot) {
+			float width = 520f;
+			float height = Mathf.Min(560f, Screen.height - 130f);
+			float panelX = 16f;
+			float panelY = 112f;
+
+			Rect winRect = new Rect(panelX, panelY, width, height);
+			DrawColoredBox(winRect, new Color(0.07f, 0.09f, 0.14f, 0.96f));
+			DrawRectBorder(winRect, new Color(0.35f, 0.65f, 0.95f, 0.9f), 2f);
+
+			GUI.Label(
+				new Rect(panelX + 12f, panelY + 8f, width - 24f, 22f),
+				"빌드 맞춤 최적화 설정 (캘세더니 열쇠 / 하얀 종이 / 금빛침 / 강화 우선순위)",
+				headerLabelStyle!
+			);
+
+			Rect viewRect = new Rect(panelX + 8f, panelY + 34f, width - 16f, height - 42f);
+			int artifactCount = 0;
+			for (int i = 0; i < snapshot.Items.Length; i++) {
+				if (snapshot.Items[i].Kind == SlotItemKind.Artifact) {
+					artifactCount++;
+				}
+			}
+
+			float contentHeight = 250f + (artifactCount * 32f);
+			Rect contentRect = new Rect(0f, 0f, width - 36f, Mathf.Max(viewRect.height, contentHeight));
+			configScrollPos = GUI.BeginScrollView(viewRect, configScrollPos, contentRect);
+
+			float curY = 4f;
+			GUI.Label(
+				new Rect(4f, curY, contentRect.width - 8f, 20f),
+				"1. 목표 콤보(#태그) 선택 — 캘세더니 열쇠 행 배치 & 하얀 종이 태그 복제 유도",
+				subHeaderStyle!
+			);
+			curY += 22f;
+
+			bool hasManualCombos = userSettings.TargetComboCategories.Count > 0;
+			GUIStyle autoComboStyle = !hasManualCombos ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(4f, curY, 150f, 24f), "자동 (활성 콤보 기반)", autoComboStyle)) {
+				userSettings.TargetComboCategories.Clear();
+				lastObservedStateHash = 0;
+			}
+			curY += 28f;
+
+			int col = 0;
+			float tagBtnW = 114f;
+			float tagBtnH = 24f;
+			for (int i = 0; i < CommonComboTags.Length; i++) {
+				(string tagId, string korName) = CommonComboTags[i];
+				bool isSelected = userSettings.TargetComboCategories.Contains(tagId);
+				GUIStyle style = isSelected ? selectedButtonStyle! : buttonStyle!;
+				string prefix = isSelected ? "★" : "#";
+				Rect btnRect = new Rect(4f + (col * (tagBtnW + 4f)), curY, tagBtnW, tagBtnH);
+				if (GUI.Button(btnRect, $"{prefix}{korName}", style)) {
+					userSettings.ToggleTargetCombo(tagId);
+					lastObservedStateHash = 0;
+				}
+				col++;
+				if (col >= 4) {
+					col = 0;
+					curY += tagBtnH + 4f;
+				}
+			}
+			if (col > 0) {
+				curY += tagBtnH + 4f;
+			}
+
+			curY += 6f;
+			GUI.Label(
+				new Rect(4f, curY, contentRect.width - 8f, 20f),
+				"2. 북향의 금빛침 강화 대상 선택 — 지정한 공격형 아티팩트 아래(오프셋 역방향)에 침 배치",
+				subHeaderStyle!
+			);
+			curY += 22f;
+
+			bool isAutoNeedle = userSettings.PreferredNeedleTargetInstanceId < 0;
+			if (GUI.Button(
+				new Rect(4f, curY, 175f, 24f),
+				"자동 (최고 가치 공격 아티팩트)",
+				isAutoNeedle ? selectedButtonStyle! : buttonStyle!
+			)) {
+				userSettings.PreferredNeedleTargetInstanceId = -1;
+				lastObservedStateHash = 0;
+			}
+
+			float needleX = 184f;
+			for (int i = 0; i < snapshot.Items.Length; i++) {
+				SlotItemSnapshot item = snapshot.Items[i];
+				if (item.Kind != SlotItemKind.Artifact || !item.IsAttackableCharm || item.HasDependencyTarget) {
+					continue;
+				}
+				if (needleX + 145f > contentRect.width) {
+					needleX = 4f;
+					curY += 26f;
+				}
+				bool isTarget = userSettings.PreferredNeedleTargetInstanceId == item.InstanceId;
+				string rareTag = item.RarityTier <= 1 ? "(고급이하★2배)" : "";
+				string label = $"{TruncateName(item.DisplayName, 8)}{rareTag}";
+				if (GUI.Button(
+					new Rect(needleX, curY, 142f, 24f),
+					label,
+					isTarget ? selectedButtonStyle! : buttonStyle!
+				)) {
+					userSettings.PreferredNeedleTargetInstanceId = isTarget ? -1 : item.InstanceId;
+					lastObservedStateHash = 0;
+				}
+				needleX += 146f;
+			}
+			curY += 32f;
+
+			GUI.Label(
+				new Rect(4f, curY, contentRect.width - 8f, 20f),
+				"3. 아티팩트별 강화 우선순위 (우클릭으로도 변경 가능 / ✕희생은 석판 -레벨 흡수용 토템)",
+				subHeaderStyle!
+			);
+			curY += 24f;
+
+			for (int i = 0; i < snapshot.Items.Length; i++) {
+				SlotItemSnapshot item = snapshot.Items[i];
+				if (item.Kind != SlotItemKind.Artifact) {
+					continue;
+				}
+
+				ArtifactPriorityTier tier = item.PriorityTier;
+				string itemLabel = $"[{GetPriorityShortLabel(tier)}] {TruncateName(item.DisplayName, 14)} "
+					+ $"(Lv.{item.BaseLevel}/{item.MaxLevel})";
+				GUI.Label(new Rect(4f, curY + 2f, 210f, 24f), itemLabel, headerLabelStyle!);
+
+				DrawPriorityTierButtons(item.InstanceId, tier, 218f, curY);
+				curY += 28f;
+			}
+
+			GUI.EndScrollView();
+		}
+
+		private void DrawPriorityTierButtons(
+			int instanceId,
+			ArtifactPriorityTier currentTier,
+			float startX,
+			float y
+		) {
+			(ArtifactPriorityTier Tier, string Label, float Width)[] tiers = new[] {
+				(ArtifactPriorityTier.Core, "★최우선", 56f),
+				(ArtifactPriorityTier.High, "▲높음", 48f),
+				(ArtifactPriorityTier.Normal, "●보통", 48f),
+				(ArtifactPriorityTier.Low, "▼토템", 48f),
+				(ArtifactPriorityTier.Sacrifice, "✕희생", 48f)
+			};
+
+			float x = startX;
+			for (int i = 0; i < tiers.Length; i++) {
+				(ArtifactPriorityTier tier, string label, float w) = tiers[i];
+				GUIStyle style = currentTier == tier ? selectedButtonStyle! : buttonStyle!;
+				if (GUI.Button(new Rect(x, y, w, 24f), label, style)) {
+					userSettings.InstancePriorities[instanceId] = tier;
+					lastObservedStateHash = 0;
+				}
+				x += w + 3f;
+			}
 		}
 
 		private void DrawSlotOverlays(
@@ -361,14 +570,28 @@ namespace SephiriaOptimizer.UI {
 				}
 			}
 
-			if (Event.current != null && Event.current.type == EventType.MouseDown) {
-				if (Event.current.button == 1 && isPinModeEnabled && hoveredSlot >= 0) {
-					if (!pinnedSlotIndices.Add(hoveredSlot)) {
-						pinnedSlotIndices.Remove(hoveredSlot);
+			if (Event.current != null && Event.current.type == EventType.MouseDown && hoveredSlot >= 0) {
+				if (Event.current.button == 1) {
+					if (isPinModeEnabled) {
+						if (!pinnedSlotIndices.Add(hoveredSlot)) {
+							pinnedSlotIndices.Remove(hoveredSlot);
+						}
+						lastObservedStateHash = 0;
+						Event.current.Use();
+					} else {
+						int clickedItemIdx = snapshot.InitialSlotToItemIndex[hoveredSlot];
+						if (clickedItemIdx >= 0 && snapshot.Items[clickedItemIdx].Kind == SlotItemKind.Artifact) {
+							SlotItemSnapshot clickedArt = snapshot.Items[clickedItemIdx];
+							userSettings.CyclePriority(clickedArt.InstanceId);
+							ArtifactPriorityTier nextTier = userSettings.GetPriority(clickedArt.InstanceId);
+							lastObservedStateHash = 0;
+							SetStatusBanner(
+								$"[{clickedArt.DisplayName}] 강화 우선순위 변경 → {GetPriorityShortLabel(nextTier)}"
+							);
+							Event.current.Use();
+						}
 					}
-					lastObservedStateHash = 0;
-					Event.current.Use();
-				} else if (Event.current.button == 0 && hoveredSlot >= 0) {
+				} else if (Event.current.button == 0) {
 					selectedSlotIndex = selectedSlotIndex == hoveredSlot ? -1 : hoveredSlot;
 				}
 			}
@@ -391,6 +614,12 @@ namespace SephiriaOptimizer.UI {
 					int targetSlot = result.BestItemToSlotIndex[currentItemIdx];
 					SlotItemSnapshot currentItem = snapshot.Items[currentItemIdx];
 
+					bool showPriority = currentItem.Kind == SlotItemKind.Artifact
+						&& currentItem.PriorityTier != ArtifactPriorityTier.Normal;
+					if (showPriority) {
+						DrawPriorityBadge(rect, currentItem.PriorityTier);
+					}
+
 					if (targetSlot >= 0 && targetSlot != s && targetSlot < unlockedSlots) {
 						SlotCoord targetCoord = snapshot.Slots[targetSlot];
 						string moveText = $"→[{targetCoord.X},{targetCoord.Y}]";
@@ -412,8 +641,17 @@ namespace SephiriaOptimizer.UI {
 
 				if (s < result.BestSlotDetails.Length) {
 					SlotEvaluationDetail detail = result.BestSlotDetails[s];
-					if (detail.ItemIndex >= 0 && snapshot.Items[detail.ItemIndex].Kind == SlotItemKind.Artifact) {
-						DrawExpectedLevelBadge(rect, detail);
+					if (detail.ItemIndex >= 0) {
+						SlotItemSnapshot placedItem = snapshot.Items[detail.ItemIndex];
+						if (placedItem.Kind == SlotItemKind.Artifact) {
+							DrawExpectedLevelBadge(rect, detail, placedItem);
+						} else if (
+							placedItem.Kind == SlotItemKind.StoneTablet
+							&& snapshot.TalentRules.TabletEngravingCount > 0
+							&& detail.IsEngravingReady
+						) {
+							DrawTabletEngravingBadge(rect);
+						}
 					}
 				}
 			}
@@ -437,7 +675,35 @@ namespace SephiriaOptimizer.UI {
 			}
 		}
 
-		private void DrawExpectedLevelBadge(Rect slotRect, SlotEvaluationDetail detail) {
+		private void DrawPriorityBadge(Rect slotRect, ArtifactPriorityTier tier) {
+			Rect tagRect = new Rect(slotRect.xMax - 42f, slotRect.y + 18f, 40f, 15f);
+			Color color = tier switch {
+				ArtifactPriorityTier.Core => new Color(0.85f, 0.55f, 0.05f, 0.92f),
+				ArtifactPriorityTier.High => new Color(0.15f, 0.55f, 0.75f, 0.92f),
+				ArtifactPriorityTier.Low => new Color(0.35f, 0.38f, 0.42f, 0.90f),
+				ArtifactPriorityTier.Sacrifice => new Color(0.65f, 0.15f, 0.25f, 0.92f),
+				_ => new Color(0.2f, 0.2f, 0.2f, 0.8f)
+			};
+			DrawColoredBox(tagRect, color);
+			GUI.Label(tagRect, GetPriorityShortLabel(tier), badgeStyle!);
+		}
+
+		private void DrawTabletEngravingBadge(Rect slotRect) {
+			Rect badgeRect = new Rect(
+				slotRect.x + 2f,
+				slotRect.yMax - 18f,
+				slotRect.width - 4f,
+				16f
+			);
+			DrawColoredBox(badgeRect, new Color(0.55f, 0.35f, 0.08f, 0.90f));
+			GUI.Label(badgeRect, "각인 최적", badgeStyle!);
+		}
+
+		private void DrawExpectedLevelBadge(
+			Rect slotRect,
+			SlotEvaluationDetail detail,
+			SlotItemSnapshot placedItem
+		) {
 			Rect badgeRect = new Rect(
 				slotRect.x + 2f,
 				slotRect.yMax - 20f,
@@ -449,14 +715,19 @@ namespace SephiriaOptimizer.UI {
 			Color bgColor;
 
 			if (!detail.IsEnabled) {
-				if (detail.IsDeactivatedByNegativeLevel) {
+				if (placedItem.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+					label = "희생(콤보유지)";
+					bgColor = new Color(0.42f, 0.22f, 0.48f, 0.92f);
+				} else if (detail.IsDeactivatedByNegativeLevel) {
 					label = $"{detail.DisplayedLevel} (비활성 경고)";
+					bgColor = new Color(0.72f, 0.12f, 0.12f, 0.92f);
 				} else if (detail.IsDeactivatedByCriteria) {
 					label = "제약 미충족";
+					bgColor = new Color(0.72f, 0.12f, 0.12f, 0.92f);
 				} else {
 					label = "비활성 (X)";
+					bgColor = new Color(0.72f, 0.12f, 0.12f, 0.92f);
 				}
-				bgColor = new Color(0.72f, 0.12f, 0.12f, 0.92f);
 			} else if (detail.MaxLevel > 0 && detail.EffectiveLevel >= detail.MaxLevel) {
 				label = $"Lv.{detail.EffectiveLevel} (MAX)";
 				bgColor = new Color(0.12f, 0.55f, 0.22f, 0.92f);
@@ -467,6 +738,45 @@ namespace SephiriaOptimizer.UI {
 
 			DrawColoredBox(badgeRect, bgColor);
 			GUI.Label(badgeRect, label, badgeStyle!);
+		}
+
+		private static string BuildTalentSummaryBadge(InventorySnapshot? snapshot) {
+			if (snapshot == null) {
+				return string.Empty;
+			}
+			List<string> tags = new List<string>(3);
+			TalentRuleSnapshot rules = snapshot.TalentRules;
+			if (rules.TabletEngravingCount > 0) {
+				tags.Add($"생존20(각인:{rules.TabletEngravingCount})");
+			}
+			if (rules.UniquePairCount > 0) {
+				tags.Add($"한쌍:{rules.UniquePairCount}");
+			}
+			if (rules.UnlimitedComboStat > 0) {
+				tags.Add("무한콤보");
+			}
+			if (tags.Count == 0) {
+				return string.Empty;
+			}
+			return " | " + string.Join(",", tags);
+		}
+
+		private static string GetPriorityShortLabel(ArtifactPriorityTier tier) {
+			return tier switch {
+				ArtifactPriorityTier.Core => "★최우선",
+				ArtifactPriorityTier.High => "▲높음",
+				ArtifactPriorityTier.Normal => "●보통",
+				ArtifactPriorityTier.Low => "▼토템",
+				ArtifactPriorityTier.Sacrifice => "✕희생",
+				_ => "●보통"
+			};
+		}
+
+		private static string TruncateName(string name, int maxLen) {
+			if (string.IsNullOrEmpty(name) || name.Length <= maxLen) {
+				return name;
+			}
+			return name.Substring(0, maxLen) + "..";
 		}
 
 		private bool TryGetInventoryGridBounds(
@@ -554,6 +864,12 @@ namespace SephiriaOptimizer.UI {
 			int unlocked = Math.Clamp((int)inventory.CurrentInventoryStorage, 0, InventorySnapshot.MaxSupportedSlots);
 			hash = (hash * 31) + width;
 			hash = (hash * 31) + unlocked;
+			hash = (hash * 31) + inventory.tabletEngravingCount;
+			hash = (hash * 31) + inventory.uniquePairCount;
+			int engravedCount = inventory.fixedEngravingsOnServer != null
+				? inventory.fixedEngravingsOnServer.Count
+				: 0;
+			hash = (hash * 31) + engravedCount;
 
 			for (int s = 0; s < unlocked; s++) {
 				sbyte x = (sbyte)(s % width);
@@ -566,6 +882,7 @@ namespace SephiriaOptimizer.UI {
 			}
 
 			hash = (hash * 31) + pinnedSlotIndices.Count;
+			hash = (hash * 31) + userSettings.ComputeSettingsHash();
 			return hash;
 		}
 
@@ -584,14 +901,24 @@ namespace SephiriaOptimizer.UI {
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(0.95f, 0.96f, 1f, 1f) }
 			};
-			buttonStyle = new GUIStyle(GUI.skin.button) {
+			subHeaderStyle = new GUIStyle(GUI.skin.label) {
 				fontSize = 12,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.55f, 0.88f, 1f, 1f) }
+			};
+			buttonStyle = new GUIStyle(GUI.skin.button) {
+				fontSize = 11,
 				fontStyle = FontStyle.Bold
 			};
 			activePinButtonStyle = new GUIStyle(GUI.skin.button) {
-				fontSize = 12,
+				fontSize = 11,
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(1f, 0.88f, 0.2f, 1f) }
+			};
+			selectedButtonStyle = new GUIStyle(GUI.skin.button) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.25f, 1f, 0.45f, 1f) }
 			};
 			badgeStyle = new GUIStyle(GUI.skin.label) {
 				fontSize = 11,

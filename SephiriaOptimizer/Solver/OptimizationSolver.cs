@@ -149,7 +149,7 @@ namespace SephiriaOptimizer.Solver {
 			int[] itemMaxPotential = new int[unpinnedItemCount];
 			for (int d = 0; d < unpinnedItemCount; d++) {
 				SlotItemSnapshot item = items[unpinnedItems[d]];
-				itemMaxPotential[d] = ComputeSingleItemMaxPotential(item);
+				itemMaxPotential[d] = ComputeSingleItemMaxPotential(snapshot, item);
 			}
 
 			int[] suffixPotentialSum = new int[unpinnedItemCount + 1];
@@ -157,11 +157,11 @@ namespace SephiriaOptimizer.Solver {
 				suffixPotentialSum[d] = suffixPotentialSum[d + 1] + itemMaxPotential[d];
 			}
 
-			int pinnedBasePotential = 0;
+			int pinnedBasePotential = ComputeGlobalComboAndPatternPotential(snapshot);
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = workingSlots[s];
 				if (itemIdx >= 0) {
-					pinnedBasePotential += ComputeSingleItemMaxPotential(items[itemIdx]);
+					pinnedBasePotential += ComputeSingleItemMaxPotential(snapshot, items[itemIdx]);
 				}
 			}
 
@@ -178,7 +178,6 @@ namespace SephiriaOptimizer.Solver {
 				unpinnedSlotCount,
 				suffixPotentialSum,
 				pinnedBasePotential,
-				0,
 				0,
 				assignedOrderedSlotIndex,
 				workingSlots,
@@ -201,7 +200,6 @@ namespace SephiriaOptimizer.Solver {
 			int[] suffixPotentialSum,
 			int accumulatedPotential,
 			int depth,
-			int currentPartialScoreEstimate,
 			int[] assignedOrderedSlotIndex,
 			int[] workingSlots,
 			int[] workingRotations,
@@ -279,7 +277,6 @@ namespace SephiriaOptimizer.Solver {
 							suffixPotentialSum,
 							accumulatedPotential + itemPotential,
 							depth + 1,
-							currentPartialScoreEstimate,
 							assignedOrderedSlotIndex,
 							workingSlots,
 							workingRotations,
@@ -303,7 +300,6 @@ namespace SephiriaOptimizer.Solver {
 						suffixPotentialSum,
 						accumulatedPotential + itemPotential,
 						depth + 1,
-						currentPartialScoreEstimate,
 						assignedOrderedSlotIndex,
 						workingSlots,
 						workingRotations,
@@ -359,10 +355,10 @@ namespace SephiriaOptimizer.Solver {
 			Array.Copy(bestRotations, currentRotations, itemCount);
 			int currentScore = bestScore;
 
-			const double initialTemperature = 650.0;
+			const double initialTemperature = 750.0;
 			const double minimumTemperature = 8.0;
 			const double coolingFactor = 0.9965;
-			const double reheatTemperature = 280.0;
+			const double reheatTemperature = 320.0;
 			const int stagnationLimit = 1400;
 
 			double temperature = initialTemperature;
@@ -530,17 +526,29 @@ namespace SephiriaOptimizer.Solver {
 			}
 		}
 
-		private static int ComputeSingleItemMaxPotential(SlotItemSnapshot item) {
+		private static int ComputeSingleItemMaxPotential(InventorySnapshot snapshot, SlotItemSnapshot item) {
 			if (item.Kind == SlotItemKind.Artifact) {
+				int scaledWeight = Math.Max(1, ObjectiveEvaluator.GetPriorityScaledWeight(item));
+				int maxBonus = item.PriorityTier == ArtifactPriorityTier.Core
+					? (ObjectiveEvaluator.MaxLevelReachedBonus * 2)
+					: ObjectiveEvaluator.MaxLevelReachedBonus;
 				int maxLvlScore = (ObjectiveEvaluator.BaseActiveArtifactScore
 					+ (item.MaxLevel * ObjectiveEvaluator.EffectiveLevelScoreMultiplier)
-					+ ObjectiveEvaluator.MaxLevelReachedBonus
+					+ maxBonus
 					+ ObjectiveEvaluator.IgnoreConstraintSynergyBonus
-					+ ObjectiveEvaluator.ConnectedCharmSynergyBonus) * item.CustomWeight;
+					+ (ObjectiveEvaluator.ConnectedCharmSynergyBonus * 4)) * scaledWeight;
+
+				if (item.HasDependencyTarget) {
+					maxLvlScore += 18000;
+				}
+				if (item.IsElementalByRowCharm || item.IsWhitePaperCharm || item.IsNearLevelDamageCharm) {
+					maxLvlScore += 4000;
+				}
 				return maxLvlScore;
 			}
 			if (item.Kind == SlotItemKind.StoneTablet) {
 				int bestEffectBonus = 0;
+				bool hasEngraving = snapshot.TalentRules.TabletEngravingCount > 0;
 				TabletPlacementRule[] rules = item.PlacementRules;
 				for (int r = 0; r < rules.Length; r++) {
 					PrecomputedEffect[] effects = rules[r].Effects;
@@ -549,8 +557,14 @@ namespace SephiriaOptimizer.Solver {
 						PrecomputedEffect eff = effects[e];
 						if (eff.EffectType == TabletEffectType.IncreaseConstLevel && eff.LevelParam < 0) {
 							ruleBonus += (-eff.LevelParam) * ObjectiveEvaluator.NeutralizedNegativeLevelBonus;
+							if (hasEngraving) {
+								ruleBonus += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
+							}
 						} else if (eff.EffectType == TabletEffectType.Disable) {
 							ruleBonus += ObjectiveEvaluator.NeutralizedDisableBonus;
+							if (hasEngraving) {
+								ruleBonus += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
+							}
 						}
 					}
 					if (ruleBonus > bestEffectBonus) {
@@ -560,6 +574,19 @@ namespace SephiriaOptimizer.Solver {
 				return bestEffectBonus;
 			}
 			return 0;
+		}
+
+		private static int ComputeGlobalComboAndPatternPotential(InventorySnapshot snapshot) {
+			int potential = 2000;
+			ComboCategoryInfo[] cats = snapshot.ComboCategories;
+			for (int i = 0; i < cats.Length; i++) {
+				potential += (cats[i].Breakpoints.Length + 4) * ObjectiveEvaluator.TargetComboDynamicStackBonus * 2;
+			}
+			if (snapshot.TalentRules.ArrangementBonusStat > 0) {
+				potential += snapshot.TalentRules.ArrangementPatterns.Length
+					* ObjectiveEvaluator.ArrangementPatternMatchBonus;
+			}
+			return potential;
 		}
 
 		private static void SortUnpinnedItemsForBranching(
@@ -596,7 +623,8 @@ namespace SephiriaOptimizer.Solver {
 			}
 			if (item.Kind == SlotItemKind.Artifact) {
 				int constraintBonus = item.ConstraintType != ArtifactConstraintType.None ? 500 : 0;
-				return 1000 + constraintBonus + (item.CustomWeight * 25) + (item.MaxLevel * 10);
+				int priorityBonus = (int)item.PriorityTier * 200;
+				return 1000 + constraintBonus + priorityBonus + (item.CustomWeight * 25) + (item.MaxLevel * 10);
 			}
 			return 0;
 		}
@@ -632,7 +660,7 @@ namespace SephiriaOptimizer.Solver {
 			for (int i = 0; i < first.Effects.Length; i++) {
 				PrecomputedEffect effA = first.Effects[i];
 				PrecomputedEffect effB = second.Effects[i];
-				if (effA.TargetSlotIndex != effB.TargetSlotIndex
+				if (effA.TargetSlotIndex != effA.TargetSlotIndex
 					|| effA.EffectType != effB.EffectType
 					|| effA.LevelParam != effB.LevelParam) {
 					return false;

@@ -45,17 +45,10 @@ namespace SephiriaOptimizer.Tests {
 			);
 			SlotItemSnapshot debuffTablet = CreateTablet(2, 202, 2, 0, false, debuffRules, 3);
 
-			InventorySnapshot snapshot = new InventorySnapshot(
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
 				width,
 				height,
 				unlockedSlots,
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new bool[unlockedSlots],
-				true,
-				1,
 				new[] { artifactMax2, buffTablet, debuffTablet }
 			);
 
@@ -140,17 +133,10 @@ namespace SephiriaOptimizer.Tests {
 
 			SlotItemSnapshot tablet = CreateTablet(1, 201, 0, 0, true, mixedTabletRules, 2);
 
-			InventorySnapshot snapshot = new InventorySnapshot(
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
 				width,
 				height,
 				unlockedSlots,
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new bool[unlockedSlots],
-				true,
-				1,
 				new[] { artifact, tablet }
 			);
 
@@ -194,17 +180,10 @@ namespace SephiriaOptimizer.Tests {
 			);
 			SlotItemSnapshot ignoreTablet = CreateTablet(1, 205, 5, 0, false, ignoreTabletRules, 2);
 
-			InventorySnapshot snapshot = new InventorySnapshot(
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
 				width,
 				height,
 				unlockedSlots,
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new bool[unlockedSlots],
-				true,
-				1,
 				new[] { insideArtifact, ignoreTablet }
 			);
 
@@ -218,6 +197,459 @@ namespace SephiriaOptimizer.Tests {
 			Assert.True(detail.IsEnabled);
 			Assert.True(detail.IsCriteriaIgnored);
 			Assert.Equal(tabletSlot + 1, artifactSlot);
+			Assert.True(result.BestScore > result.InitialScore);
+		}
+
+		[Fact(DisplayName = "캘세더니 열쇠와 하얀 종이를 목표 콤보 행 및 동일 태그 아티팩트 사이에 배치하여 세트 단계를 달성한다")]
+		public void Solve_PlacesChalcedonyKeyAndWhitePaperToCompleteTargetCombo() {
+			int width = 3;
+			int height = 3;
+			int unlockedSlots = 9;
+
+			uint emberMask = 1u << 0;
+			uint glacierMask = 1u << 1;
+
+			SlotItemSnapshot chalcedonyKey = new SlotItemSnapshot(
+				0,
+				101,
+				101,
+				"캘세더니 열쇠",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				true,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				new[] { 0, 1, 2 },
+				new[] { 2, 4, 6 }
+			);
+
+			SlotItemSnapshot whitePaper = new SlotItemSnapshot(
+				1,
+				102,
+				102,
+				"하얀 종이",
+				SlotItemKind.Artifact,
+				8,
+				0,
+				false,
+				0,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				true,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				null,
+				null,
+				2
+			);
+
+			SlotItemSnapshot glacierCharm = new SlotItemSnapshot(
+				2,
+				103,
+				103,
+				"서리 반지",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				0,
+				2,
+				1,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "GLACIER" },
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				glacierMask
+			);
+
+			ComboCategoryInfo[] comboInfos = new[] {
+				new ComboCategoryInfo(0, "EMBER", "잉걸불", 0, new[] { 3, 6 }, false),
+				new ComboCategoryInfo(1, "GLACIER", "빙하", 1, new[] { 3, 6 }, true),
+				new ComboCategoryInfo(2, "MAGITECH", "마도공학", 0, new[] { 3, 6 }, false)
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { chalcedonyKey, whitePaper, glacierCharm },
+				comboInfos,
+				TalentRuleSnapshot.Default,
+				-1
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int keySlot = result.BestItemToSlotIndex[0];
+			int paperSlot = result.BestItemToSlotIndex[1];
+			int glacierSlot = result.BestItemToSlotIndex[2];
+
+			int keyRow = keySlot / width;
+			int paperRow = paperSlot / width;
+			int glacierRow = glacierSlot / width;
+			int paperCol = paperSlot % width;
+
+			Assert.Equal(1, keyRow);
+			Assert.Equal(1, paperRow);
+			Assert.Equal(1, glacierRow);
+			Assert.Equal(1, paperCol);
+			Assert.Equal(glacierMask, result.BestSlotDetails[keySlot].DynamicCategoryMask);
+			Assert.Equal(glacierMask, result.BestSlotDetails[paperSlot].DynamicCategoryMask);
+			Assert.True((emberMask & result.BestSlotDetails[keySlot].DynamicCategoryMask) == 0u);
+		}
+
+		[Fact(DisplayName = "북향의 금빛침을 지정된 공격형 아티팩트 아래에 배치하여 등급 조건부 2배 피해 증폭과 카테고리 복제를 달성한다")]
+		public void Solve_PlacesGoldenNeedleBelowTargetAttackableArtifactAndCopiesCategories() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			uint arcaneMask = 1u << 0;
+
+			SlotItemSnapshot uncommonDagger = new SlotItemSnapshot(
+				0,
+				301,
+				301,
+				"마력 단검",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				1,
+				2,
+				1,
+				5,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "ARCANE" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				arcaneMask
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				302,
+				302,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				2,
+				2,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				true,
+				1,
+				new[] { 30, 50, 80 },
+				new[] { 30, 50, 80 }
+			);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { uncommonDagger, goldenNeedle },
+				new[] { new ComboCategoryInfo(0, "ARCANE", "비전", 1, new[] { 2 }, true) },
+				TalentRuleSnapshot.Default,
+				301
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int daggerSlot = result.BestItemToSlotIndex[0];
+			int needleSlot = result.BestItemToSlotIndex[1];
+
+			int daggerX = daggerSlot % width;
+			int daggerY = daggerSlot / width;
+			int needleX = needleSlot % width;
+			int needleY = needleSlot / width;
+
+			Assert.Equal(daggerX, needleX);
+			Assert.Equal(daggerY + 1, needleY);
+			Assert.Equal(arcaneMask, result.BestSlotDetails[needleSlot].DynamicCategoryMask);
+			Assert.True(result.BestScore > result.InitialScore);
+		}
+
+		[Fact(DisplayName = "강화 우선순위가 최우선인 아티팩트에 버프를 집중하고 희생 등급 아티팩트로 석판의 레벨 감소 페널티를 흡수한다")]
+		public void Solve_PrioritizesCoreArtifactsAndUsesSacrificeArtifactsToAbsorbNegativeTabletEffects() {
+			int width = 3;
+			int height = 1;
+			int unlockedSlots = 3;
+
+			SlotItemSnapshot coreArtifact = new SlotItemSnapshot(
+				0,
+				401,
+				401,
+				"핵심 딜링 아티팩트",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				0,
+				3,
+				2,
+				15,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				1u
+			);
+
+			SlotItemSnapshot sacrificeTotem = new SlotItemSnapshot(
+				1,
+				402,
+				402,
+				"희생용 콤보 토템",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				2,
+				1,
+				1,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Sacrifice,
+				1u
+			);
+
+			TabletPlacementRule[] centerTabletRules = new TabletPlacementRule[unlockedSlots * 4];
+			for (int s = 0; s < unlockedSlots; s++) {
+				for (int r = 0; r < 4; r++) {
+					int leftTarget = s - 1 >= 0 ? s - 1 : -1;
+					int rightTarget = s + 1 < unlockedSlots ? s + 1 : -1;
+					PrecomputedEffect[] effects = new[] {
+						new PrecomputedEffect((sbyte)(s - 1), 0, leftTarget, TabletEffectType.IncreaseConstLevel, 3),
+						new PrecomputedEffect((sbyte)(s + 1), 0, rightTarget, TabletEffectType.IncreaseConstLevel, -2)
+					};
+					centerTabletRules[(s * 4) + r] = new TabletPlacementRule(
+						Array.Empty<PrecomputedCondition>(),
+						effects
+					);
+				}
+			}
+
+			bool[] pinned = new[] { false, true, false };
+			SlotItemSnapshot centerTablet = CreateTablet(2, 403, 1, 0, false, centerTabletRules, 3);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				pinned,
+				true,
+				1,
+				new[] { coreArtifact, sacrificeTotem, centerTablet },
+				new[] { new ComboCategoryInfo(0, "EMBER", "잉걸불", 2, new[] { 2 }, true) },
+				TalentRuleSnapshot.Default,
+				-1
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int coreSlot = result.BestItemToSlotIndex[0];
+			int sacrificeSlot = result.BestItemToSlotIndex[1];
+
+			Assert.Equal(0, coreSlot);
+			Assert.Equal(2, sacrificeSlot);
+			Assert.Equal(3, result.BestSlotDetails[coreSlot].EffectiveLevel);
+			Assert.False(result.BestSlotDetails[sacrificeSlot].IsEnabled);
+			Assert.True(result.BestScore > result.InitialScore);
+		}
+
+		[Fact(DisplayName = "생존 20 재능 활성화 시 줄어든 인벤토리 경계 밖으로 석판의 페널티를 유도하고 영구 각인 슬롯 효과를 반영한다")]
+		public void Solve_AppliesSurvival20TabletEngravingAndPermanentSlotBonuses() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			int[] baseConstLevel = new[] { 2, 0, 0, 0, 0, 0 };
+
+			SlotItemSnapshot artifact = CreateArtifact(
+				0,
+				501,
+				5,
+				0,
+				3,
+				8,
+				ArtifactConstraintType.None,
+				1
+			);
+
+			TabletPlacementRule[] engravingTabletRules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				0,
+				1,
+				TabletEffectType.IncreaseConstLevel,
+				-3
+			);
+			SlotItemSnapshot tablet = CreateTablet(1, 502, 1, 0, false, engravingTabletRules, 2);
+
+			TalentRuleSnapshot survival20Rules = new TalentRuleSnapshot(
+				2,
+				0,
+				0,
+				0,
+				0,
+				false,
+				false,
+				0,
+				0,
+				0,
+				0,
+				Array.Empty<ArrangementPattern>()
+			);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				baseConstLevel,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { artifact, tablet },
+				Array.Empty<ComboCategoryInfo>(),
+				survival20Rules,
+				-1
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int artifactSlot = result.BestItemToSlotIndex[0];
+			int tabletSlot = result.BestItemToSlotIndex[1];
+			int tabletRow = tabletSlot / width;
+
+			Assert.Equal(0, artifactSlot);
+			Assert.Equal(2, result.BestSlotDetails[artifactSlot].EffectiveLevel);
+			Assert.Equal(1, tabletRow);
+			Assert.True(result.BestSlotDetails[tabletSlot].IsEngravingReady);
 			Assert.True(result.BestScore > result.InitialScore);
 		}
 
@@ -258,19 +690,7 @@ namespace SephiriaOptimizer.Tests {
 				items[itemIdx] = CreateTablet(itemIdx, 300 + t, t, 2, true, rules, 50);
 			}
 
-			InventorySnapshot snapshot = new InventorySnapshot(
-				width,
-				height,
-				unlockedSlots,
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new bool[unlockedSlots],
-				true,
-				1,
-				items
-			);
+			InventorySnapshot snapshot = CreateSimpleSnapshot(width, height, unlockedSlots, items);
 
 			OptimizationSolver solver = new OptimizationSolver();
 			OptimizationResult result = solver.Solve(snapshot, 250);
@@ -291,19 +711,7 @@ namespace SephiriaOptimizer.Tests {
 				items[i] = CreateArtifact(i, 100 + i, i, 0, 2, 2, ArtifactConstraintType.None, i + 1);
 			}
 
-			InventorySnapshot snapshot = new InventorySnapshot(
-				width,
-				height,
-				unlockedSlots,
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new int[unlockedSlots],
-				new bool[unlockedSlots],
-				true,
-				1,
-				items
-			);
+			InventorySnapshot snapshot = CreateSimpleSnapshot(width, height, unlockedSlots, items);
 
 			int[] currentSlots = new[] { 0, 1, 2, 3, 4, -1, -1, -1 };
 			int[] targetSlots = new[] { 1, 2, 0, -1, 4, 3, -1, -1 };
@@ -328,6 +736,27 @@ namespace SephiriaOptimizer.Tests {
 
 			Assert.Equal(3, plan.SwapSteps.Count);
 			Assert.Equal(targetSlots, simulatedSlots);
+		}
+
+		private static InventorySnapshot CreateSimpleSnapshot(
+			int width,
+			int height,
+			int unlockedSlots,
+			SlotItemSnapshot[] items
+		) {
+			return new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				items
+			);
 		}
 
 		private static SlotItemSnapshot CreateArtifact(

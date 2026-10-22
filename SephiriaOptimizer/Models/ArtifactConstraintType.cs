@@ -6,6 +6,14 @@ namespace SephiriaOptimizer.Models {
 		OtherItem = 3
 	}
 
+	public enum ArtifactPriorityTier : byte {
+		Sacrifice = 0,
+		Low = 1,
+		Normal = 2,
+		High = 3,
+		Core = 4
+	}
+
 	public enum ArtifactConstraintType : byte {
 		None = 0,
 		TopInInventory = 1,

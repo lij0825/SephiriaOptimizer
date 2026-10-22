@@ -12,6 +12,9 @@ namespace SephiriaOptimizer.Solver {
 		public bool IsDeactivatedByDisableEffect { get; }
 		public bool IsDeactivatedByCriteria { get; }
 		public bool IsCriteriaIgnored { get; }
+		public uint DynamicCategoryMask { get; }
+		public int ConnectedTargetSlotIndex { get; }
+		public bool IsEngravingReady { get; }
 
 		public SlotEvaluationDetail(
 			int slotIndex,
@@ -23,7 +26,10 @@ namespace SephiriaOptimizer.Solver {
 			bool isDeactivatedByNegativeLevel,
 			bool isDeactivatedByDisableEffect,
 			bool isDeactivatedByCriteria,
-			bool isCriteriaIgnored
+			bool isCriteriaIgnored,
+			uint dynamicCategoryMask = 0u,
+			int connectedTargetSlotIndex = -1,
+			bool isEngravingReady = false
 		) {
 			SlotIndex = slotIndex;
 			ItemIndex = itemIndex;
@@ -35,6 +41,9 @@ namespace SephiriaOptimizer.Solver {
 			IsDeactivatedByDisableEffect = isDeactivatedByDisableEffect;
 			IsDeactivatedByCriteria = isDeactivatedByCriteria;
 			IsCriteriaIgnored = isCriteriaIgnored;
+			DynamicCategoryMask = dynamicCategoryMask;
+			ConnectedTargetSlotIndex = connectedTargetSlotIndex;
+			IsEngravingReady = isEngravingReady;
 		}
 	}
 

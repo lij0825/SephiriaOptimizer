@@ -4,12 +4,21 @@ using SephiriaOptimizer.Models;
 
 namespace SephiriaOptimizer.Snapshot {
 	public static class GameInventoryReader {
+		private static readonly string[] DefaultElementalCategories = new[] {
+			"EMBER",
+			"GLACIER",
+			"MAGITECH",
+			"STURDY"
+		};
+
 		public static InventorySnapshot CaptureSnapshot(
 			PlayerAvatar avatar,
 			GridInventory inventory,
 			HashSet<int> pinnedSlotIndices,
-			Dictionary<int, int> customEntityWeights
+			Dictionary<int, int> customEntityWeights,
+			OptimizerUserSettings? userSettings = null
 		) {
+			OptimizerUserSettings settings = userSettings ?? new OptimizerUserSettings();
 			int width = Math.Max(1, (int)inventory.Width);
 			int unlockedSlots = Math.Clamp(
 				(int)inventory.CurrentInventoryStorage,
@@ -32,75 +41,57 @@ namespace SephiriaOptimizer.Snapshot {
 				}
 			}
 
-			foreach (KeyValuePair<ItemPosition, int> entry in inventory.dungeonTempLevels) {
-				int slotIdx = CoordToUnlockedSlot(entry.Key.x, entry.Key.y, width, height, unlockedSlots);
-				if (slotIdx >= 0) {
-					baseSlotLevel[slotIdx] += entry.Value;
-				}
+			PopulateBaseSlotModifiers(
+				inventory,
+				width,
+				height,
+				unlockedSlots,
+				baseSlotLevel,
+				baseSlotDisable,
+				baseSlotIgnoreCriteria,
+				baseSlotMultiplyLevel
+			);
+
+			TalentRuleSnapshot talentRules = CaptureTalentRules(avatar, inventory);
+
+			Dictionary<string, int> categoryKeyToId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+			List<string> orderedCategoryKeys = new List<string>(InventorySnapshot.MaxSupportedCategories);
+			for (int i = 0; i < DefaultElementalCategories.Length; i++) {
+				RegisterCategoryKey(DefaultElementalCategories[i], categoryKeyToId, orderedCategoryKeys);
+			}
+			foreach (string targetKey in settings.TargetComboCategories) {
+				RegisterCategoryKey(targetKey, categoryKeyToId, orderedCategoryKeys);
 			}
 
-			if (inventory.fixedEngravingsOnServer != null) {
-				for (int i = 0; i < inventory.fixedEngravingsOnServer.Count; i++) {
-					FixedEngraving engraving = inventory.fixedEngravingsOnServer[i];
-					if (engraving == null) {
-						continue;
-					}
-					AccumulateFixedDictionary(engraving.fixedLevel, baseSlotLevel, width, height, unlockedSlots);
-					AccumulateFixedDictionary(engraving.fixedDisable, baseSlotDisable, width, height, unlockedSlots);
-					AccumulateFixedDictionary(
-						engraving.fixedIgnoreCriteria,
-						baseSlotIgnoreCriteria,
-						width,
-						height,
-						unlockedSlots
-					);
-					AccumulateFixedDictionary(
-						engraving.fixedMultiplyLevel,
-						baseSlotMultiplyLevel,
-						width,
-						height,
-						unlockedSlots
-					);
-				}
-			}
-
-			for (int i = 0; i < inventory.engravings.Count; i++) {
-				StoneTablet engravedTablet = inventory.engravings[i];
-				if (engravedTablet == null || !engravedTablet.IsApplied) {
+			for (int slotIdx = 0; slotIdx < unlockedSlots; slotIdx++) {
+				sbyte xCoord = (sbyte)(slotIdx % width);
+				sbyte yCoord = (sbyte)(slotIdx / width);
+				NewItemOwnInstance itemInstance = inventory.FindItem(xCoord, yCoord);
+				if (itemInstance == null || itemInstance.Entity == null) {
 					continue;
 				}
-				for (int e = 0; e < engravedTablet.EffectRange.Count; e++) {
-					StoneTablet.AdditionEffectData eff = engravedTablet.EffectRange[e];
-					int slotIdx = CoordToUnlockedSlot(
-						eff.position.x,
-						eff.position.y,
-						width,
-						height,
-						unlockedSlots
-					);
-					if (slotIdx < 0) {
-						continue;
+				if (itemInstance.Entity.categories != null) {
+					for (int c = 0; c < itemInstance.Entity.categories.Count; c++) {
+						RegisterCategoryKey(
+							itemInstance.Entity.categories[c],
+							categoryKeyToId,
+							orderedCategoryKeys
+						);
 					}
-					switch (eff.effectType) {
-						case StoneTablet.EffectType.IncreaseConstLevel: {
-							baseSlotLevel[slotIdx] += eff.levelParam;
-							break;
-						}
-						case StoneTablet.EffectType.Disable: {
-							baseSlotDisable[slotIdx]++;
-							break;
-						}
-						case StoneTablet.EffectType.IgnoreCriteria: {
-							baseSlotIgnoreCriteria[slotIdx]++;
-							break;
-						}
-						case StoneTablet.EffectType.MultiplyConstLevel: {
-							baseSlotMultiplyLevel[slotIdx] += eff.levelParam;
-							break;
-						}
+				}
+				if (itemInstance.Charm is Charm_3Elemental_ByRow elemCharm && elemCharm.lineCategory != null) {
+					for (int c = 0; c < elemCharm.lineCategory.Length; c++) {
+						RegisterCategoryKey(
+							elemCharm.lineCategory[c],
+							categoryKeyToId,
+							orderedCategoryKeys
+						);
 					}
 				}
 			}
+
+			int[] staticCategoryCounts = new int[orderedCategoryKeys.Count];
+			HashSet<int> seenStaticEntityIds = new HashSet<int>();
 
 			List<SlotItemSnapshot> itemSnapshots = new List<SlotItemSnapshot>(unlockedSlots);
 			Dictionary<string, int> symmetryGroupMap = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -140,17 +131,91 @@ namespace SephiriaOptimizer.Snapshot {
 						|| charm is Charm_ReduceMPCost
 						|| charm is Charm_RightSpellCooldownHelper;
 					bool isAttackable = charm is IAttackableCharm attackable && attackable.IsAttackableCharm();
+
 					bool hasDependency = charm is Charm_UpCharmDamage;
 					sbyte depX = charm is Charm_UpCharmDamage upX ? upX.xOffset : (sbyte)0;
 					sbyte depY = charm is Charm_UpCharmDamage upY ? upY.yOffset : (sbyte)0;
+					bool hasDepCond = charm is Charm_UpCharmDamage upCond && upCond.hasDependencyCondition;
+					int depMaxRarity = charm is Charm_UpCharmDamage upRar ? (int)upRar.maxRarity : 1;
+					int[]? needleDmg = charm is Charm_UpCharmDamage upDmg && upDmg.damageBonusByLevel != null
+						? (int[])upDmg.damageBonusByLevel.Clone()
+						: null;
+					int[]? needleDepDmg = charm is Charm_UpCharmDamage upDep
+						&& upDep.dependencyDamageBonusByLevel != null
+						? (int[])upDep.dependencyDamageBonusByLevel.Clone()
+						: null;
+
 					bool isElementalByRow = charm is Charm_3Elemental_ByRow;
+					int[]? rowCategoryIds = null;
+					int[]? rowElementalBonus = null;
+					if (charm is Charm_3Elemental_ByRow rowCharm) {
+						if (rowCharm.lineCategory != null && rowCharm.lineCategory.Length > 0) {
+							rowCategoryIds = new int[rowCharm.lineCategory.Length];
+							for (int r = 0; r < rowCharm.lineCategory.Length; r++) {
+								rowCategoryIds[r] = categoryKeyToId.TryGetValue(rowCharm.lineCategory[r], out int cid)
+									? cid
+									: -1;
+							}
+						}
+						if (rowCharm.addElementalStatByLevel != null) {
+							rowElementalBonus = (int[])rowCharm.addElementalStatByLevel.Clone();
+						}
+					}
+
 					bool isWhitePaper = charm is Charm_WhitePaper;
+					int whitePaperMatch = charm is Charm_WhitePaper wpCharm ? Math.Max(1, wpCharm.match) : 2;
+
+					bool isNearLevelDamage = charm is Charm_NearLevelDamage;
+					bool isCompanionChaos = charm is Charm_CompanionChaos;
+					bool isCompanion = charm is ICompanionCharm;
+					bool isPlanetModule = charm is Charm_PlanetModule;
+					bool isPlanet = charm is Charm_SummonGreenBat
+						|| (entity.categories != null && entity.categories.Contains("PLANET"));
+					bool isNearMagicBullet = charm is Charm_NearMagicBullet;
+					bool isWoodenBox = charm is Charm_WoodenBox;
+					bool isFireIce = charm is Charm_FireIce || charm is Charm_FireIceWeapon;
+
 					string[] categories = entity.categories != null
 						? entity.categories.ToArray()
 						: Array.Empty<string>();
 
+					uint staticCatMask = 0u;
+					bool isDynamicCategoryProvider = isElementalByRow || hasDependency || isWhitePaper;
+					if (!isDynamicCategoryProvider) {
+						bool countStaticCombo = !talentRules.PreventOverlapItemCombo
+							|| seenStaticEntityIds.Add(entity.id);
+						for (int c = 0; c < categories.Length; c++) {
+							if (categoryKeyToId.TryGetValue(categories[c], out int catId)
+								&& catId >= 0
+								&& catId < InventorySnapshot.MaxSupportedCategories) {
+								staticCatMask |= 1u << catId;
+								if (countStaticCombo) {
+									staticCategoryCounts[catId]++;
+								}
+							}
+						}
+					}
+
+					ArtifactPriorityTier defaultPriority = InferDefaultPriorityTier(
+						entity,
+						charm,
+						isDisabledByWeaponOrDual
+					);
+					ArtifactPriorityTier priorityTier = settings.GetPriority(
+						itemInstance.InstanceID,
+						defaultPriority
+					);
+					if (settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID
+						&& priorityTier < ArtifactPriorityTier.Core) {
+						priorityTier = ArtifactPriorityTier.Core;
+					}
+
 					int weight = ComputeArtifactWeight(entity, charm, customEntityWeights);
-					string symmetryKey = $"C:{entity.id}:{baseLevel}:{maxLevel}:{(int)constraintType}";
+					string symmetryKey = $"C:{entity.id}:{baseLevel}:{maxLevel}:"
+						+ $"{(int)constraintType}:{(int)priorityTier}:{staticCatMask}";
+					if (settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID) {
+						symmetryKey += $":NEEDLE_TARGET:{itemInstance.InstanceID}";
+					}
 					int symmetryGroupId = GetOrAssignSymmetryGroup(
 						symmetryGroupMap,
 						symmetryKey,
@@ -182,7 +247,24 @@ namespace SephiriaOptimizer.Snapshot {
 						isWhitePaper,
 						categories,
 						Array.Empty<TabletPlacementRule>(),
-						symmetryGroupId
+						symmetryGroupId,
+						priorityTier,
+						staticCatMask,
+						hasDepCond,
+						depMaxRarity,
+						needleDmg,
+						needleDepDmg,
+						rowCategoryIds,
+						rowElementalBonus,
+						whitePaperMatch,
+						isNearLevelDamage,
+						isCompanionChaos,
+						isCompanion,
+						isPlanetModule,
+						isPlanet,
+						isNearMagicBullet,
+						isWoodenBox,
+						isFireIce
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet tablet = itemInstance.StoneTablet;
@@ -277,6 +359,12 @@ namespace SephiriaOptimizer.Snapshot {
 				}
 			}
 
+			ComboCategoryInfo[] comboCategories = BuildComboCategoryInfos(
+				orderedCategoryKeys,
+				staticCategoryCounts,
+				settings
+			);
+
 			bool isFullHp = avatar != null && Math.Abs(avatar.hp - avatar.MaxHp) < 0.01f;
 
 			return new InventorySnapshot(
@@ -290,7 +378,10 @@ namespace SephiriaOptimizer.Snapshot {
 				pinnedSlots,
 				isFullHp,
 				inventory.globalActiveValue,
-				itemSnapshots.ToArray()
+				itemSnapshots.ToArray(),
+				comboCategories,
+				talentRules,
+				settings.PreferredNeedleTargetInstanceId
 			);
 		}
 
@@ -377,6 +468,236 @@ namespace SephiriaOptimizer.Snapshot {
 			return rules;
 		}
 
+		private static void PopulateBaseSlotModifiers(
+			GridInventory inventory,
+			int width,
+			int height,
+			int unlockedSlots,
+			int[] baseSlotLevel,
+			int[] baseSlotDisable,
+			int[] baseSlotIgnoreCriteria,
+			int[] baseSlotMultiplyLevel
+		) {
+			foreach (KeyValuePair<ItemPosition, int> entry in inventory.dungeonTempLevels) {
+				int slotIdx = CoordToUnlockedSlot(entry.Key.x, entry.Key.y, width, height, unlockedSlots);
+				if (slotIdx >= 0) {
+					baseSlotLevel[slotIdx] += entry.Value;
+				}
+			}
+
+			bool hasServerEngravings = inventory.fixedEngravingsOnServer != null
+				&& inventory.fixedEngravingsOnServer.Count > 0;
+
+			if (hasServerEngravings) {
+				for (int i = 0; i < inventory.fixedEngravingsOnServer!.Count; i++) {
+					FixedEngraving engraving = inventory.fixedEngravingsOnServer[i];
+					if (engraving == null) {
+						continue;
+					}
+					AccumulateFixedDictionary(engraving.fixedLevel, baseSlotLevel, width, height, unlockedSlots);
+					AccumulateFixedDictionary(engraving.fixedDisable, baseSlotDisable, width, height, unlockedSlots);
+					AccumulateFixedDictionary(
+						engraving.fixedIgnoreCriteria,
+						baseSlotIgnoreCriteria,
+						width,
+						height,
+						unlockedSlots
+					);
+					AccumulateFixedDictionary(
+						engraving.fixedMultiplyLevel,
+						baseSlotMultiplyLevel,
+						width,
+						height,
+						unlockedSlots
+					);
+				}
+			}
+
+			for (int i = 0; i < inventory.engravings.Count; i++) {
+				StoneTablet engravedTablet = inventory.engravings[i];
+				if (engravedTablet == null || !engravedTablet.IsApplied) {
+					continue;
+				}
+				for (int e = 0; e < engravedTablet.EffectRange.Count; e++) {
+					StoneTablet.AdditionEffectData eff = engravedTablet.EffectRange[e];
+					int slotIdx = CoordToUnlockedSlot(
+						eff.position.x,
+						eff.position.y,
+						width,
+						height,
+						unlockedSlots
+					);
+					if (slotIdx < 0) {
+						continue;
+					}
+					switch (eff.effectType) {
+						case StoneTablet.EffectType.IncreaseConstLevel: {
+							baseSlotLevel[slotIdx] += eff.levelParam;
+							break;
+						}
+						case StoneTablet.EffectType.Disable: {
+							baseSlotDisable[slotIdx]++;
+							break;
+						}
+						case StoneTablet.EffectType.IgnoreCriteria: {
+							baseSlotIgnoreCriteria[slotIdx]++;
+							break;
+						}
+						case StoneTablet.EffectType.MultiplyConstLevel: {
+							baseSlotMultiplyLevel[slotIdx] += eff.levelParam;
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		private static TalentRuleSnapshot CaptureTalentRules(PlayerAvatar? avatar, GridInventory inventory) {
+			int tabletEngravingCount = inventory.tabletEngravingCount;
+			int uniquePairCount = inventory.uniquePairCount;
+			int unlimitedCombo = avatar != null ? avatar.GetCustomStatUnsafe("UNLIMITEDCOMBO") : 0;
+			int comboBonusDamage = avatar != null ? avatar.GetCustomStatUnsafe("COMBOBONUSDAMAGE") : 0;
+			int arrangementBonus = avatar != null ? avatar.GetCustomStatUnsafe("ARRANGEMENTBONUS") : 0;
+			bool disableDual = avatar != null && avatar.GetCustomStat("DISABLEDUALARTIFACT") >= 1;
+			bool preventOverlap = DungeonManager.Instance != null
+				&& DungeonManager.Instance.hardModeEnvironment.TryGetValue("OVERLAPITEMCOMBO", out int ovVal)
+				&& ovVal > 0;
+
+			int fireStat = avatar != null ? avatar.GetCustomStat(ECustomStat.FireDamage) : 0;
+			int iceStat = avatar != null ? avatar.GetCustomStat(ECustomStat.IceDamage) : 0;
+			int lightningStat = avatar != null ? avatar.GetCustomStat(ECustomStat.LightningDamage) : 0;
+			int physicalStat = avatar != null ? avatar.GetCustomStat(ECustomStat.PhysicalDamage) : 0;
+
+			List<ArrangementPattern> patterns = new List<ArrangementPattern>();
+			if (arrangementBonus > 0) {
+				HashSet<int> ownedEntityIds = new HashSet<int>();
+				foreach (NewItemOwnInstance inst in inventory.inventoryMatrix.Values) {
+					if (inst != null) {
+						ownedEntityIds.Add(inst.EntityID);
+					}
+				}
+				foreach (ArrangementBonusEntity bonusEntity in ItemDatabase.GetAllArrangementBonuses()) {
+					if (bonusEntity == null || !bonusEntity.isEnabled || bonusEntity.arrangements == null) {
+						continue;
+					}
+					if (bonusEntity.arrangements.Length == 0) {
+						continue;
+					}
+					bool allOwned = true;
+					ArrangementOffsetEntry[] entries = new ArrangementOffsetEntry[bonusEntity.arrangements.Length];
+					for (int a = 0; a < bonusEntity.arrangements.Length; a++) {
+						ArrangementBonusEntity.Arrangement arr = bonusEntity.arrangements[a];
+						if (arr == null || arr.item == null || !ownedEntityIds.Contains(arr.item.id)) {
+							allOwned = false;
+							break;
+						}
+						entries[a] = new ArrangementOffsetEntry(arr.offset.x, arr.offset.y, arr.item.id);
+					}
+					if (allOwned) {
+						patterns.Add(new ArrangementPattern(entries));
+					}
+				}
+			}
+
+			return new TalentRuleSnapshot(
+				tabletEngravingCount,
+				uniquePairCount,
+				unlimitedCombo,
+				comboBonusDamage,
+				arrangementBonus,
+				disableDual,
+				preventOverlap,
+				fireStat,
+				iceStat,
+				lightningStat,
+				physicalStat,
+				patterns.ToArray()
+			);
+		}
+
+		private static ComboCategoryInfo[] BuildComboCategoryInfos(
+			List<string> orderedCategoryKeys,
+			int[] staticCategoryCounts,
+			OptimizerUserSettings settings
+		) {
+			ComboCategoryInfo[] result = new ComboCategoryInfo[orderedCategoryKeys.Count];
+			bool hasExplicitTargets = settings.TargetComboCategories.Count > 0;
+
+			for (int i = 0; i < orderedCategoryKeys.Count; i++) {
+				string key = orderedCategoryKeys[i];
+				string displayName = key;
+				int[] breakpoints = new[] { 2, 4, 6, 8 };
+
+				ItemCategoryEntity catEntity = ItemDatabase.FindItemCategory(key);
+				if (catEntity != null) {
+					if (!string.IsNullOrEmpty(catEntity.Name)) {
+						displayName = catEntity.Name;
+					}
+					if (catEntity.comboEffectPrefab != null
+						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffectBase>(out var comboPrefab)
+						&& comboPrefab.addStatByCombo != null
+						&& comboPrefab.addStatByCombo.Length > 0) {
+						breakpoints = new int[comboPrefab.addStatByCombo.Length];
+						for (int b = 0; b < comboPrefab.addStatByCombo.Length; b++) {
+							breakpoints[b] = comboPrefab.addStatByCombo[b].comboCount;
+						}
+						Array.Sort(breakpoints);
+					}
+				}
+
+				int staticCount = staticCategoryCounts[i];
+				bool isUserTarget = hasExplicitTargets
+					? settings.TargetComboCategories.Contains(key)
+					: (staticCount >= 1);
+
+				result[i] = new ComboCategoryInfo(
+					i,
+					key,
+					displayName,
+					staticCount,
+					breakpoints,
+					isUserTarget
+				);
+			}
+
+			return result;
+		}
+
+		private static void RegisterCategoryKey(
+			string? rawKey,
+			Dictionary<string, int> categoryKeyToId,
+			List<string> orderedCategoryKeys
+		) {
+			if (string.IsNullOrWhiteSpace(rawKey)) {
+				return;
+			}
+			string key = rawKey.Trim();
+			if (categoryKeyToId.ContainsKey(key)
+				|| orderedCategoryKeys.Count >= InventorySnapshot.MaxSupportedCategories) {
+				return;
+			}
+			int id = orderedCategoryKeys.Count;
+			categoryKeyToId[key] = id;
+			orderedCategoryKeys.Add(key);
+		}
+
+		private static ArtifactPriorityTier InferDefaultPriorityTier(
+			ItemEntity entity,
+			Charm_Basic? charm,
+			bool isDisabledByWeaponOrDual
+		) {
+			if (isDisabledByWeaponOrDual) {
+				return ArtifactPriorityTier.Sacrifice;
+			}
+			if (charm != null && charm.maxLevel == 0 && !(charm is Charm_WhitePaper)) {
+				return ArtifactPriorityTier.Low;
+			}
+			if (entity.rarity >= EItemRarity.Legend) {
+				return ArtifactPriorityTier.High;
+			}
+			return ArtifactPriorityTier.Normal;
+		}
+
 		private static int ReadEnchantLevel(int instanceId) {
 			if (DungeonManager.Instance == null) {
 				return 0;
@@ -399,15 +720,23 @@ namespace SephiriaOptimizer.Snapshot {
 				return customWeight;
 			}
 			int rarityWeight = entity.rarity switch {
-				EItemRarity.Common => 2,
-				EItemRarity.Uncommon => 3,
-				EItemRarity.Rare => 5,
-				EItemRarity.Legend => 8,
-				EItemRarity.Eternal => 12,
-				_ => 2
+				EItemRarity.Common => 3,
+				EItemRarity.Uncommon => 4,
+				EItemRarity.Rare => 6,
+				EItemRarity.Legend => 9,
+				EItemRarity.Eternal => 13,
+				_ => 3
 			};
-			if (charm != null && charm.isUniqueEffect) {
-				rarityWeight += 2;
+			if (charm != null) {
+				if (charm.isUniqueEffect) {
+					rarityWeight += 2;
+				}
+				if (charm is IAttackableCharm attackable && attackable.IsAttackableCharm()) {
+					rarityWeight += 3;
+				}
+				if (charm is Charm_UpCharmDamage || charm is Charm_NearLevelDamage) {
+					rarityWeight += 3;
+				}
 			}
 			return rarityWeight;
 		}
@@ -486,7 +815,7 @@ namespace SephiriaOptimizer.Snapshot {
 		}
 
 		private static void AccumulateFixedDictionary(
-			Dictionary<ItemPosition, int> source,
+			Dictionary<ItemPosition, int>? source,
 			int[] destination,
 			int width,
 			int height,
