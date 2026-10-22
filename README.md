@@ -4,6 +4,23 @@
 
 ---
 
+## 🚀 일반 유저용 3초 원클릭 자동 설치 (폴더 찾기·빌드 불필요)
+
+별도의 모드 로더(`BepInEx`) 설치나 스팀 폴더 경로를 직접 찾을 필요 없이 아래 방법 중 하나로 즉시 설치할 수 있습니다. (스팀 레지스트리와 모든 드라이브를 자동 탐색해 세피리아 설치 경로를 스스로 찾아 설치하며, 윈도우 외부 DLL 차단 해제까지 자동으로 처리합니다.)
+
+### 방법 1. ZIP 다운로드 후 더블클릭 (가장 추천)
+1. **[👉 SephiriaOptimizer_v2.0.0.zip 바로 다운로드](https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/SephiriaOptimizer_v2.0.0.zip)** 를 클릭해 다운로드하고 압축을 풉니다.
+2. 폴더 안의 **`설치하기_Install.bat`** 파일을 **더블클릭**하면 설치 완료 알림창이 뜹니다!
+   - 모드를 삭제하고 싶을 때는 동봉된 **`제거하기_Uninstall.bat`**만 더블클릭하면 깔끔하게 삭제됩니다.
+
+### 방법 2. 압축 풀기도 귀찮다면 — PowerShell 한 줄 복사·붙여넣기
+윈도우 시작 메뉴에서 **PowerShell**을 열고 아래 한 줄을 복사해 붙여넣은 뒤 엔터(`Enter`)를 누르면 다운로드부터 설치까지 1초 만에 완료됩니다:
+```powershell
+irm https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/install.ps1 | iex
+```
+
+---
+
 ## 주요 기능
 
 ### 1. 세피리아 도메인 맞춤형 비동기 최적화 솔버 (`Task.Run`)
