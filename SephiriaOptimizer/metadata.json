@@ -1,0 +1,7 @@
+{
+	"modName": "SephiriaOptimizer",
+	"modVersion": "1.0.0",
+	"modAuthor": "Antigravity",
+	"dllFile": "SephiriaOptimizer.dll",
+	"entryClass": "SephiriaOptimizer.SephiriaOptimizerMod"
+}
