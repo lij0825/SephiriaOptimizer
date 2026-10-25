@@ -418,6 +418,28 @@ namespace SephiriaOptimizer.Solver {
 						currentSlots[slotA] = itemB;
 						currentSlots[slotB] = itemA;
 
+						int rotItemIdx = -1;
+						int oldRotVal = 0;
+						if ((NextRandomUInt(ref rngState) & 1u) != 0u) {
+							bool canRotA = itemA >= 0
+								&& items[itemA].Kind == SlotItemKind.StoneTablet
+								&& items[itemA].IsRotatable;
+							if (canRotA) {
+								rotItemIdx = itemA;
+							} else if (
+								itemB >= 0
+								&& items[itemB].Kind == SlotItemKind.StoneTablet
+								&& items[itemB].IsRotatable
+							) {
+								rotItemIdx = itemB;
+							}
+							if (rotItemIdx >= 0) {
+								oldRotVal = currentRotations[rotItemIdx];
+								int rotStep = 1 + (int)(NextRandomUInt(ref rngState) % 3u);
+								currentRotations[rotItemIdx] = (oldRotVal + rotStep) & 3;
+							}
+						}
+
 						int candidateScore = ObjectiveEvaluator.Evaluate(snapshot, currentSlots, currentRotations);
 						evaluations++;
 						int scoreDelta = candidateScore - currentScore;
@@ -435,6 +457,9 @@ namespace SephiriaOptimizer.Solver {
 						} else {
 							currentSlots[slotA] = itemA;
 							currentSlots[slotB] = itemB;
+							if (rotItemIdx >= 0) {
+								currentRotations[rotItemIdx] = oldRotVal;
+							}
 							iterationsSinceImprovement++;
 						}
 					}
@@ -512,14 +537,48 @@ namespace SephiriaOptimizer.Solver {
 						bestSlots[sA] = itemB;
 						bestSlots[sB] = itemA;
 
-						int score = ObjectiveEvaluator.Evaluate(snapshot, bestSlots, bestRotations);
-						evaluations++;
-						if (score > bestScore) {
-							bestScore = score;
-							improved = true;
+						bool rotA = itemA >= 0
+							&& items[itemA].Kind == SlotItemKind.StoneTablet
+							&& items[itemA].IsRotatable;
+						bool rotB = itemB >= 0
+							&& items[itemB].Kind == SlotItemKind.StoneTablet
+							&& items[itemB].IsRotatable;
+
+						if (rotA || rotB) {
+							int rotTarget = rotA ? itemA : itemB;
+							int savedRot = bestRotations[rotTarget];
+							int bestSwapRot = savedRot;
+							bool swapImproved = false;
+
+							for (int r = 0; r < 4; r++) {
+								bestRotations[rotTarget] = r;
+								int score = ObjectiveEvaluator.Evaluate(snapshot, bestSlots, bestRotations);
+								evaluations++;
+								if (score > bestScore) {
+									bestScore = score;
+									bestSwapRot = r;
+									swapImproved = true;
+									improved = true;
+								}
+							}
+
+							if (swapImproved) {
+								bestRotations[rotTarget] = bestSwapRot;
+							} else {
+								bestRotations[rotTarget] = savedRot;
+								bestSlots[sA] = itemA;
+								bestSlots[sB] = itemB;
+							}
 						} else {
-							bestSlots[sA] = itemA;
-							bestSlots[sB] = itemB;
+							int score = ObjectiveEvaluator.Evaluate(snapshot, bestSlots, bestRotations);
+							evaluations++;
+							if (score > bestScore) {
+								bestScore = score;
+								improved = true;
+							} else {
+								bestSlots[sA] = itemA;
+								bestSlots[sB] = itemB;
+							}
 						}
 					}
 				}
@@ -542,9 +601,9 @@ namespace SephiriaOptimizer.Solver {
 					maxLvlScore += 18000;
 				}
 				if (item.IsElementalByRowCharm || item.IsWhitePaperCharm || item.IsNearLevelDamageCharm) {
-					maxLvlScore += 4000;
+					maxLvlScore += 5000;
 				}
-				return maxLvlScore;
+				return maxLvlScore + 100;
 			}
 			if (item.Kind == SlotItemKind.StoneTablet) {
 				int bestEffectBonus = 0;

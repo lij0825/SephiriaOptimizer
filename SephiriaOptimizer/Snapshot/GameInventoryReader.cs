@@ -59,6 +59,9 @@ namespace SephiriaOptimizer.Snapshot {
 			for (int i = 0; i < DefaultElementalCategories.Length; i++) {
 				RegisterCategoryKey(DefaultElementalCategories[i], categoryKeyToId, orderedCategoryKeys);
 			}
+			if (!string.IsNullOrEmpty(settings.PreferredChalcedonyCategory)) {
+				RegisterCategoryKey(settings.PreferredChalcedonyCategory, categoryKeyToId, orderedCategoryKeys);
+			}
 			foreach (string targetKey in settings.TargetComboCategories) {
 				RegisterCategoryKey(targetKey, categoryKeyToId, orderedCategoryKeys);
 			}
@@ -366,6 +369,11 @@ namespace SephiriaOptimizer.Snapshot {
 			);
 
 			bool isFullHp = avatar != null && Math.Abs(avatar.hp - avatar.MaxHp) < 0.01f;
+			int preferredChalcedonyId = -1;
+			if (!string.IsNullOrEmpty(settings.PreferredChalcedonyCategory)
+				&& categoryKeyToId.TryGetValue(settings.PreferredChalcedonyCategory, out int chalCatId)) {
+				preferredChalcedonyId = chalCatId;
+			}
 
 			return new InventorySnapshot(
 				width,
@@ -381,7 +389,8 @@ namespace SephiriaOptimizer.Snapshot {
 				itemSnapshots.ToArray(),
 				comboCategories,
 				talentRules,
-				settings.PreferredNeedleTargetInstanceId
+				settings.PreferredNeedleTargetInstanceId,
+				preferredChalcedonyId
 			);
 		}
 
@@ -633,7 +642,13 @@ namespace SephiriaOptimizer.Snapshot {
 					if (!string.IsNullOrEmpty(catEntity.Name)) {
 						displayName = catEntity.Name;
 					}
-					if (catEntity.comboEffectPrefab != null
+					if (catEntity.setStatus != null && catEntity.setStatus.Length > 0) {
+						breakpoints = new int[catEntity.setStatus.Length];
+						for (int b = 0; b < catEntity.setStatus.Length; b++) {
+							breakpoints[b] = catEntity.setStatus[b].itemCount;
+						}
+						Array.Sort(breakpoints);
+					} else if (catEntity.comboEffectPrefab != null
 						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffectBase>(out var comboPrefab)
 						&& comboPrefab.addStatByCombo != null
 						&& comboPrefab.addStatByCombo.Length > 0) {

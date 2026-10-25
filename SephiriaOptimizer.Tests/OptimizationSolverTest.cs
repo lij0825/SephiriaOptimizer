@@ -738,6 +738,245 @@ namespace SephiriaOptimizer.Tests {
 			Assert.Equal(targetSlots, simulatedSlots);
 		}
 
+		[Fact(DisplayName = "석판의 +강화 효과가 인벤토리 밖으로 빠져 낭비되거나 다른 석판이 강화한 칸 위에 석판이 올라가는 배치를 방지한다")]
+		public void Solve_PreventsTabletPositiveEffectFromWastingOutOfBoundsAndPreventsTabletSittingOnBuffedSlot() {
+			int width = 3;
+			int height = 1;
+			int unlockedSlots = 3;
+
+			SlotItemSnapshot maxedArtifact = CreateArtifact(
+				0,
+				601,
+				0,
+				1,
+				1,
+				5,
+				ArtifactConstraintType.None,
+				1
+			);
+
+			TabletPlacementRule[] rightBuffRules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+
+			SlotItemSnapshot tabletA = CreateTablet(1, 602, 1, 0, true, rightBuffRules, 2);
+			SlotItemSnapshot tabletB = CreateTablet(2, 603, 2, 0, true, rightBuffRules, 2);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { maxedArtifact, tabletA, tabletB }
+			);
+
+			int[] badOutAndOverlapLayout = new[] { 0, 1, 2 };
+			int[] badRotations = new[] { 0, 0, 0 };
+			int[] goodConvergingLayout = new[] { 1, 0, 2 };
+			int[] goodRotations = new[] { 0, 0, 2 };
+
+			int badScore = ObjectiveEvaluator.Evaluate(snapshot, badOutAndOverlapLayout, badRotations);
+			int goodScore = ObjectiveEvaluator.Evaluate(snapshot, goodConvergingLayout, goodRotations);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			Assert.True(goodScore > badScore);
+			Assert.Equal(1, result.BestItemToSlotIndex[0]);
+			Assert.Equal(3, result.BestSlotDetails[1].DisplayedLevel);
+		}
+
+		[Fact(DisplayName = "캘세더니 열쇠의 고유 목표 속성과 하얀 종이의 양쪽 아티팩트 콤보 복제 목표를 독립된 영역으로 달성한다")]
+		public void Solve_SeparatesChalcedonyKeyTargetFromWhitePaperComboTarget() {
+			int width = 3;
+			int height = 4;
+			int unlockedSlots = 12;
+
+			uint frostMask = 1u << 4;
+
+			SlotItemSnapshot chalcedonyKey = new SlotItemSnapshot(
+				0,
+				701,
+				701,
+				"캘세더니 열쇠",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				true,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				new[] { 0, 1, 2, 3 },
+				new[] { 2, 4, 6, 8 }
+			);
+
+			SlotItemSnapshot whitePaper = new SlotItemSnapshot(
+				1,
+				702,
+				702,
+				"하얀 종이",
+				SlotItemKind.Artifact,
+				11,
+				0,
+				false,
+				0,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				true,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				null,
+				null,
+				2
+			);
+
+			SlotItemSnapshot frostA = new SlotItemSnapshot(
+				2,
+				703,
+				703,
+				"얼음무구 A",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				0,
+				1,
+				1,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "FROST" },
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				frostMask
+			);
+
+			SlotItemSnapshot frostB = new SlotItemSnapshot(
+				3,
+				704,
+				704,
+				"얼음무구 B",
+				SlotItemKind.Artifact,
+				8,
+				0,
+				false,
+				0,
+				1,
+				1,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "FROST" },
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				frostMask
+			);
+
+			ComboCategoryInfo[] comboInfos = new[] {
+				new ComboCategoryInfo(0, "EMBER", "잉걸불", 0, new[] { 2, 4 }, false),
+				new ComboCategoryInfo(1, "GLACIER", "빙하", 0, new[] { 2, 4 }, false),
+				new ComboCategoryInfo(2, "MAGITECH", "마법공학", 0, new[] { 2, 4 }, false),
+				new ComboCategoryInfo(3, "STURDY", "견고", 1, new[] { 2, 4 }, false),
+				new ComboCategoryInfo(4, "FROST", "얼음무구", 2, new[] { 3, 6 }, true)
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { chalcedonyKey, whitePaper, frostA, frostB },
+				comboInfos,
+				TalentRuleSnapshot.Default,
+				-1,
+				3
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int keySlot = result.BestItemToSlotIndex[0];
+			int paperSlot = result.BestItemToSlotIndex[1];
+			int frostASlot = result.BestItemToSlotIndex[2];
+			int frostBSlot = result.BestItemToSlotIndex[3];
+
+			int keyRow = keySlot / width;
+			int paperRow = paperSlot / width;
+			int paperCol = paperSlot % width;
+
+			Assert.Equal(3, keyRow);
+			Assert.Equal(1, paperCol);
+			Assert.Equal(paperRow, frostASlot / width);
+			Assert.Equal(paperRow, frostBSlot / width);
+			Assert.Equal(frostMask, result.BestSlotDetails[paperSlot].DynamicCategoryMask);
+		}
+
 		private static InventorySnapshot CreateSimpleSnapshot(
 			int width,
 			int height,

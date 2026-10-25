@@ -117,6 +117,8 @@ namespace SephiriaOptimizer.Models {
 		public Dictionary<int, ArtifactPriorityTier> InstancePriorities { get; } =
 			new Dictionary<int, ArtifactPriorityTier>();
 
+		public string PreferredChalcedonyCategory { get; set; } = string.Empty;
+
 		public HashSet<string> TargetComboCategories { get; } =
 			new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -148,6 +150,15 @@ namespace SephiriaOptimizer.Models {
 			}
 		}
 
+		public void ToggleChalcedonyCategory(string categoryKey) {
+			if (string.IsNullOrEmpty(categoryKey)
+				|| string.Equals(PreferredChalcedonyCategory, categoryKey, StringComparison.OrdinalIgnoreCase)) {
+				PreferredChalcedonyCategory = string.Empty;
+			} else {
+				PreferredChalcedonyCategory = categoryKey;
+			}
+		}
+
 		public bool ToggleTargetCombo(string categoryKey) {
 			if (string.IsNullOrEmpty(categoryKey)) {
 				return false;
@@ -162,6 +173,9 @@ namespace SephiriaOptimizer.Models {
 		public int ComputeSettingsHash() {
 			int hash = 23;
 			hash = (hash * 31) + PreferredNeedleTargetInstanceId;
+			if (!string.IsNullOrEmpty(PreferredChalcedonyCategory)) {
+				hash = (hash * 31) + StringComparer.OrdinalIgnoreCase.GetHashCode(PreferredChalcedonyCategory);
+			}
 			foreach (KeyValuePair<int, ArtifactPriorityTier> kvp in InstancePriorities) {
 				hash = (hash * 31) + kvp.Key;
 				hash = (hash * 31) + (int)kvp.Value;

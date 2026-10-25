@@ -22,6 +22,7 @@ namespace SephiriaOptimizer.Models {
 		public ComboCategoryInfo[] ComboCategories { get; }
 		public TalentRuleSnapshot TalentRules { get; }
 		public int PreferredNeedleTargetInstanceId { get; }
+		public int PreferredChalcedonyCategoryId { get; }
 
 		public InventorySnapshot(
 			int width,
@@ -37,7 +38,8 @@ namespace SephiriaOptimizer.Models {
 			SlotItemSnapshot[] items,
 			ComboCategoryInfo[]? comboCategories = null,
 			TalentRuleSnapshot? talentRules = null,
-			int preferredNeedleTargetInstanceId = -1
+			int preferredNeedleTargetInstanceId = -1,
+			int preferredChalcedonyCategoryId = -1
 		) {
 			Width = Math.Max(1, width);
 			Height = Math.Max(1, height);
@@ -65,6 +67,7 @@ namespace SephiriaOptimizer.Models {
 			ComboCategories = comboCategories ?? Array.Empty<ComboCategoryInfo>();
 			TalentRules = talentRules ?? TalentRuleSnapshot.Default;
 			PreferredNeedleTargetInstanceId = preferredNeedleTargetInstanceId;
+			PreferredChalcedonyCategoryId = preferredChalcedonyCategoryId;
 
 			InitialSlotToItemIndex = new int[UnlockedSlots];
 			Array.Fill(InitialSlotToItemIndex, -1);

@@ -10,23 +10,34 @@ using UnityEngine;
 
 namespace SephiriaOptimizer.UI {
 	public sealed class SephiriaOptimizerController : MonoBehaviour {
-		private static readonly (string Id, string KorName)[] CommonComboTags = new[] {
+		private static readonly (string Id, string KorName)[] ChalcedonyComboTags = new[] {
+			("STURDY", "견고"),
 			("EMBER", "잉걸불"),
 			("GLACIER", "빙하"),
-			("MAGITECH", "마도공학"),
-			("STURDY", "견고함"),
-			("WINDSONG", "바람노래"),
-			("PLAGUE", "역병"),
+			("MAGITECH", "마법공학")
+		};
+
+		private static readonly (string Id, string KorName)[] WhitePaperComboTags = new[] {
+			("EMBER", "잉걸불"),
+			("FROST", "얼음무구"),
+			("GLACIER", "빙하"),
+			("MAGITECH", "마법공학"),
 			("SHADOW", "그림자"),
-			("ARCANE", "비전"),
 			("GUARDIAN", "수호"),
-			("PRECISION", "정밀"),
-			("LIGHTNING", "번개"),
-			("LAKE", "호수"),
-			("COMPANION", "동료"),
+			("WINDSONG", "바람노래"),
+			("MYSTIC", "신비"),
 			("PLANET", "행성"),
-			("DRUNKEN", "만취"),
-			("CURSE", "저주")
+			("COMPANION", "동료"),
+			("PRECISION", "정밀"),
+			("DARKCLOUD", "먹구름"),
+			("STURDY", "견고"),
+			("LAKE", "호수"),
+			("FLAMESWORD", "태양검"),
+			("ACADEMY", "아카데미"),
+			("CURSE", "저주"),
+			("SAVVY", "교섭"),
+			("ELEMENTAL", "원소"),
+			("ALCHEMY", "연금술")
 		};
 
 		private readonly HashSet<int> pinnedSlotIndices = new HashSet<int>();
@@ -104,7 +115,7 @@ namespace SephiriaOptimizer.UI {
 				isConfigPanelOpen = !isConfigPanelOpen;
 				SetStatusBanner(
 					isConfigPanelOpen
-						? "아티팩트 우선순위 / 목표 콤보 / 금빛침 설정 창이 열렸습니다."
+						? "캘세더니 열쇠 / 하얀 종이 / 금빛침 / 강화 우선순위 설정 창이 열렸습니다."
 						: "설정 창이 닫혔습니다."
 				);
 			}
@@ -363,13 +374,14 @@ namespace SephiriaOptimizer.UI {
 				SetStatusBanner(
 					isPinModeEnabled
 						? "Pin 모드 ON: 슬롯 우클릭 시 위치 고정 (OFF일 땐 우클릭으로 아티팩트 우선순위 변경)"
-						: "Pin 모드 OFF: 아티팩트 슬롯 우클릭 시 강화 우선순위(★/▲/●/▼/✕)가 순환됩니다."
+						: "Pin 모드 OFF: 아티팩트 슬롯 우클릭 시 강화 우선순위(최상/높음/보통/낮음/최하)가 순환됩니다."
 				);
 			}
 
 			if (GUI.Button(new Rect(panelX + 633f, btnY, 115f, btnH), "설정/고정 초기화", buttonStyle!)) {
 				pinnedSlotIndices.Clear();
 				userSettings.InstancePriorities.Clear();
+				userSettings.PreferredChalcedonyCategory = string.Empty;
 				userSettings.TargetComboCategories.Clear();
 				userSettings.PreferredNeedleTargetInstanceId = -1;
 				lastObservedStateHash = 0;
@@ -384,8 +396,8 @@ namespace SephiriaOptimizer.UI {
 		}
 
 		private void DrawConfigPanel(InventorySnapshot snapshot) {
-			float width = 520f;
-			float height = Mathf.Min(560f, Screen.height - 130f);
+			float width = 530f;
+			float height = Mathf.Min(600f, Screen.height - 125f);
 			float panelX = 16f;
 			float panelY = 112f;
 
@@ -407,21 +419,53 @@ namespace SephiriaOptimizer.UI {
 				}
 			}
 
-			float contentHeight = 250f + (artifactCount * 32f);
+			float contentHeight = 340f + (artifactCount * 32f);
 			Rect contentRect = new Rect(0f, 0f, width - 36f, Mathf.Max(viewRect.height, contentHeight));
 			configScrollPos = GUI.BeginScrollView(viewRect, configScrollPos, contentRect);
 
 			float curY = 4f;
 			GUI.Label(
 				new Rect(4f, curY, contentRect.width - 8f, 20f),
-				"1. 목표 콤보(#태그) 선택 — 캘세더니 열쇠 행 배치 & 하얀 종이 태그 복제 유도",
+				"1. 캘세더니 열쇠 목표 콤보 선택 (배치 행에 따라 견고/잉걸불/빙하/마법공학 중 택1)",
+				subHeaderStyle!
+			);
+			curY += 22f;
+
+			bool isAutoChalcedony = string.IsNullOrEmpty(userSettings.PreferredChalcedonyCategory);
+			GUIStyle autoChalStyle = isAutoChalcedony ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(4f, curY, 108f, 24f), "자동 (최적 행)", autoChalStyle)) {
+				userSettings.PreferredChalcedonyCategory = string.Empty;
+				lastObservedStateHash = 0;
+			}
+
+			float chalX = 116f;
+			for (int i = 0; i < ChalcedonyComboTags.Length; i++) {
+				(string chalId, string chalName) = ChalcedonyComboTags[i];
+				bool isSelected = string.Equals(
+					userSettings.PreferredChalcedonyCategory,
+					chalId,
+					StringComparison.OrdinalIgnoreCase
+				);
+				GUIStyle style = isSelected ? selectedButtonStyle! : buttonStyle!;
+				string prefix = isSelected ? "★" : "#";
+				if (GUI.Button(new Rect(chalX, curY, 88f, 24f), $"{prefix}{chalName}", style)) {
+					userSettings.ToggleChalcedonyCategory(chalId);
+					lastObservedStateHash = 0;
+				}
+				chalX += 92f;
+			}
+			curY += 32f;
+
+			GUI.Label(
+				new Rect(4f, curY, contentRect.width - 8f, 20f),
+				"2. 하얀 종이 & 세트 목표 콤보 선택 (양쪽 동일 태그 아티팩트 사이 배치 유도 — 20종)",
 				subHeaderStyle!
 			);
 			curY += 22f;
 
 			bool hasManualCombos = userSettings.TargetComboCategories.Count > 0;
 			GUIStyle autoComboStyle = !hasManualCombos ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(4f, curY, 150f, 24f), "자동 (활성 콤보 기반)", autoComboStyle)) {
+			if (GUI.Button(new Rect(4f, curY, 165f, 24f), "자동 (활성 콤보 기반)", autoComboStyle)) {
 				userSettings.TargetComboCategories.Clear();
 				lastObservedStateHash = 0;
 			}
@@ -430,8 +474,8 @@ namespace SephiriaOptimizer.UI {
 			int col = 0;
 			float tagBtnW = 114f;
 			float tagBtnH = 24f;
-			for (int i = 0; i < CommonComboTags.Length; i++) {
-				(string tagId, string korName) = CommonComboTags[i];
+			for (int i = 0; i < WhitePaperComboTags.Length; i++) {
+				(string tagId, string korName) = WhitePaperComboTags[i];
 				bool isSelected = userSettings.TargetComboCategories.Contains(tagId);
 				GUIStyle style = isSelected ? selectedButtonStyle! : buttonStyle!;
 				string prefix = isSelected ? "★" : "#";
@@ -453,7 +497,7 @@ namespace SephiriaOptimizer.UI {
 			curY += 6f;
 			GUI.Label(
 				new Rect(4f, curY, contentRect.width - 8f, 20f),
-				"2. 북향의 금빛침 강화 대상 선택 — 지정한 공격형 아티팩트 아래(오프셋 역방향)에 침 배치",
+				"3. 북향의 금빛침 강화 대상 선택 — 지정한 공격형 아티팩트 아래(오프셋 역방향)에 침 배치",
 				subHeaderStyle!
 			);
 			curY += 22f;
@@ -495,7 +539,7 @@ namespace SephiriaOptimizer.UI {
 
 			GUI.Label(
 				new Rect(4f, curY, contentRect.width - 8f, 20f),
-				"3. 아티팩트별 강화 우선순위 (우클릭으로도 변경 가능 / ✕희생은 석판 -레벨 흡수용 토템)",
+				"4. 아티팩트 강화 우선순위 [최상 / 높음 / 보통 / 낮음 / 최하] (우클릭으로도 순환 가능)",
 				subHeaderStyle!
 			);
 			curY += 24f;
@@ -525,11 +569,11 @@ namespace SephiriaOptimizer.UI {
 			float y
 		) {
 			(ArtifactPriorityTier Tier, string Label, float Width)[] tiers = new[] {
-				(ArtifactPriorityTier.Core, "★최우선", 56f),
-				(ArtifactPriorityTier.High, "▲높음", 48f),
-				(ArtifactPriorityTier.Normal, "●보통", 48f),
-				(ArtifactPriorityTier.Low, "▼토템", 48f),
-				(ArtifactPriorityTier.Sacrifice, "✕희생", 48f)
+				(ArtifactPriorityTier.Core, "최상", 48f),
+				(ArtifactPriorityTier.High, "높음", 48f),
+				(ArtifactPriorityTier.Normal, "보통", 48f),
+				(ArtifactPriorityTier.Low, "낮음", 48f),
+				(ArtifactPriorityTier.Sacrifice, "최하", 48f)
 			};
 
 			float x = startX;
@@ -540,7 +584,7 @@ namespace SephiriaOptimizer.UI {
 					userSettings.InstancePriorities[instanceId] = tier;
 					lastObservedStateHash = 0;
 				}
-				x += w + 3f;
+				x += w + 4f;
 			}
 		}
 
@@ -586,7 +630,7 @@ namespace SephiriaOptimizer.UI {
 							ArtifactPriorityTier nextTier = userSettings.GetPriority(clickedArt.InstanceId);
 							lastObservedStateHash = 0;
 							SetStatusBanner(
-								$"[{clickedArt.DisplayName}] 강화 우선순위 변경 → {GetPriorityShortLabel(nextTier)}"
+								$"[{clickedArt.DisplayName}] 강화 우선순위 변경 → [{GetPriorityShortLabel(nextTier)}]"
 							);
 							Event.current.Use();
 						}
@@ -676,7 +720,7 @@ namespace SephiriaOptimizer.UI {
 		}
 
 		private void DrawPriorityBadge(Rect slotRect, ArtifactPriorityTier tier) {
-			Rect tagRect = new Rect(slotRect.xMax - 42f, slotRect.y + 18f, 40f, 15f);
+			Rect tagRect = new Rect(slotRect.xMax - 34f, slotRect.y + 18f, 32f, 15f);
 			Color color = tier switch {
 				ArtifactPriorityTier.Core => new Color(0.85f, 0.55f, 0.05f, 0.92f),
 				ArtifactPriorityTier.High => new Color(0.15f, 0.55f, 0.75f, 0.92f),
@@ -716,7 +760,7 @@ namespace SephiriaOptimizer.UI {
 
 			if (!detail.IsEnabled) {
 				if (placedItem.PriorityTier == ArtifactPriorityTier.Sacrifice) {
-					label = "희생(콤보유지)";
+					label = "최하(콤보유지)";
 					bgColor = new Color(0.42f, 0.22f, 0.48f, 0.92f);
 				} else if (detail.IsDeactivatedByNegativeLevel) {
 					label = $"{detail.DisplayedLevel} (비활성 경고)";
@@ -763,12 +807,12 @@ namespace SephiriaOptimizer.UI {
 
 		private static string GetPriorityShortLabel(ArtifactPriorityTier tier) {
 			return tier switch {
-				ArtifactPriorityTier.Core => "★최우선",
-				ArtifactPriorityTier.High => "▲높음",
-				ArtifactPriorityTier.Normal => "●보통",
-				ArtifactPriorityTier.Low => "▼토템",
-				ArtifactPriorityTier.Sacrifice => "✕희생",
-				_ => "●보통"
+				ArtifactPriorityTier.Core => "최상",
+				ArtifactPriorityTier.High => "높음",
+				ArtifactPriorityTier.Normal => "보통",
+				ArtifactPriorityTier.Low => "낮음",
+				ArtifactPriorityTier.Sacrifice => "최하",
+				_ => "보통"
 			};
 		}
 
