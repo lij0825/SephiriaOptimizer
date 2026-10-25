@@ -1,6 +1,7 @@
 using System;
 using SephiriaOptimizer.Execution;
 using SephiriaOptimizer.Models;
+using SephiriaOptimizer.Snapshot;
 using SephiriaOptimizer.Solver;
 using Xunit;
 
@@ -975,6 +976,388 @@ namespace SephiriaOptimizer.Tests {
 			Assert.Equal(paperRow, frostASlot / width);
 			Assert.Equal(paperRow, frostBSlot / width);
 			Assert.Equal(frostMask, result.BestSlotDetails[paperSlot].DynamicCategoryMask);
+		}
+
+		[Fact(DisplayName = "빈 슬롯이나 최하 등급 아티팩트 슬롯에 양수 버프와 음수 디버프가 중첩되어 최종 레벨이 0 이하일 때도 양수 버프 낭비 페널티가 부과된다")]
+		public void Evaluate_PenalizesWastedPositiveBuffEvenWhenCancelledByNegativeDebuffOnEmptyOrSacrificeSlot() {
+			int width = 3;
+			int height = 1;
+			int unlockedSlots = 3;
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			TabletPlacementRule[] leftMinus3Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				-1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				-3
+			);
+
+			SlotItemSnapshot tabletPlus2 = CreateTablet(0, 801, 0, 0, false, rightPlus2Rules, 1);
+			SlotItemSnapshot tabletMinus3 = CreateTablet(1, 802, 2, 0, false, leftMinus3Rules, 2);
+			SlotItemSnapshot sacrificeArtifact = new SlotItemSnapshot(
+				2,
+				803,
+				803,
+				"최하 콤보 토템",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				0,
+				2,
+				1,
+				1,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Sacrifice
+			);
+
+			InventorySnapshot emptyOverlapSnapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { tabletPlus2, tabletMinus3 }
+			);
+			int[] emptyOverlapLayout = new[] { 0, -1, 1 };
+			int[] twoRots = new[] { 0, 0 };
+			int emptyOverlapScore = ObjectiveEvaluator.Evaluate(
+				emptyOverlapSnapshot,
+				emptyOverlapLayout,
+				twoRots
+			);
+
+			InventorySnapshot sacrificeOverlapSnapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { tabletPlus2, tabletMinus3, sacrificeArtifact }
+			);
+			int[] sacrificeOverlapLayout = new[] { 0, 2, 1 };
+			int[] threeRots = new[] { 0, 0, 0 };
+			int sacrificeOverlapScore = ObjectiveEvaluator.Evaluate(
+				sacrificeOverlapSnapshot,
+				sacrificeOverlapLayout,
+				threeRots
+			);
+
+			Assert.Equal(-160, emptyOverlapScore);
+			Assert.True(sacrificeOverlapScore < 0);
+		}
+
+		[Fact(DisplayName = "배율 석판이 음수 디버프 슬롯이나 0레벨 슬롯에 적용될 때 양수 버프 버퍼를 오염시키지 않고 배율 낭비 페널티를 정확히 계산한다")]
+		public void Evaluate_HandlesMultiplyTabletOnNegativeAndZeroSlotsWithoutPositiveBufferContamination() {
+			int width = 3;
+			int height = 1;
+			int unlockedSlots = 3;
+
+			TabletPlacementRule[] rightMinus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				-2
+			);
+			TabletPlacementRule[] leftMul2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				-1,
+				0,
+				TabletEffectType.MultiplyConstLevel,
+				2
+			);
+
+			SlotItemSnapshot debuffTablet = CreateTablet(0, 811, 0, 0, false, rightMinus2Rules, 1);
+			SlotItemSnapshot mulTablet = CreateTablet(1, 812, 2, 0, false, leftMul2Rules, 2);
+
+			InventorySnapshot wastedMulSnapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { mulTablet }
+			);
+			int wastedMulScore = ObjectiveEvaluator.Evaluate(
+				wastedMulSnapshot,
+				new[] { -1, -1, 0 },
+				new[] { 0 }
+			);
+
+			InventorySnapshot negativeMulSnapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { debuffTablet, mulTablet }
+			);
+			int negativeMulScore = ObjectiveEvaluator.Evaluate(
+				negativeMulSnapshot,
+				new[] { 0, -1, 1 },
+				new[] { 0, 0 }
+			);
+
+			Assert.Equal(-90, wastedMulScore);
+			Assert.Equal(140, negativeMulScore);
+		}
+
+		[Fact(DisplayName = "비활성화된 동적 태그 아티팩트의 시너지를 차단하고 북향의 금빛침 상호 순환 참조를 비트마스크로 즉시 종료한다")]
+		public void Evaluate_BlocksDisabledDynamicTagArtifactsAndDetectsGoldenNeedleMutualCycleInConstantTime() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			uint emberMask = 1u << 0;
+
+			SlotItemSnapshot needleTop = new SlotItemSnapshot(
+				0,
+				821,
+				821,
+				"상단 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				2,
+				2,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				true,
+				0,
+				1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Normal,
+				0u,
+				true,
+				1,
+				new[] { 30, 50, 80 },
+				new[] { 30, 50, 80 }
+			);
+
+			SlotItemSnapshot needleBottom = new SlotItemSnapshot(
+				1,
+				822,
+				822,
+				"하단 금빛침",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				0,
+				2,
+				2,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				true,
+				1,
+				new[] { 30, 50, 80 },
+				new[] { 30, 50, 80 }
+			);
+
+			SlotItemSnapshot disabledWhitePaper = new SlotItemSnapshot(
+				2,
+				823,
+				823,
+				"비활성 하얀 종이",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				-1,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				true,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				null,
+				null,
+				2
+			);
+
+			SlotItemSnapshot emberRight = new SlotItemSnapshot(
+				3,
+				824,
+				824,
+				"잉걸불 반지",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				0,
+				1,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				4,
+				ArtifactPriorityTier.Normal,
+				emberMask
+			);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { needleTop, needleBottom, disabledWhitePaper, emberRight }
+			);
+
+			int[] layout = new[] { 0, 2, 3, 1, -1, -1 };
+			int[] rots = new[] { 0, 0, 0, 0 };
+			SlotEvaluationDetail[] details = ObjectiveEvaluator.EvaluateDetailed(snapshot, layout, rots);
+
+			Assert.Equal(0u, details[0].DynamicCategoryMask);
+			Assert.Equal(0u, details[3].DynamicCategoryMask);
+			Assert.False(details[1].IsEnabled);
+			Assert.Equal(0u, details[1].DynamicCategoryMask);
+		}
+
+		[Fact(DisplayName = "비직사각형 해금 슬롯에서 석판의 Placed 위치 조건이 인게임 유효 높이와 정확히 일치한다")]
+		public void BuildTabletPlacementRules_MatchesInGameEffectiveHeightForNonRectangularUnlockedSlots() {
+			int width = 6;
+			int height = 2;
+			int unlockedSlots = 15;
+
+			TabletPlacementRule[] bottomRules = GameInventoryReader.BuildTabletPlacementRules(
+				"Placed(BOTTOM)",
+				"0, -1: 2",
+				width,
+				height,
+				unlockedSlots
+			);
+
+			TabletPlacementRule[] innerRules = GameInventoryReader.BuildTabletPlacementRules(
+				"Placed(INNER)",
+				"1, 0: 1",
+				width,
+				height,
+				unlockedSlots
+			);
+
+			Assert.Empty(bottomRules[6 * 4].Effects);
+			Assert.Single(bottomRules[12 * 4].Effects);
+			Assert.Equal(6, bottomRules[12 * 4].Effects[0].TargetSlotIndex);
+
+			Assert.Empty(innerRules[6 * 4].Effects);
+			Assert.Single(innerRules[7 * 4].Effects);
+			Assert.Empty(innerRules[8 * 4].Effects);
+			Assert.Empty(innerRules[13 * 4].Effects);
+		}
+
+		[Fact(DisplayName = "동일한 SymmetryGroupId를 가진 아이템이나 빈 슬롯 간의 불필요한 스왑을 Identity Matching으로 제거한다")]
+		public void BuildExecutionPlan_EliminatesRedundantSwapsBetweenIdenticalSymmetryGroupItems() {
+			int width = 4;
+			int height = 1;
+			int unlockedSlots = 4;
+
+			SlotItemSnapshot artA1 = CreateArtifact(0, 901, 0, 0, 2, 3, ArtifactConstraintType.None, 10);
+			SlotItemSnapshot artA2 = CreateArtifact(1, 902, 1, 0, 2, 3, ArtifactConstraintType.None, 10);
+
+			TabletPlacementRule[] dummyRules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+			SlotItemSnapshot tabB1 = CreateTablet(2, 903, 2, 1, true, dummyRules, 20);
+			SlotItemSnapshot tabB2 = CreateTablet(3, 904, 3, 1, true, dummyRules, 20);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { artA1, artA2, tabB1, tabB2 }
+			);
+
+			int[] currentSlots = new[] { 0, 1, 2, 3 };
+			int[] targetSlots = new[] { 1, 0, 3, 2 };
+			int[] currentRots = new[] { 0, 0, 1, 1 };
+			int[] targetRots = new[] { 0, 0, 1, 1 };
+
+			ExecutionPlan plan = CycleDecomposition.BuildExecutionPlan(
+				snapshot,
+				currentSlots,
+				targetSlots,
+				currentRots,
+				targetRots
+			);
+
+			Assert.Empty(plan.SwapSteps);
+			Assert.Empty(plan.RotateSteps);
+			Assert.Equal(0, plan.TotalOperations);
 		}
 
 		private static InventorySnapshot CreateSimpleSnapshot(

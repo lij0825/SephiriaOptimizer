@@ -12,6 +12,7 @@ namespace SephiriaOptimizer.Solver {
 		public const int NeutralizedDisableBonus = 60;
 		public const int WastedPositiveOutOfBoundsPenalty = 280;
 		public const int WastedPositiveOnEmptySlotPenalty = 80;
+		public const int WastedMultiplierPenalty = 90;
 		public const int TabletOnBuffedSlotPenalty = 340;
 		public const int IgnoreConstraintSynergyBonus = 95;
 		public const int ConnectedCharmSynergyBonus = 85;
@@ -37,13 +38,14 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			Span<int> levelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> tabletDeltaBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> disableBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> ignoreBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> mulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> positiveBuffBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> negativePenaltyBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> effectiveLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
-			Span<byte> enabledBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> isActiveBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<uint> categoryMaskBuf = stackalloc uint[InventorySnapshot.MaxSupportedSlots];
 
 			for (int s = 0; s < unlockedSlots; s++) {
@@ -53,13 +55,14 @@ namespace SephiriaOptimizer.Solver {
 				int baseMul = snapshot.BaseSlotMultiplyLevel[s];
 
 				levelBuf[s] = baseLvl;
+				tabletDeltaBuf[s] = baseLvl;
 				disableBuf[s] = baseDis;
 				ignoreBuf[s] = baseIgn;
 				mulBuf[s] = baseMul;
-				positiveBuffBuf[s] = Math.Max(0, baseLvl) + baseIgn + (baseMul > 1 ? baseMul : 0);
+				positiveBuffBuf[s] = Math.Max(0, baseLvl) + baseIgn;
 				negativePenaltyBuf[s] = Math.Max(0, -baseLvl) + (baseDis * 2);
 				effectiveLevelBuf[s] = 0;
-				enabledBuf[s] = 0;
+				isActiveBuf[s] = 0;
 				categoryMaskBuf[s] = 0u;
 			}
 
@@ -93,6 +96,7 @@ namespace SephiriaOptimizer.Solver {
 							case TabletEffectType.IncreaseConstLevel: {
 								if (targetSlot >= 0 && targetSlot < unlockedSlots) {
 									levelBuf[targetSlot] += eff.LevelParam;
+									tabletDeltaBuf[targetSlot] += eff.LevelParam;
 									if (eff.LevelParam > 0) {
 										positiveBuffBuf[targetSlot] += eff.LevelParam;
 									} else if (eff.LevelParam < 0) {
@@ -128,9 +132,6 @@ namespace SephiriaOptimizer.Solver {
 							case TabletEffectType.MultiplyConstLevel: {
 								if (targetSlot >= 0 && targetSlot < unlockedSlots) {
 									mulBuf[targetSlot] += eff.LevelParam;
-									if (eff.LevelParam > 1) {
-										positiveBuffBuf[targetSlot] += eff.LevelParam;
-									}
 								} else if (eff.LevelParam > 1) {
 									tabletPlacementScore -= eff.LevelParam * 220;
 								}
@@ -146,7 +147,15 @@ namespace SephiriaOptimizer.Solver {
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				if (mulBuf[s] != 0) {
+					int extraDelta = tabletDeltaBuf[s] * (mulBuf[s] - 1);
 					levelBuf[s] *= mulBuf[s];
+					if (extraDelta > 0) {
+						positiveBuffBuf[s] += extraDelta;
+					} else if (extraDelta < 0) {
+						negativePenaltyBuf[s] += -extraDelta;
+					} else if (mulBuf[s] > 1) {
+						tabletPlacementScore -= (mulBuf[s] - 1) * WastedMultiplierPenalty;
+					}
 				}
 			}
 
@@ -159,8 +168,9 @@ namespace SephiriaOptimizer.Solver {
 				int negPen = negativePenaltyBuf[s];
 
 				if (itemIdx < 0) {
-					if (posBuff > 0 && levelBuf[s] > 0) {
-						totalScore -= levelBuf[s] * WastedPositiveOnEmptySlotPenalty;
+					if (posBuff > 0) {
+						int wastedPositive = Math.Max(levelBuf[s], posBuff);
+						totalScore -= wastedPositive * WastedPositiveOnEmptySlotPenalty;
 					} else if (posBuff == 0 && negPen > 0) {
 						totalScore += negPen * NeutralizedNegativeLevelBonus;
 					}
@@ -182,10 +192,13 @@ namespace SephiriaOptimizer.Solver {
 
 				bool absorbsPenalty = item.PriorityTier == ArtifactPriorityTier.Sacrifice
 					|| item.IsDisabledByWeaponOrDual;
-				if (absorbsPenalty && posBuff == 0 && negPen > 0) {
-					totalScore += negPen * NeutralizedNegativeLevelBonus;
-				} else if (absorbsPenalty && posBuff > 0) {
-					totalScore -= posBuff * WastedPositiveOnEmptySlotPenalty;
+				if (absorbsPenalty) {
+					if (posBuff > 0) {
+						int wastedPositive = Math.Max(levelBuf[s], posBuff);
+						totalScore -= wastedPositive * WastedPositiveOnEmptySlotPenalty;
+					} else if (negPen > 0) {
+						totalScore += negPen * NeutralizedNegativeLevelBonus;
+					}
 				}
 
 				int displayedLevel = levelBuf[s];
@@ -199,6 +212,7 @@ namespace SephiriaOptimizer.Solver {
 					|| !criteriaSatisfied;
 
 				if (isDisabled) {
+					categoryMaskBuf[s] = 0u;
 					if (item.PriorityTier != ArtifactPriorityTier.Sacrifice && !item.IsDisabledByWeaponOrDual) {
 						int priorityWeight = GetPriorityScaledWeight(item);
 						int penalty = DeactivationBasePenalty * priorityWeight;
@@ -210,7 +224,7 @@ namespace SephiriaOptimizer.Solver {
 					continue;
 				}
 
-				enabledBuf[s] = 1;
+				isActiveBuf[s] = 1;
 				int effectiveLevel = Math.Min(item.MaxLevel, Math.Max(0, displayedLevel));
 				effectiveLevelBuf[s] = effectiveLevel;
 
@@ -252,7 +266,7 @@ namespace SephiriaOptimizer.Solver {
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
-				if (itemIdx < 0) {
+				if (itemIdx < 0 || isActiveBuf[s] == 0) {
 					continue;
 				}
 				SlotItemSnapshot item = items[itemIdx];
@@ -274,11 +288,9 @@ namespace SephiriaOptimizer.Solver {
 							}
 						}
 
-						if (enabledBuf[s] != 0) {
-							int elemBonus = item.GetRowElementalBonus(effectiveLevelBuf[s]);
-							int statAffinity = GetElementalCategoryAffinity(snapshot, assignedCatId);
-							totalScore += elemBonus * (25 + statAffinity);
-						}
+						int elemBonus = item.GetRowElementalBonus(effectiveLevelBuf[s]);
+						int statAffinity = GetElementalCategoryAffinity(snapshot, assignedCatId);
+						totalScore += elemBonus * (25 + statAffinity);
 					}
 				}
 			}
@@ -290,7 +302,11 @@ namespace SephiriaOptimizer.Solver {
 				}
 				SlotItemSnapshot item = items[itemIdx];
 				if (item.Kind == SlotItemKind.Artifact && item.HasDependencyTarget) {
-					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, s);
+					if (isActiveBuf[s] == 0) {
+						totalScore -= WastedNeedlePenalty;
+						continue;
+					}
+					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, isActiveBuf, s);
 					if (rootSlot >= 0) {
 						int rootItemIdx = slotToItemIndex[rootSlot];
 						SlotItemSnapshot rootItem = items[rootItemIdx];
@@ -298,19 +314,17 @@ namespace SephiriaOptimizer.Solver {
 						categoryMaskBuf[s] |= rootCategories;
 						AccumulateMaskIntoComboCounts(rootCategories, dynamicComboBonusCounts);
 
-						if (enabledBuf[s] != 0 && enabledBuf[rootSlot] != 0) {
-							int needleLevel = effectiveLevelBuf[s];
-							int rootLevel = effectiveLevelBuf[rootSlot];
-							int ampPercent = item.GetNeedleBonusPercent(needleLevel, rootItem.RarityTier);
-							int rootWeight = GetPriorityScaledWeight(rootItem);
-							int rootPower = rootWeight * (2 + rootLevel);
-							if (snapshot.PreferredNeedleTargetInstanceId == rootItem.InstanceId) {
-								rootPower = (rootPower * 5) / 2;
-							} else if (rootItem.PriorityTier == ArtifactPriorityTier.Core) {
-								rootPower = (rootPower * 9) / 5;
-							}
-							totalScore += ampPercent * rootPower;
+						int needleLevel = effectiveLevelBuf[s];
+						int rootLevel = effectiveLevelBuf[rootSlot];
+						int ampPercent = item.GetNeedleBonusPercent(needleLevel, rootItem.RarityTier);
+						int rootWeight = GetPriorityScaledWeight(rootItem);
+						int rootPower = rootWeight * (2 + rootLevel);
+						if (snapshot.PreferredNeedleTargetInstanceId == rootItem.InstanceId) {
+							rootPower = (rootPower * 5) / 2;
+						} else if (rootItem.PriorityTier == ArtifactPriorityTier.Core) {
+							rootPower = (rootPower * 9) / 5;
 						}
+						totalScore += ampPercent * rootPower;
 					} else {
 						totalScore -= WastedNeedlePenalty;
 					}
@@ -324,13 +338,17 @@ namespace SephiriaOptimizer.Solver {
 				}
 				SlotItemSnapshot item = items[itemIdx];
 				if (item.Kind == SlotItemKind.Artifact && item.IsWhitePaperCharm) {
+					if (isActiveBuf[s] == 0) {
+						totalScore -= WhitePaperWastedPenalty;
+						continue;
+					}
 					SlotCoord coord = snapshot.Slots[s];
 					int leftSlot = snapshot.CoordToSlotIndex(coord.X - 1, coord.Y);
 					int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
-					uint leftMask = (leftSlot >= 0 && slotToItemIndex[leftSlot] >= 0)
+					uint leftMask = (leftSlot >= 0 && slotToItemIndex[leftSlot] >= 0 && isActiveBuf[leftSlot] != 0)
 						? categoryMaskBuf[leftSlot]
 						: 0u;
-					uint rightMask = (rightSlot >= 0 && slotToItemIndex[rightSlot] >= 0)
+					uint rightMask = (rightSlot >= 0 && slotToItemIndex[rightSlot] >= 0 && isActiveBuf[rightSlot] != 0)
 						? categoryMaskBuf[rightSlot]
 						: 0u;
 
@@ -351,7 +369,7 @@ namespace SephiriaOptimizer.Solver {
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
-				if (itemIdx < 0 || enabledBuf[s] == 0) {
+				if (itemIdx < 0 || isActiveBuf[s] == 0) {
 					continue;
 				}
 				SlotItemSnapshot item = items[itemIdx];
@@ -359,7 +377,7 @@ namespace SephiriaOptimizer.Solver {
 					int posSynergy = EvaluatePositionSynergy(
 						snapshot,
 						slotToItemIndex,
-						enabledBuf,
+						isActiveBuf,
 						effectiveLevelBuf,
 						s,
 						item
@@ -390,6 +408,7 @@ namespace SephiriaOptimizer.Solver {
 			Span<int> disableBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> ignoreBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> mulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> isActiveBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<uint> categoryMaskBuf = stackalloc uint[InventorySnapshot.MaxSupportedSlots];
 			Span<int> connectedTargetBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> engravingReadyBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
@@ -399,6 +418,7 @@ namespace SephiriaOptimizer.Solver {
 				disableBuf[s] = snapshot.BaseSlotDisable[s];
 				ignoreBuf[s] = snapshot.BaseSlotIgnoreCriteria[s];
 				mulBuf[s] = snapshot.BaseSlotMultiplyLevel[s];
+				isActiveBuf[s] = 0;
 				categoryMaskBuf[s] = 0u;
 				connectedTargetBuf[s] = -1;
 				engravingReadyBuf[s] = 0;
@@ -460,9 +480,29 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
+			bool globalEnabled = snapshot.GlobalActiveValue > 0;
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
-				if (itemIdx >= 0 && items[itemIdx].Kind == SlotItemKind.Artifact) {
+				if (itemIdx < 0 || items[itemIdx].Kind != SlotItemKind.Artifact) {
+					continue;
+				}
+				SlotItemSnapshot item = items[itemIdx];
+				int displayedLevel = levelBuf[s];
+				bool naturalCriteriaMet = IsArtifactConstraintMet(snapshot, slotToItemIndex, s, item.ConstraintType);
+				bool criteriaIgnored = ignoreBuf[s] > 0;
+				bool negDeactivated = displayedLevel <= -1;
+				bool disableDeactivated = disableBuf[s] > 0 || item.IsDisabledByWeaponOrDual || !globalEnabled;
+				bool criteriaDeactivated = !criteriaIgnored && !naturalCriteriaMet;
+				if (!negDeactivated && !disableDeactivated && !criteriaDeactivated) {
+					isActiveBuf[s] = 1;
+				} else {
+					categoryMaskBuf[s] = 0u;
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				int itemIdx = slotToItemIndex[s];
+				if (itemIdx >= 0 && isActiveBuf[s] != 0 && items[itemIdx].Kind == SlotItemKind.Artifact) {
 					SlotItemSnapshot item = items[itemIdx];
 					if (item.IsElementalByRowCharm && item.RowCategoryIds.Length > 0) {
 						int rowIdx = snapshot.Slots[s].Y % item.RowCategoryIds.Length;
@@ -477,10 +517,11 @@ namespace SephiriaOptimizer.Solver {
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
 				bool hasDep = itemIdx >= 0
+					&& isActiveBuf[s] != 0
 					&& items[itemIdx].Kind == SlotItemKind.Artifact
 					&& items[itemIdx].HasDependencyTarget;
 				if (hasDep) {
-					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, s);
+					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, isActiveBuf, s);
 					connectedTargetBuf[s] = rootSlot;
 					if (rootSlot >= 0) {
 						categoryMaskBuf[s] |= categoryMaskBuf[rootSlot];
@@ -490,14 +531,18 @@ namespace SephiriaOptimizer.Solver {
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
-				if (itemIdx >= 0 && items[itemIdx].Kind == SlotItemKind.Artifact && items[itemIdx].IsWhitePaperCharm) {
+				bool isActiveWhitePaper = itemIdx >= 0
+					&& isActiveBuf[s] != 0
+					&& items[itemIdx].Kind == SlotItemKind.Artifact
+					&& items[itemIdx].IsWhitePaperCharm;
+				if (isActiveWhitePaper) {
 					SlotCoord coord = snapshot.Slots[s];
 					int leftSlot = snapshot.CoordToSlotIndex(coord.X - 1, coord.Y);
 					int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
-					uint leftMask = (leftSlot >= 0 && slotToItemIndex[leftSlot] >= 0)
+					uint leftMask = (leftSlot >= 0 && slotToItemIndex[leftSlot] >= 0 && isActiveBuf[leftSlot] != 0)
 						? categoryMaskBuf[leftSlot]
 						: 0u;
-					uint rightMask = (rightSlot >= 0 && slotToItemIndex[rightSlot] >= 0)
+					uint rightMask = (rightSlot >= 0 && slotToItemIndex[rightSlot] >= 0 && isActiveBuf[rightSlot] != 0)
 						? categoryMaskBuf[rightSlot]
 						: 0u;
 					uint copiedMask = items[itemIdx].WhitePaperMatchCount <= 1
@@ -507,7 +552,6 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			bool globalEnabled = snapshot.GlobalActiveValue > 0;
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
 				if (itemIdx < 0 || items[itemIdx].Kind != SlotItemKind.Artifact) {
@@ -536,7 +580,7 @@ namespace SephiriaOptimizer.Solver {
 				bool negDeactivated = displayedLevel <= -1;
 				bool disableDeactivated = disableBuf[s] > 0 || item.IsDisabledByWeaponOrDual || !globalEnabled;
 				bool criteriaDeactivated = !criteriaIgnored && !naturalCriteriaMet;
-				bool isEnabled = !negDeactivated && !disableDeactivated && !criteriaDeactivated;
+				bool isEnabled = isActiveBuf[s] != 0;
 				int effectiveLevel = isEnabled ? Math.Min(item.MaxLevel, Math.Max(0, displayedLevel)) : 0;
 
 				details[s] = new SlotEvaluationDetail(
@@ -564,7 +608,11 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			int startNeedleSlot
 		) {
+			if ((uint)startNeedleSlot >= (uint)snapshot.UnlockedSlots) {
+				return -1;
+			}
 			SlotItemSnapshot[] items = snapshot.Items;
+			ulong visitedMask = 1UL << startNeedleSlot;
 			int cursorSlot = startNeedleSlot;
 			int hopCount = 0;
 
@@ -584,9 +632,61 @@ namespace SephiriaOptimizer.Solver {
 					coord.X + cursorItem.DependencyOffsetX,
 					coord.Y + cursorItem.DependencyOffsetY
 				);
-				if (nextSlot < 0 || nextSlot == startNeedleSlot || nextSlot == cursorSlot) {
+				if (nextSlot < 0 || nextSlot >= InventorySnapshot.MaxSupportedSlots) {
 					return -1;
 				}
+				ulong nextBit = 1UL << nextSlot;
+				if ((visitedMask & nextBit) != 0UL) {
+					return -1;
+				}
+				visitedMask |= nextBit;
+				cursorSlot = nextSlot;
+			}
+
+			return -1;
+		}
+
+		public static int ResolveNeedleRootSlot(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<byte> isActiveBuf,
+			int startNeedleSlot
+		) {
+			if ((uint)startNeedleSlot >= (uint)snapshot.UnlockedSlots || isActiveBuf[startNeedleSlot] == 0) {
+				return -1;
+			}
+			SlotItemSnapshot[] items = snapshot.Items;
+			ulong visitedMask = 1UL << startNeedleSlot;
+			int cursorSlot = startNeedleSlot;
+			int hopCount = 0;
+
+			while (hopCount < 8) {
+				hopCount++;
+				if (isActiveBuf[cursorSlot] == 0) {
+					return -1;
+				}
+				int cursorItemIdx = slotToItemIndex[cursorSlot];
+				if (cursorItemIdx < 0) {
+					return -1;
+				}
+				SlotItemSnapshot cursorItem = items[cursorItemIdx];
+				if (!cursorItem.HasDependencyTarget) {
+					return cursorItem.IsAttackableCharm ? cursorSlot : -1;
+				}
+
+				SlotCoord coord = snapshot.Slots[cursorSlot];
+				int nextSlot = snapshot.CoordToSlotIndex(
+					coord.X + cursorItem.DependencyOffsetX,
+					coord.Y + cursorItem.DependencyOffsetY
+				);
+				if (nextSlot < 0 || nextSlot >= InventorySnapshot.MaxSupportedSlots) {
+					return -1;
+				}
+				ulong nextBit = 1UL << nextSlot;
+				if ((visitedMask & nextBit) != 0UL) {
+					return -1;
+				}
+				visitedMask |= nextBit;
 				cursorSlot = nextSlot;
 			}
 
@@ -630,7 +730,9 @@ namespace SephiriaOptimizer.Solver {
 						break;
 					}
 					case TabletConditionType.Placed: {
-						if (origin.X == cond.TargetX && origin.Y == cond.TargetY) {
+						if (cond.TargetSlotIndex == tabletSlotIndex
+							&& origin.X == cond.TargetX
+							&& origin.Y == cond.TargetY) {
 							anyPlacedMatched = true;
 						}
 						break;
@@ -668,22 +770,22 @@ namespace SephiriaOptimizer.Solver {
 					return coord.Y == 0;
 				}
 				case ArtifactConstraintType.BottomInInventory: {
-					return slotIndex >= storage - 6;
+					return slotIndex >= storage - width;
 				}
 				case ArtifactConstraintType.SideEnd: {
-					return coord.X == 0 || coord.X == 5;
+					return coord.X == 0 || coord.X == width - 1;
 				}
 				case ArtifactConstraintType.Outlined: {
 					return coord.X <= 0
 						|| coord.Y <= 0
 						|| coord.X >= width - 1
-						|| slotIndex >= storage - 6;
+						|| slotIndex >= storage - width;
 				}
 				case ArtifactConstraintType.Inside: {
 					return coord.X > 0
 						&& coord.Y > 0
 						&& coord.X < width - 1
-						&& (slotIndex + 7) <= (storage - 1);
+						&& (slotIndex + width + 1) <= (storage - 1);
 				}
 				case ArtifactConstraintType.BothSideCharm: {
 					if (coord.X <= 0 || coord.X >= width - 1) {

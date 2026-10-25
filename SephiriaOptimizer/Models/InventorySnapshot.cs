@@ -42,8 +42,9 @@ namespace SephiriaOptimizer.Models {
 			int preferredChalcedonyCategoryId = -1
 		) {
 			Width = Math.Max(1, width);
-			Height = Math.Max(1, height);
 			UnlockedSlots = Math.Clamp(unlockedSlots, 0, MaxSupportedSlots);
+			int minRequiredHeight = UnlockedSlots > 0 ? ((UnlockedSlots + Width - 1) / Width) : 1;
+			Height = Math.Max(Math.Max(1, height), minRequiredHeight);
 			Slots = new SlotCoord[UnlockedSlots];
 			for (int i = 0; i < UnlockedSlots; i++) {
 				sbyte xCoord = (sbyte)(i % Width);

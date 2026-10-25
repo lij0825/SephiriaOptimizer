@@ -57,6 +57,7 @@ namespace SephiriaOptimizer.UI {
 		private bool isPinModeEnabled;
 		private bool isConfigPanelOpen;
 		private bool isAutoSwapRunning;
+		private bool executeInSingleFrame = true;
 		private int lastObservedStateHash;
 		private int selectedSlotIndex = -1;
 		private Vector2 configScrollPos;
@@ -198,11 +199,13 @@ namespace SephiriaOptimizer.UI {
 				return;
 			}
 
-			bool isLockedOrCombat = avatar.IsInBattle
-				|| avatar.IsDead
-				|| !inventory.IsPickable
-				|| statusPanel.InventoryMode != UI_CharacterStatusPanel.EInventoryMode.None;
+			if (IsCursorHoldingAnyItem()) {
+				isOverlayEnabled = true;
+				SetStatusBanner("마우스로 집고 있는 아이템을 먼저 내려놓으세요 → 가이드 표시");
+				return;
+			}
 
+			bool isLockedOrCombat = !CanContinueAutoSwap(statusPanel, avatar, inventory);
 			if (isLockedOrCombat) {
 				isOverlayEnabled = true;
 				string reason = avatar.IsInBattle
@@ -237,52 +240,111 @@ namespace SephiriaOptimizer.UI {
 				return;
 			}
 
-			StartCoroutine(ExecuteAutoSwapCoroutine(statusPanel, avatar, inventory, plan, result));
+			StartCoroutine(ExecuteAutoSwapCoroutine(statusPanel, avatar, inventory, snapshot, plan, result));
 		}
 
 		private IEnumerator ExecuteAutoSwapCoroutine(
 			UI_CharacterStatusPanel statusPanel,
 			PlayerAvatar avatar,
 			GridInventory inventory,
+			InventorySnapshot snapshot,
 			ExecutionPlan plan,
 			OptimizationResult targetResult
 		) {
 			isAutoSwapRunning = true;
 			SetStatusBanner($"자동 정렬 실행 중... (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)");
 
+			int unlockedSlots = snapshot.UnlockedSlots;
+			int[] expectedSlotInstanceIds = new int[unlockedSlots];
+			for (int s = 0; s < unlockedSlots; s++) {
+				int itemIdx = snapshot.InitialSlotToItemIndex[s];
+				expectedSlotInstanceIds[s] = itemIdx >= 0 && itemIdx < snapshot.Items.Length
+					? snapshot.Items[itemIdx].InstanceId
+					: -1;
+			}
+
+			bool canVerifyPerStep = inventory.isServer || !executeInSingleFrame;
+			if (!canVerifyPerStep && !VerifyAllSlotInstanceIds(inventory, snapshot, expectedSlotInstanceIds)) {
+				AbortAutoSwap("슬롯 아이템 상태 변경 감지됨 → 자동 스왑 중단 및 상태 재스캔");
+				yield break;
+			}
+
 			IReadOnlyList<SlotSwapStep> swaps = plan.SwapSteps;
 			for (int i = 0; i < swaps.Count; i++) {
 				if (!CanContinueAutoSwap(statusPanel, avatar, inventory)) {
-					isOverlayEnabled = true;
-					isAutoSwapRunning = false;
-					SetStatusBanner("이동 제한 감지됨 → 자동 스왑 중단 및 오버레이 가이드로 폴백");
+					AbortAutoSwap("이동 제한 감지됨 → 자동 스왑 중단 및 오버레이 가이드로 폴백");
+					yield break;
+				}
+				if (IsCursorHoldingAnyItem()) {
+					AbortAutoSwap("커서 아이템 파지(HoldItem) 감지됨 → 자동 스왑 즉시 중단 및 상태 재스캔");
 					yield break;
 				}
 
 				SlotSwapStep step = swaps[i];
+				if (canVerifyPerStep) {
+					bool firstValid = VerifySlotInstanceId(
+						inventory,
+						step.FirstCoord,
+						expectedSlotInstanceIds[step.FirstSlotIndex]
+					);
+					bool secondValid = VerifySlotInstanceId(
+						inventory,
+						step.SecondCoord,
+						expectedSlotInstanceIds[step.SecondSlotIndex]
+					);
+					if (!firstValid || !secondValid) {
+						AbortAutoSwap("슬롯 InstanceID 불일치 감지됨 → 자동 스왑 즉시 중단 및 상태 재스캔");
+						yield break;
+					}
+				}
+
 				inventory.Swap(
 					step.FirstCoord.X,
 					step.FirstCoord.Y,
 					step.SecondCoord.X,
 					step.SecondCoord.Y
 				);
-				yield return null;
+
+				int tempInstanceId = expectedSlotInstanceIds[step.FirstSlotIndex];
+				expectedSlotInstanceIds[step.FirstSlotIndex] = expectedSlotInstanceIds[step.SecondSlotIndex];
+				expectedSlotInstanceIds[step.SecondSlotIndex] = tempInstanceId;
+
+				if (!executeInSingleFrame) {
+					yield return null;
+				}
 			}
 
 			IReadOnlyList<TabletRotateStep> rotates = plan.RotateSteps;
 			for (int i = 0; i < rotates.Count; i++) {
 				TabletRotateStep rotStep = rotates[i];
 				ItemPosition pos = new ItemPosition(rotStep.TargetCoord.X, rotStep.TargetCoord.Y);
+				int expectedId = rotStep.TargetSlotIndex >= 0 && rotStep.TargetSlotIndex < unlockedSlots
+					? expectedSlotInstanceIds[rotStep.TargetSlotIndex]
+					: -1;
+
 				for (int click = 0; click < rotStep.ClickCount; click++) {
 					if (!CanContinueAutoSwap(statusPanel, avatar, inventory)) {
-						isOverlayEnabled = true;
-						isAutoSwapRunning = false;
-						SetStatusBanner("이동 제한 감지됨 → 자동 회전 중단 및 오버레이 가이드로 폴백");
+						AbortAutoSwap("이동 제한 감지됨 → 자동 회전 중단 및 오버레이 가이드로 폴백");
 						yield break;
 					}
+					if (IsCursorHoldingAnyItem()) {
+						AbortAutoSwap("커서 아이템 파지(HoldItem) 감지됨 → 자동 회전 즉시 중단 및 상태 재스캔");
+						yield break;
+					}
+					if (canVerifyPerStep && !VerifySlotInstanceId(inventory, rotStep.TargetCoord, expectedId)) {
+						AbortAutoSwap("석판 슬롯 InstanceID 불일치 감지됨 → 자동 회전 즉시 중단 및 상태 재스캔");
+						yield break;
+					}
+
 					inventory.DoClickAction(pos);
-					yield return null;
+					if (!executeInSingleFrame) {
+						yield return null;
+					}
 				}
+			}
+
+			if (executeInSingleFrame) {
+				yield return null;
 			}
 
 			isAutoSwapRunning = false;
@@ -291,6 +353,13 @@ namespace SephiriaOptimizer.UI {
 				$"자동 재배치 완료! ({targetResult.InitialScore}점 → {targetResult.BestScore}점, "
 				+ $"{plan.SwapSteps.Count}회 스왑)"
 			);
+		}
+
+		private void AbortAutoSwap(string reason) {
+			isOverlayEnabled = true;
+			isAutoSwapRunning = false;
+			lastObservedStateHash = 0;
+			SetStatusBanner(reason);
 		}
 
 		private static bool CanContinueAutoSwap(
@@ -307,12 +376,50 @@ namespace SephiriaOptimizer.UI {
 			return statusPanel.InventoryMode == UI_CharacterStatusPanel.EInventoryMode.None;
 		}
 
+		private static bool IsCursorHoldingAnyItem() {
+			if (UIManager.Instance == null) {
+				return false;
+			}
+			UI_NewItemPicker picker = UIManager.Instance.GetElement<UI_NewItemPicker>();
+			if (picker != null && picker.CurrentAny) {
+				return true;
+			}
+			UI_NewItemPicker_Controller controllerPicker = UIManager.Instance.GetElement<UI_NewItemPicker_Controller>();
+			if (controllerPicker != null && controllerPicker.CurrentAny) {
+				return true;
+			}
+			return false;
+		}
+
+		private static bool VerifySlotInstanceId(
+			GridInventory inventory,
+			SlotCoord coord,
+			int expectedInstanceId
+		) {
+			NewItemOwnInstance? actualItem = inventory.FindItem(coord.X, coord.Y);
+			int actualInstanceId = actualItem != null ? actualItem.InstanceID : -1;
+			return actualInstanceId == expectedInstanceId;
+		}
+
+		private static bool VerifyAllSlotInstanceIds(
+			GridInventory inventory,
+			InventorySnapshot snapshot,
+			int[] expectedSlotInstanceIds
+		) {
+			for (int s = 0; s < snapshot.UnlockedSlots; s++) {
+				if (!VerifySlotInstanceId(inventory, snapshot.Slots[s], expectedSlotInstanceIds[s])) {
+					return false;
+				}
+			}
+			return true;
+		}
+
 		private void DrawTopSummaryControlPanel(
 			UI_CharacterStatusPanel statusPanel,
 			PlayerAvatar avatar,
 			GridInventory inventory
 		) {
-			float panelWidth = 760f;
+			float panelWidth = 840f;
 			float panelHeight = 92f;
 			float panelX = Mathf.Max(16f, (Screen.width - panelWidth) * 0.5f);
 			float panelY = 12f;
@@ -333,7 +440,7 @@ namespace SephiriaOptimizer.UI {
 			int optScore = latestResult != null ? latestResult.BestScore : 0;
 			int delta = optScore - curScore;
 			string solverMode = latestResult != null
-				? (latestResult.UsedExactBranchAndBound ? "Exact B&B" : "SA+Reheat")
+				? (latestResult.UsedExactBranchAndBound ? "Exact B&B" : "LAHC+SA")
 				: "대기 중";
 			string timeStr = latestResult != null
 				? $"{latestResult.ElapsedMilliseconds:F1}ms"
@@ -349,18 +456,18 @@ namespace SephiriaOptimizer.UI {
 			float btnY = panelY + 32f;
 			float btnH = 26f;
 
-			if (GUI.Button(new Rect(panelX + 12f, btnY, 138f, btnH), "[F5] 자동 정렬 실행", buttonStyle!)) {
+			if (GUI.Button(new Rect(panelX + 12f, btnY, 132f, btnH), "[F5] 자동 정렬 실행", buttonStyle!)) {
 				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
 			}
 
 			string f6Label = isOverlayEnabled ? "[F6] 가이드: 켜짐" : "[F6] 가이드: 꺼짐";
-			if (GUI.Button(new Rect(panelX + 156f, btnY, 132f, btnH), f6Label, buttonStyle!)) {
+			if (GUI.Button(new Rect(panelX + 148f, btnY, 126f, btnH), f6Label, buttonStyle!)) {
 				isOverlayEnabled = !isOverlayEnabled;
 			}
 
 			string f7Label = isConfigPanelOpen ? "[F7] 빌드 설정: 닫기" : "[F7] 우선순위·콤보 설정";
 			GUIStyle cfgBtnStyle = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 294f, btnY, 162f, btnH), f7Label, cfgBtnStyle)) {
+			if (GUI.Button(new Rect(panelX + 278f, btnY, 154f, btnH), f7Label, cfgBtnStyle)) {
 				isConfigPanelOpen = !isConfigPanelOpen;
 			}
 
@@ -369,7 +476,7 @@ namespace SephiriaOptimizer.UI {
 				? $"[Pin: ON] (고정:{pinCount})"
 				: $"[Pin: OFF] (고정:{pinCount})";
 			GUIStyle currentPinStyle = isPinModeEnabled ? activePinButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 462f, btnY, 165f, btnH), pinLabel, currentPinStyle)) {
+			if (GUI.Button(new Rect(panelX + 436f, btnY, 152f, btnH), pinLabel, currentPinStyle)) {
 				isPinModeEnabled = !isPinModeEnabled;
 				SetStatusBanner(
 					isPinModeEnabled
@@ -378,7 +485,18 @@ namespace SephiriaOptimizer.UI {
 				);
 			}
 
-			if (GUI.Button(new Rect(panelX + 633f, btnY, 115f, btnH), "설정/고정 초기화", buttonStyle!)) {
+			string speedLabel = executeInSingleFrame ? "속도: 즉시(1프레임)" : "속도: 순차(프레임별)";
+			GUIStyle speedStyle = executeInSingleFrame ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(panelX + 592f, btnY, 124f, btnH), speedLabel, speedStyle)) {
+				executeInSingleFrame = !executeInSingleFrame;
+				SetStatusBanner(
+					executeInSingleFrame
+						? "고속 실행 모드 ON: 단일 프레임 내 일괄 스왑 및 회전 처리"
+						: "순차 실행 모드 ON: 프레임별 스텝 실행 및 실시간 무결성 검증"
+				);
+			}
+
+			if (GUI.Button(new Rect(panelX + 720f, btnY, 108f, btnH), "설정/고정 초기화", buttonStyle!)) {
 				pinnedSlotIndices.Clear();
 				userSettings.InstancePriorities.Clear();
 				userSettings.PreferredChalcedonyCategory = string.Empty;
