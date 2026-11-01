@@ -3,17 +3,20 @@
 ![.NET Standard 2.1](https://img.shields.io/badge/.NET%20Standard-2.1-512BD4?logo=dotnet)
 ![Unity Mod](https://img.shields.io/badge/Sephiria-Native%20AddOnLoader-000000?logo=unity)
 ![Zero Allocation](https://img.shields.io/badge/Evaluator%20GC-0%20Bytes%20(stackalloc)-success)
-![Unit Tests](https://img.shields.io/badge/Tests-16%2F16%20Passing-brightgreen)
+![Unit Tests](https://img.shields.io/badge/Tests-21%2F21%20Passing-brightgreen)
 
 스팀 게임 **세피리아(Sephiria)** 인벤토리의 아티팩트(`Charm_Basic`), 석판(`StoneTablet`), 동적 세트 콤보(`#태그`), 그리고 재능(`Passive`/`StatusInstance`) 규칙을 실시간 분석하여 **1) 단축키 한 번으로 최적 슬롯 자동 재배치(`[F5]`)**, **2) 슬롯 위 시각적 오버레이 가이드(`[F6]`)**, **3) 빌드 맞춤 아티팩트 우선순위·목표 콤보·금빛침 타겟 설정(`[F7]`)**을 제공하는 하이브리드 인게임 모드입니다.
 
 > **별도의 모드 로더(`BepInEx` 등) 설치가 전혀 필요 없습니다!**
-> 세피리아 게임 엔진에 내장된 공식 `AddOnLoader`(`HorayModBase`) 시스템을 그대로 사용하므로, 파일만 넣거나 원클릭 설치기를 실행하면 즉시 동작합니다.
+> 세피리아 게임 엔진에 내장된 공식 `AddOnLoader`(`HorayModBase`) 시스템을 그대로 사용하므로, 통합 자동 설치기 하나만 실행하면 즉시 적용됩니다.
 
 ---
 
 ## 목차 (Table of Contents)
-1. [🚀 일반 유저용 3초 원클릭 자동 설치 & 제거 가이드](#-일반-유저용-3초-원클릭-자동-설치--제거-가이드)
+1. [🚀 통합 원클릭 설치·업데이트·제거 가이드 (단일 표준 방식)](#-통합-원클릭-설치업데이트제거-가이드-단일-표준-방식)
+   - [1.1 설치 및 업데이트 절차](#11-설치-및-업데이트-절차)
+   - [1.2 모드 제거 절차](#12-모드-제거-절차)
+   - [1.3 자동 처리되는 환경 대응 명세](#13-자동-처리되는-환경-대응-명세)
 2. [🎮 인게임 단축키 및 UI 완벽 가이드](#-인게임-단축키-및-ui-완벽-가이드)
 3. [🧠 세피리아 도메인 최적화 규칙 상세 명세](#-세피리아-도메인-최적화-규칙-상세-명세)
    - [3.1 유효 레벨 클램핑, 배율 정합성 및 비활성화·버프 낭비 방어](#31-유효-레벨-클램핑-배율-정합성-및-비활성화버프-낭비-방어)
@@ -24,41 +27,47 @@
    - [3.6 재능(Talent) 및 특수 빌드 규칙 자동 대응 (생존 20 석판 각인 등)](#36-재능talent-및-특수-빌드-규칙-자동-대응-생존-20-석판-각인-등)
    - [3.7 위치·이웃 의존 특수 아티팩트 시너지](#37-위치이웃-의존-특수-아티팩트-시너지)
 4. [⚡ 4단계 파이프라인 알고리즘 및 아키텍처 설계](#-4단계-파이프라인-알고리즘-및-아키텍처-설계)
-5. [❓ 자주 묻는 질문 (FAQ & 문제 해결)](#-자주-묻는-질문-faq--문제-해결)
-6. [🛠️ 개발자용 프로젝트 구조 및 빌드·테스트 가이드](#️-개발자용-프로젝트-구조-및-빌드테스트-가이드)
+5. [❓ 자주 묻는 질문 & 환경별 트러블슈팅 (Troubleshooting)](#-자주-묻는-질문--환경별-트러블슈팅-troubleshooting)
+6. [🛠️ 개발자용 프로젝트 구조 및 빌드·배포·테스트 가이드](#️-개발자용-프로젝트-구조-및-빌드배포테스트-가이드)
 
 ---
 
-## 🚀 일반 유저용 3초 원클릭 자동 설치 & 제거 가이드
+## 🚀 통합 원클릭 설치·업데이트·제거 가이드 (단일 표준 방식)
 
-코드를 직접 빌드하거나 스팀 폴더(`steamapps\common\Sephiria`)가 어느 드라이브에 있는지 직접 찾을 필요가 없습니다.
-자동 설치기가 **스팀 레지스트리(`libraryfolders.vdf`)와 PC 내 모든 드라이브(`C:`, `D:`, `E:` 등)를 자동으로 스캔**하여 세피리아 설치 폴더를 찾아내고, 윈도우 외부 DLL 보안 차단 해제(`Unblock-File`)까지 자동으로 마친 뒤 설치를 완료합니다.
+사용자가 여러 설치 방식 사이에서 고민하거나 스팀 폴더(`steamapps/common/Sephiria`)를 직접 찾아다니고 보안 차단을 수동으로 해제할 필요가 없도록, **로컬 릴리즈 패키지 기반 통합 자동 설치기** 단일 표준 방식으로 모든 적용 절차를 통합했습니다.
 
-### 방법 1. ZIP 패키지 다운로드 후 더블클릭 (가장 추천 ⭐)
-1. **[👉 SephiriaOptimizer_v2.0.0.zip 바로 다운로드](https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/SephiriaOptimizer_v2.0.0.zip)** 링크를 클릭해 다운로드한 뒤 압축을 풉니다.
-2. 압축을 푼 폴더 안의 **`설치하기_Install.bat`** 파일을 **더블클릭**합니다.
-3. `"세피리아 최적화 모드(SephiriaOptimizer) 설치가 완료되었습니다!"` 알림창이 뜨면 끝입니다!
-   - **최신 버전 업데이트**: 동봉된 **`온라인_최신버전_자동설치.bat`**을 더블클릭하면 언제든 GitHub의 최신 버전 `.dll`을 자동으로 받아 업데이트합니다.
-   - **모드 삭제**: 동봉된 **`제거하기_Uninstall.bat`**을 더블클릭하면 1초 만에 깔끔하게 제거됩니다.
+### 1.1 설치 및 업데이트 절차
 
-### 방법 2. 파일 다운로드조차 필요 없는 PowerShell 한 줄 설치
-압축 파일을 받고 푸는 과정조차 생략하고 싶다면, 윈도우 시작 메뉴에서 **PowerShell**을 열고 아래 명령어 한 줄을 복사해 붙여넣은 뒤 엔터(`Enter`)를 누르세요:
+1. **[👉 SephiriaOptimizer_v2.0.0.zip 다운로드](https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/SephiriaOptimizer_v2.0.0.zip)** 후, 다운로드한 `.zip` 파일을 **반드시 압축 해제**합니다 (`우클릭 → 모두 압축 풀기`).
+2. 압축을 푼 폴더에서 운영체제에 맞는 설치 런처를 실행합니다(새 버전 업데이트 시에도 동일하게 실행하면 기존 파일을 안전하게 원자적 교체합니다):
+   - **Windows 10 / 11**: **`Install.bat`** 더블클릭
+   - **Linux / SteamOS (Steam Deck) / macOS**: 터미널에서 아래 명령 실행
+     ```bash
+     chmod +x ./install.sh && ./install.sh
+     ```
+3. `"세피리아 최적화 모드(SephiriaOptimizer v2.0.0) 설치가 완료되었습니다!"` 알림이 표시되면 완료입니다. 게임을 실행하고 인벤토리(`I` 또는 `Tab`)를 열면 상단 컨트롤 바가 즉시 활성화됩니다.
 
-```powershell
-irm https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/install.ps1 | iex
-```
-> 실행 즉시 GitHub에서 최신 `SephiriaOptimizer.dll`과 `metadata.json`을 다운로드하여 세피리아 폴더에 자동 설치하고 완료 알림창을 띄웁니다.
+### 1.2 모드 제거 절차
 
-### 방법 3. 수동 설치 (직접 폴더에 넣기)
-직접 파일을 복사하고 싶다면 [`Dist/`](./Dist) 폴더의 `SephiriaOptimizer.dll`과 `metadata.json` 두 파일을 세피리아 설치 경로 아래 `AddOns\SephiriaOptimizer\` 폴더에 넣어주세요:
-```text
-{세피리아 설치 폴더 (예: D:\Steam\steamapps\common\Sephiria)}\
-└── AddOns\
-    └── SephiriaOptimizer\
-        ├── SephiriaOptimizer.dll
-        └── metadata.json
-```
-> ⚠️ **수동 설치 시 주의사항**: 브라우저에서 직접 받은 `.dll` 파일은 윈도우 보안 정책상 차단(Mark of the Web)될 수 있습니다. 수동으로 넣을 경우 `SephiriaOptimizer.dll` **우클릭 → 속성 → 하단 [차단 해제] 체크 → 확인**을 눌러주세요. (위 **방법 1** 또는 **방법 2**를 쓰면 이 과정이 자동으로 처리됩니다.)
+- **Windows 10 / 11**: 압축을 푼 폴더의 **`Uninstall.bat`** 더블클릭
+- **Linux / SteamOS / macOS**:
+  ```bash
+  ./install.sh --uninstall
+  ```
+- 세피리아 내 `AddOns/SephiriaOptimizer` 폴더가 즉시 제거되며, 다른 애드온이 없어 `AddOns` 폴더가 비게 되면 빈 상위 폴더까지 깔끔하게 정리됩니다.
+
+### 1.3 자동 처리되는 환경 대응 명세
+
+통합 설치 엔진(`Dist/install.ps1` + `Install.bat` / `Uninstall.bat` / `install.sh`)과 빌드 파이프라인(`SephiriaOptimizer.csproj`)은 사용자별 환경 차이와 예외 상황을 아래 순서로 자동 방어합니다:
+
+| 구분 | 자동 처리 및 방어 내역 |
+| :--- | :--- |
+| **다중 드라이브 & 스팀 라이브러리 탐색** | `SEPHIRIA_GAME_DIR` 환경 변수 → 이전 실행 시 기억된 캐시(`game_path.txt`) → Windows 레지스트리(`HKCU`/`HKLM`/`WOW6432Node` Steam & `Uninstall`) → 모든 마운트된 드라이브(`C:`~`Z:`, Steam Deck 외장 SD `/run/media/mmcblk0p1`, `/mnt`, `/media`, Linux Flatpak/Snap, macOS `Application Support/Steam`) → `libraryfolders.vdf`(v1/v2 포맷) 및 `appmanifest_*.acf` 커스텀 `installdir`을 순차 스캔하여 설치 드라이브에 관계없이 자동 탐지합니다. |
+| **하위·상위 폴더 오지정 스마트 보정** | 수동 선택이나 CLI 인자(`--game-dir`)로 `Sephiria.exe`, `Sephiria.app`, `Sephiria_Data`, `Managed`, `AddOns`, `steamapps`, `common` 등 하위/상위 경로를 잘못 지정해도 실제 게임 루트를 역추적하여 OS별 정확한 `AddOns` 위치(Windows/Linux: `<GameRoot>/AddOns/SephiriaOptimizer`, macOS: `Sephiria.app/AddOns/SephiriaOptimizer`)에 설치합니다. |
+| **한글·공백·특수문자 및 인코딩 무결성** | Windows 계정명이나 다운로드 폴더(`SephiriaOptimizer_v2.0.0 (1)`, `한글 [스팀] & 게임!` 등)에 한글(유니코드), 공백, 괄호 `( )`, 대괄호 `[ ]`, `&`, `!`가 포함되어도 `DisableDelayedExpansion` + `goto` 배치 런처, `-LiteralPath`/`.NET IO` 직접 호출, UTF-8 VDF 리더 및 런타임 유니코드 디코딩을 통해 PowerShell 5.1(`CP949`)과 PowerShell 7+(`UTF-8`) 모두에서 글자 깨짐·와일드카드 오작동 없이 동작합니다. |
+| **보안 격리 해제 & 원자적 복사** | Windows 외부 DLL 보안 차단(`Mark of the Web` / `:Zone.Identifier` ADS) 및 macOS Gatekeeper 격리 속성(`com.apple.quarantine`)을 자동 제거하고, 읽기 전용(`ReadOnly`) 속성 해제 및 `.tmp` 임시 파일 스테이징·바이트 크기 검증 후 교체하여 손상된 DLL 생성을 원천 방지합니다. |
+| **권한 승격(UAC) & 실행 중 잠금 방어** | `C:\Program Files (x86)` 등 보호된 경로에 쓰기 권한이 없으면 Windows 관리자 권한(UAC) 승격을 자동 요청하며, `Sephiria` 실행 중이거나 `SephiriaOptimizer.dll` 파일 핸들이 잠겨 있으면 덮어쓰기를 차단하고 게임 종료 후 `[재시도 / 취소]`할 수 있도록 안내합니다. |
+| **내장 `AddOnLoader` 사전 검증 & 1회 경로 기억** | `Assembly-CSharp.dll` 내 공식 `AddOnLoader`(`HorayModBase`) 심볼 존재 여부를 검사해 구버전 게임 클라이언트를 사전 감지합니다. 비표준 포터블 설치 환경에서 1회 선택한 폴더는 OS 사용자 설정(`%LOCALAPPDATA%\SephiriaOptimizer\game_path.txt` 또는 `~/.config/SephiriaOptimizer/game_path.txt`)에 저장되어 이후 업데이트·제거·빌드 시 재입력이 필요 없으며, 게임을 다른 드라이브로 옮긴 경우 유효하지 않은 캐시를 자동 폐기하고 재탐색합니다. |
 
 ---
 
@@ -260,59 +269,92 @@ flowchart TD
 
 ---
 
-## ❓ 자주 묻는 질문 (FAQ & 문제 해결)
+## ❓ 자주 묻는 질문 & 환경별 트러블슈팅 (Troubleshooting)
 
 <details>
-<summary><b>Q1. 게임을 켰는데 아무 화면도 안 떠요!</b></summary>
+<summary><b>Q1. 압축 파일(.zip) 안에서 바로 Install.bat을 실행했더니 DLL을 찾을 수 없다고 나와요! (종료 코드 2)</b></summary>
 
-- 모드 UI는 게임 플레이 화면을 가리지 않도록 **인벤토리 창(`I` 또는 `Tab`)을 열었을 때만** 인벤토리 위쪽에 나타납니다.
-- 만약 인벤토리를 열어도 상단 바가 보이지 않는다면:
-  1. [`Dist/설치하기_Install.bat`](./Dist/설치하기_Install.bat)을 실행해 올바른 세피리아 폴더(`AddOns\SephiriaOptimizer\`)에 설치되었는지 확인하세요.
-  2. 수동으로 `.dll`을 넣으셨다면 파일 우클릭 → 속성 → **[차단 해제]**를 체크했는지 확인하세요.
+- Windows 탐색기에서 `.zip` 파일을 더블클릭해 열기만 한 상태로 `Install.bat`을 실행하면, Windows가 배치 파일만 `%TEMP%` 임시 폴더로 꺼내 실행하므로 동봉된 `SephiriaOptimizer.dll`을 읽을 수 없습니다.
+- 반드시 `SephiriaOptimizer_v2.0.0.zip` 파일을 **마우스 우클릭 → [모두 압축 풀기]**로 일반 폴더에 압축 해제한 뒤 `Install.bat`(또는 `install.sh`)을 실행해 주세요.
 </details>
 
 <details>
-<summary><b>Q2. [F5] 자동 정렬을 눌렀는데 아이템이 안 움직여요!</b></summary>
+<summary><b>Q2. 세피리아 게임이 실행 중이거나 파일이 잠겨 있다는 경고가 떠요! (종료 코드 3)</b></summary>
 
-- 전투 중(`IsInBattle`), 인벤토리 이동 잠금 상태, 또는 마우스로 아이템을 집어 들고 있는(`HoldItem`) 상태에서는 안전을 위해 자동으로 **오버레이 가이드 모드(`[F6]`)**로 전환됩니다.
-- 또한 현재 배치가 이미 최고 점수에 도달한 상태이거나 동형 아이템 간 위치만 바뀐 경우 불필요한 스왑을 수행하지 않습니다.
+- 게임이 실행 중일 때는 Unity 엔진이 `AddOns/SephiriaOptimizer/SephiriaOptimizer.dll` 파일 핸들을 점유하므로 덮어쓰기가 차단됩니다.
+- 세피리아 게임을 완전히 종료한 뒤 알림창의 **`[다시 시도(Retry)]`**(콘솔에서는 `R` 입력)를 누르면 즉시 설치 또는 제거가 이어서 완료됩니다.
 </details>
 
 <details>
-<summary><b>Q3. 특정 아티팩트(예: 무기 전용 아티팩트나 내가 원하는 자리의 아티팩트)는 안 움직이게 고정하고 싶어요!</b></summary>
+<summary><b>Q3. C:\Program Files (x86) 경로에 설치 중 권한 오류가 발생해요! (종료 코드 4)</b></summary>
 
-- 상단 패널의 **`[Pin: OFF]`** 버튼을 눌러 **`[Pin: ON]`**으로 바꾼 뒤, 고정하고 싶은 인벤토리 슬롯 위에서 **마우스 우클릭**을 하면 노란색 `PIN` 테두리가 생기며 해당 슬롯은 절대 이동하거나 회전하지 않습니다.
+- Windows 기본 스팀 경로(`C:\Program Files (x86)\Steam\...`)는 관리자 쓰기 권한이 필요합니다. `Install.bat`은 쓰기 권한 부족을 감지하면 자동으로 **관리자 권한(UAC) 승격 창**을 띄우므로 **`[예]`**를 눌러 승인해 주세요.
+- 만약 UAC 프롬프트를 닫았거나 보안 소프트웨어로 자동 승격이 제한된 경우, `Install.bat`을 **우클릭 → [관리자 권한으로 실행]**(Linux/macOS는 `sudo ./install.sh`)하면 즉시 해결됩니다.
 </details>
 
 <details>
-<summary><b>Q4. 콤보 숫자만 채우는 저등급 아티팩트가 석판 +레벨을 뺏어가는 걸 막으려면 어떻게 하나요?</b></summary>
+<summary><b>Q4. 공식 내장 AddOnLoader가 포함되어 있지 않다는 오류가 떠요! (종료 코드 5)</b></summary>
 
-- `Pin 모드`가 꺼진 상태에서 해당 저등급 아티팩트 슬롯을 **우클릭**(또는 `[F7]` 설정 창에서 선택)하여 **`최하`**(`Sacrifice`) 등급으로 바꿔주세요!
-- `최하`로 지정하면 솔버가 그 아티팩트에는 `+레벨`을 주지 않을 뿐 아니라, 순수 `-레벨`이나 `"X"` 비활성화 칸에 그 아티팩트를 대신 배치하여 주력 아티팩트를 보호합니다(비활성화되어도 정적 `#태그` 콤보 개수는 그대로 유지됩니다).
+- 설치된 세피리아 클라이언트(`Assembly-CSharp.dll`)가 공식 애드온 로더(`AddOnLoader` / `HorayModBase`) 도입 이전의 구버전이거나 손상된 상태입니다.
+- **Steam 라이브러리 → 세피리아 우클릭 → 속성 → 설치된 파일 → [게임 파일 무결성 검사]** 및 최신 업데이트를 진행한 뒤 `Install.bat`을 다시 실행해 주세요.
+</details>
+
+<details>
+<summary><b>Q5. 스팀 외부 커스텀 폴더에 게임이 있거나, 예전에 기억된 게임 경로를 바꾸고 싶어요! (종료 코드 1)</b></summary>
+
+- 자동 탐색이 찾지 못하는 비표준 포터블 경로에 게임이 있으면 설치기가 **폴더 선택 창**을 자동으로 띄우며, 1회만 선택하면 다음 경로에 영구 기억됩니다:
+  - **Windows**: `%LOCALAPPDATA%\SephiriaOptimizer\game_path.txt`
+  - **Linux / SteamOS**: `~/.config/SephiriaOptimizer/game_path.txt`
+  - **macOS**: `~/Library/Application Support/SephiriaOptimizer/game_path.txt`
+- 다른 경로에 설치된 세피리아로 강제 변경하고 싶다면 명령 프롬프트/터미널에서 아래와 같이 직접 경로를 지정해 실행하세요(새 경로로 즉시 갱신됩니다):
+  ```powershell
+  Install.bat --game-dir "E:\MyGames\Sephiria"
+  ```
+</details>
+
+<details>
+<summary><b>Q6. Steam Deck(SteamOS) / Linux(Proton) / macOS에서는 어떻게 설치하나요?</b></summary>
+
+- 데스크톱 모드에서 `SephiriaOptimizer_v2.0.0.zip`의 압축을 푼 뒤 터미널에서 `chmod +x ./install.sh && ./install.sh`를 실행하세요.
+- SteamOS 내장 스토리지(`~/.local/share/Steam`), Flatpak Steam(`~/.var/app/com.valvesoftware.Steam/...`), 외장 MicroSD(`/run/media/mmcblk0p1`), macOS 앱 번들(`Sephiria.app/AddOns/SephiriaOptimizer`) 구조를 모두 자동으로 판별하여 설치하며, macOS Gatekeeper 격리 속성(`com.apple.quarantine`)도 함께 해제합니다.
+</details>
+
+<details>
+<summary><b>Q7. 게임을 켰는데 아무 화면도 안 뜨거나 [F5]를 눌러도 아이템이 안 움직여요!</b></summary>
+
+- 모드 UI는 플레이 화면을 가리지 않도록 **인벤토리 창(`I` 또는 `Tab`)을 열었을 때만** 인벤토리 상단에 표시됩니다.
+- 전투 중(`IsInBattle`), 인벤토리 이동 잠금 상태, 또는 마우스 커서로 아이템을 집고 있는(`HoldItem`) 상태에서는 안전을 위해 자동 스왑 대신 **시각적 오버레이 가이드 모드(`[F6]`)**로 자동 전환됩니다. 또한 이미 최적 점수에 도달한 상태라면 불필요한 스왑을 수행하지 않습니다.
+</details>
+
+<details>
+<summary><b>Q8. 특정 아티팩트 위치를 고정(Pin)하거나, 콤보용 저등급 아티팩트가 +레벨을 뺏지 않게 하려면?</b></summary>
+
+- **슬롯 고정(`PIN`)**: 상단 바에서 **`[Pin: ON]`**으로 전환한 뒤 원하는 슬롯을 **우클릭**하면 노란 `PIN` 테두리가 표시되며 이동·회전 대상에서 제외됩니다.
+- **디버프 흡수용 토템(`최하`)**: `[Pin: OFF]` 상태에서 저등급 아티팩트 슬롯을 **우클릭**(또는 `[F7]` 창에서 선택)해 **`최하`(`Sacrifice`)**로 지정하면 `+레벨`을 주력 아티팩트에 양보하고 순수 `-레벨`/`"X"` 슬롯을 대신 흡수합니다(정적 `#태그` 콤보 카운트는 그대로 유지됨).
 </details>
 
 ---
 
-## 🛠️ 개발자용 프로젝트 구조 및 빌드·테스트 가이드
+## 🛠️ 개발자용 프로젝트 구조 및 빌드·배포·테스트 가이드
 
 ### 디렉터리 구조
 
 ```text
 SephiriaOptimizer/
-├── Dist/                                     # 일반 유저용 원클릭 자동 설치기 및 빌드 배포본
-│   ├── SephiriaOptimizer_v2.0.0.zip          # 원클릭 설치 패키지 (DLL + 설치/제거/온라인업데이트 bat)
-│   ├── 설치하기_Install.bat                  # 스팀 경로 자동 탐지 + 차단 해제 + 자동 설치 스크립트
-│   ├── 제거하기_Uninstall.bat                # 원클릭 모드 제거 스크립트
-│   ├── 온라인_최신버전_자동설치.bat          # GitHub 최신 DLL 다운로드 및 설치 런처
-│   ├── install.ps1                           # PowerShell 원라이너(irm | iex) 설치 스크립트
-│   ├── SephiriaOptimizer.dll                 # 최신 릴리즈 빌드 바이너리
-│   └── metadata.json                         # 세피리아 내장 AddOnLoader 메타데이터
+├── Dist/                                     # 통합 원클릭 설치 패키지 및 배포 바이너리
+│   ├── SephiriaOptimizer_v2.0.0.zip          # Release 빌드 시 자동 생성되는 단일 배포 ZIP 패키지
+│   ├── Install.bat                           # Windows 원클릭 통합 설치·업데이트 런처
+│   ├── Uninstall.bat                         # Windows 원클릭 통합 제거 런처
+│   ├── install.ps1                           # 크로스 플랫폼 자동 경로 탐색·검증·설치 코어 엔진
+│   ├── install.sh                            # Linux / SteamOS (Steam Deck) / macOS 설치·제거 스크립트
+│   ├── SephiriaOptimizer.dll                 # 최신 Release 빌드 바이너리
+│   └── metadata.json                         # 세피리아 내장 AddOnLoader 메타데이터 (v2.0.0)
 ├── SephiriaOptimizer/                        # 메인 모드 C# 프로젝트 (.NET Standard 2.1)
 │   ├── Execution/
 │   │   └── CycleDecomposition.cs             # Identity Matching + 순열 사이클 분해 생성기
 │   ├── Models/
 │   │   ├── ArtifactConstraintType.cs         # 10종 제약 조건, 5단계 우선순위, 석판 효과 열거형
-│   │   ├── InventorySnapshot.cs              # 워커 스레드용 불변 인벤토리 스냅샷
+│   │   ├── InventorySnapshot.cs              # 워커 스레드용 불변 인벤토리 스냅샷 & 8방 비트마스크
 │   │   ├── SlotCoord.cs                      # 그리드 좌표 구조체
 │   │   ├── SlotItemSnapshot.cs               # 아티팩트/석판/동적 시너지 스냅샷 및 대칭 그룹 ID
 │   │   ├── TabletPlacementRule.cs            # 슬롯·회전별 사전 계산된 석판 규칙
@@ -320,29 +362,37 @@ SephiriaOptimizer/
 │   ├── Snapshot/
 │   │   └── GameInventoryReader.cs            # 인게임 GridInventory 리더 및 순수 C# 석판 쿼리 파서
 │   ├── Solver/
-│   │   ├── ObjectiveEvaluator.cs             # stackalloc 기반 무할당 목적 함수 평가기 (Pre->Normal->Post)
-│   │   └── OptimizationSolver.cs             # B&B 상한 가지치기 + LAHC & 3-Way Cycle Swap 솔버
+│   │   ├── ObjectiveEvaluator.cs             # stackalloc 기반 무할당 4계층 목적 함수 평가기
+│   │   └── OptimizationSolver.cs             # B&B 상한 가지치기 + LAHC & 커플드 변이 솔버
 │   ├── UI/
 │   │   └── SephiriaOptimizerController.cs    # [F5] 무결성 Guard 코루틴, [F6] 오버레이, [F7] 빌드 설정 UI
 │   ├── SephiriaOptimizerMod.cs               # HorayModBase 엔트리포인트
 │   ├── metadata.json                         # AddOnLoader 메타데이터 원본
-│   └── SephiriaOptimizer.csproj              # 프로젝트 설정 파일
-└── SephiriaOptimizer.Tests/                  # xUnit 단위 테스트 프로젝트 (.NET 8.0)
-    ├── OptimizationSolverTest.cs             # 16개 핵심 도메인 및 엣지 케이스 검증 테스트
+│   └── SephiriaOptimizer.csproj              # 다중 드라이브 ManagedDir 자동 탐색 & ZIP 패키징 빌드 설정
+└── SephiriaOptimizer.Tests/                  # xUnit 단위 테스트 프로젝트 (.NET 8.0+, RollForward=Major)
+    ├── OptimizationSolverTest.cs             # 21개 핵심 도메인·수식·무할당·엣지 케이스 검증 테스트
     └── SephiriaOptimizer.Tests.csproj        # 테스트 프로젝트 설정 파일
 ```
 
-### 소스 코드 빌드 및 단위 테스트 실행
+### 소스 코드 빌드·자동 패키징·단위 테스트 실행
+
+`SephiriaOptimizer.csproj`에는 하드코딩된 드라이브 경로가 없으며, MSBuild 평가 단계와 `ResolveSephiriaManagedDir` 타겟이 **환경 변수(`SEPHIRIA_GAME_DIR`) → 로컬 캐시(`.sephiria-path`, `game_path.txt`) → 레지스트리 → 다중 드라이브 & `libraryfolders.vdf` 파서** 순으로 `Sephiria_Data/Managed` 참조 경로를 자동 연결합니다. 또한 `SephiriaOptimizer.Tests.csproj`에 `<RollForward>Major</RollForward>`가 적용되어 `.NET 8.0` 이상의 상위 SDK(`.NET 9`, `.NET 10+` 등)만 설치된 환경에서도 즉시 테스트가 실행됩니다.
 
 ```powershell
-# 1. 전체 솔루션 Release 빌드 (경고 0, 오류 0 검증)
+# 1. 전체 솔루션 Release 빌드 + Dist/ 바이너리 및 SephiriaOptimizer_v2.0.0.zip 자동 갱신
 dotnet build SephiriaOptimizer.sln -c Release --no-incremental
 
-# 2. 도메인 및 엣지 케이스 단위 테스트 16종 실행
+# 2. 빌드와 동시에 로컬에 설치된 세피리아 게임 폴더(AddOns/SephiriaOptimizer)에 즉시 자동 배포
+dotnet build SephiriaOptimizer.sln -c Release -p:DeployToGame=true
+
+# 3. 비표준 경로에 게임이 있을 때 경로를 명시하여 빌드 (또는 환경 변수 SEPHIRIA_GAME_DIR 설정)
+dotnet build SephiriaOptimizer.sln -c Release -p:SephiriaDir="E:\CustomGames\Sephiria" -p:DeployToGame=true
+
+# 4. 도메인·4계층 우선순위·무할당 단위 테스트 21종 전체 실행
 dotnet test SephiriaOptimizer.sln -c Release --no-build
 ```
 
-### 포함된 자동화 단위 테스트 목록 (`OptimizationSolverTest.cs` — 16/16 통과)
+### 포함된 자동화 단위 테스트 목록 (`OptimizationSolverTest.cs` — 21/21 통과)
 1. `Evaluate_ClampsEffectiveLevelAndPenalizesNegativeLevel`: 아티팩트 유효 레벨의 최대 별 개수(`MaxLevel`) 클램핑 및 최종 레벨 `-1` 이하 비활성화 페널티 부과 검증
 2. `Solve_NeutralizesNegativeLevelPenaltyByPointingOutsideOrEmpty`: 석판의 `-N` 레벨 감소 효과를 그리드 바깥이나 빈 슬롯으로 유도해 페널티를 증발시키는 최적화 검증
 3. `Solve_PlacesConstrainedArtifactOnIgnoreCriteriaSlot`: 제약 조건(`Inside` 등)이 달린 아티팩트를 석판의 `IgnoreCriteria` 타겟 슬롯에 배치해 강제 활성화하는 시너지 검증
@@ -354,8 +404,13 @@ dotnet test SephiriaOptimizer.sln -c Release --no-build
 9. `BuildExecutionPlan_DecomposesPermutationIntoMinimalSwaps`: 순열 사이클 분해가 최소 횟수의 2-슬롯 교환으로 현재 배치를 최적 배치로 정확히 변환하는지 검증
 10. `Solve_PreventsTabletPositiveEffectFromWastingOutOfBoundsAndPreventsTabletSittingOnBuffedSlot`: 석판의 `+` 강화 효과가 인벤토리 밖으로 빠져 낭비되거나 다른 석판이 강화한 칸 위에 석판이 올라가는 배치를 방지하는지 검증
 11. `Solve_SeparatesChalcedonyKeyTargetFromWhitePaperComboTarget`: 캘세더니 열쇠의 고유 목표 속성(`견고/잉걸불/빙하/마법공학`)과 하얀 종이의 양쪽 아티팩트 콤보 복제 목표(`20종`)를 독립된 영역으로 달성하는지 검증
-12. `Evaluate_PenalizesWastedPositiveBuffEvenWhenCancelledByNegativeDebuffOnEmptyOrSacrificeSlot`: 빈 슬롯이나 `최하(Sacrifice)` 아티팩트 슬롯에 양수 버프(`+2`)와 음수 디버프(`-3`)가 중첩되어 최종 레벨이 0 이하일 때도 양수 버프 낭비 페널티(`-80 × 2`)가 누락 없이 부과되는지 검증
-13. `Evaluate_HandlesMultiplyTabletOnNegativeAndZeroSlotsWithoutPositiveBufferContamination`: 배율 석판(`×2`)이 음수 디버프 슬롯이나 `0`레벨 슬롯에 적용될 때 양수 버프 버퍼를 오염시키지 않고 배율 낭비 페널티(`-90`) 및 음수 증폭(`-2 → -4`)을 정확히 계산하는지 검증
+12. `Evaluate_PenalizesWastedPositiveBuffEvenWhenCancelledByNegativeDebuffOnEmptyOrSacrificeSlot`: 빈 슬롯이나 `최하(Sacrifice)` 아티팩트 슬롯에 양수 버프(`+2`)와 음수 디버프(`-3`)가 중첩되어 최종 레벨이 0 이하일 때도 양수 버프 낭비 페널티가 누락 없이 부과되는지 검증
+13. `Evaluate_HandlesMultiplyTabletOnNegativeAndZeroSlotsWithoutPositiveBufferContamination`: 배율 석판(`×2`)이 음수 디버프 슬롯이나 `0`레벨 슬롯에 적용될 때 양수 버프 버퍼를 오염시키지 않고 배율 낭비 페널티 및 음수 증폭(`-2 → -4`)을 정확히 계산하는지 검증
 14. `Evaluate_BlocksDisabledDynamicTagArtifactsAndDetectsGoldenNeedleMutualCycleInConstantTime`: 비활성화된 동적 태그 아티팩트의 시너지를 차단하고 북향의 금빛침 상호 순환 참조(`A <-> B`)를 비트마스크로 $O(1)$에 즉시 종료하는지 검증
 15. `BuildTabletPlacementRules_MatchesInGameEffectiveHeightForNonRectangularUnlockedSlots`: 비직사각형 해금 슬롯(`width = 6, unlockedSlots = 15`)에서 석판의 `Placed(BOTTOM)` 및 `Placed(INNER)` 위치 조건이 인게임 유효 높이(`effectiveHeight = 3`)와 정확히 일치하는지 검증
 16. `BuildExecutionPlan_EliminatesRedundantSwapsBetweenIdenticalSymmetryGroupItems`: 동일한 `SymmetryGroupId`(회전 방향 포함)를 가진 아이템이나 빈 슬롯 간의 불필요한 스왑을 Identity Matching으로 제거하는지 검증
+17. `Evaluate_AmplifiesMysticSlotsAfterDynamicTagsAndClampsOverflowAndDoublesWastedPenalty`: 동적 태그 확정 후 활성화된 **신비(Mystic)** 슬롯의 석판·각인 레벨 2배 증폭, `MaxLevel` 초과분 클램핑 및 빈 슬롯 버프 낭비 페널티를 검증
+18. `Solve_SnapsAndCouplesGoldenNeedleDirectlyBelowCoreAttackableArtifactInsteadOfMysticSlot`: 대규모 그리드에서 **북향의 금빛침**을 신비 슬롯 대신 주력 공격형 아티팩트 바로 아래(`rootSlot + width`)에 스냅 및 수직 쌍 동반 이동으로 배치하는지 검증
+19. `Solve_MaximizesCrystalOfHarmonyInInteriorMooreNeighborhoodUsingBitmasks`: **조화의 수정**이 사전 계산된 8방향 비트마스크(`ulong`)를 통해 중앙 8칸 슬롯에서 주변 활성 아티팩트 유효 레벨 총합을 극대화하는지 검증
+20. `Evaluate_GuaranteesZeroHeapAllocationAcrossThousandEvaluations`: 1,000회 연속 `ObjectiveEvaluator.Evaluate()` 실행 시 스레드 힙 메모리 할당량 **0 Bytes**를 엄격 검증
+21. `EvaluateAndSolve_EnforcesFourTierHierarchyWithoutInversionAndAllowsCrystalTabletEntry`: **4계층 절대 우선순위(Tier 0 ~ Tier 3)** 부등식이 석판 `+` 칸 침범과 일반 아티팩트 비활성화 역전을 원천 차단하고 조화의 수정 인접 석판 진입을 허용하는지 검증

@@ -10,6 +10,9 @@ out/
 # Decompiled game binaries (copyrighted game code)
 Decompiled/
 
+# Local machine game path cache
+.sephiria-path
+
 # Visual Studio / Rider / VSCode
 .vs/
 .idea/

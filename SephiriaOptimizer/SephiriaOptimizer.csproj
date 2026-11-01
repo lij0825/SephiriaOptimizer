@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>netstandard2.1</TargetFramework>
+		<Version>2.0.0</Version>
 		<LangVersion>latest</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -8,49 +9,195 @@
 		<RootNamespace>SephiriaOptimizer</RootNamespace>
 		<Optimize>true</Optimize>
 		<GenerateDependencyFile>false</GenerateDependencyFile>
-		<ManagedDir>D:\Steam\steamapps\common\Sephiria\Sephiria_Data\Managed</ManagedDir>
+	</PropertyGroup>
+
+	<PropertyGroup>
+		<_RepoRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</_RepoRoot>
+		<_DistDir>$(_RepoRoot)/Dist</_DistDir>
+		<_RepoPathCache>$(_RepoRoot)/.sephiria-path</_RepoPathCache>
+		<_WinUserCache Condition="'$(LOCALAPPDATA)' != ''">$(LOCALAPPDATA)/SephiriaOptimizer/game_path.txt</_WinUserCache>
+		<_XdgBase Condition="'$(XDG_CONFIG_HOME)' != ''">$(XDG_CONFIG_HOME)</_XdgBase>
+		<_XdgBase Condition="'$(_XdgBase)' == '' And '$(HOME)' != ''">$(HOME)/.config</_XdgBase>
+		<_UnixUserCache Condition="'$(_XdgBase)' != ''">$(_XdgBase)/SephiriaOptimizer/game_path.txt</_UnixUserCache>
+		<_MacUserCache Condition="'$(HOME)' != ''">$(HOME)/Library/Application Support/SephiriaOptimizer/game_path.txt</_MacUserCache>
+
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(SEPHIRIA_GAME_DIR)' != ''">$(SEPHIRIA_GAME_DIR)</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(SEPHIRIA_PATH)' != ''">$(SEPHIRIA_PATH)</SephiriaDir>
+
+		<_CachedRepoDir Condition="Exists('$(_RepoPathCache)')">$([System.IO.File]::ReadAllText('$(_RepoPathCache)').Trim())</_CachedRepoDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_CachedRepoDir)' != '' And (Exists('$(_CachedRepoDir)/Sephiria_Data/Managed/Assembly-CSharp.dll') Or Exists('$(_CachedRepoDir)/Sephiria.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll'))">$(_CachedRepoDir)</SephiriaDir>
+
+		<_CachedWinDir Condition="'$(_WinUserCache)' != '' And Exists('$(_WinUserCache)')">$([System.IO.File]::ReadAllText('$(_WinUserCache)').Trim())</_CachedWinDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_CachedWinDir)' != '' And Exists('$(_CachedWinDir)/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(_CachedWinDir)</SephiriaDir>
+
+		<_CachedUnixDir Condition="'$(_UnixUserCache)' != '' And Exists('$(_UnixUserCache)')">$([System.IO.File]::ReadAllText('$(_UnixUserCache)').Trim())</_CachedUnixDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_CachedUnixDir)' != '' And Exists('$(_CachedUnixDir)/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(_CachedUnixDir)</SephiriaDir>
+
+		<_CachedMacDir Condition="'$(_MacUserCache)' != '' And Exists('$(_MacUserCache)')">$([System.IO.File]::ReadAllText('$(_MacUserCache)').Trim())</_CachedMacDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_CachedMacDir)' != '' And Exists('$(_CachedMacDir)/Sephiria.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll')">$(_CachedMacDir)</SephiriaDir>
+
+		<_RegSteamHkcu Condition="'$(OS)' == 'Windows_NT'">$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\Software\Valve\Steam', 'SteamPath', '', RegistryView.Default))</_RegSteamHkcu>
+		<_RegSteamHklm32 Condition="'$(OS)' == 'Windows_NT'">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam', 'InstallPath', '', RegistryView.Registry32))</_RegSteamHklm32>
+		<_RegSteamHklm64 Condition="'$(OS)' == 'Windows_NT'">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Valve\Steam', 'InstallPath', '', RegistryView.Registry64))</_RegSteamHklm64>
+
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_RegSteamHkcu)' != '' And Exists('$(_RegSteamHkcu)/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(_RegSteamHkcu)/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_RegSteamHklm32)' != '' And Exists('$(_RegSteamHklm32)/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(_RegSteamHklm32)/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(_RegSteamHklm64)' != '' And Exists('$(_RegSteamHklm64)/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(_RegSteamHklm64)/steamapps/common/Sephiria</SephiriaDir>
+
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('C:/Program Files (x86)/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">C:/Program Files (x86)/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('C:/SteamLibrary/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">C:/SteamLibrary/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('D:/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">D:/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('D:/SteamLibrary/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">D:/SteamLibrary/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('D:/Program Files (x86)/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">D:/Program Files (x86)/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('E:/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">E:/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('E:/SteamLibrary/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">E:/SteamLibrary/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('F:/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">F:/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('F:/SteamLibrary/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">F:/SteamLibrary/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('G:/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">G:/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('G:/SteamLibrary/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">G:/SteamLibrary/steamapps/common/Sephiria</SephiriaDir>
+
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(HOME)' != '' And Exists('$(HOME)/.local/share/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(HOME)/.local/share/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(HOME)' != '' And Exists('$(HOME)/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(HOME)/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And Exists('/run/media/mmcblk0p1/steamapps/common/Sephiria/Sephiria_Data/Managed/Assembly-CSharp.dll')">/run/media/mmcblk0p1/steamapps/common/Sephiria</SephiriaDir>
+		<SephiriaDir Condition="'$(SephiriaDir)' == '' And '$(HOME)' != '' And Exists('$(HOME)/Library/Application Support/Steam/steamapps/common/Sephiria/Sephiria.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll')">$(HOME)/Library/Application Support/Steam/steamapps/common/Sephiria</SephiriaDir>
+
+		<ManagedDir Condition="'$(ManagedDir)' == '' And '$(SephiriaDir)' != '' And Exists('$(SephiriaDir)/Assembly-CSharp.dll')">$(SephiriaDir)</ManagedDir>
+		<ManagedDir Condition="'$(ManagedDir)' == '' And '$(SephiriaDir)' != '' And Exists('$(SephiriaDir)/Managed/Assembly-CSharp.dll')">$(SephiriaDir)/Managed</ManagedDir>
+		<ManagedDir Condition="'$(ManagedDir)' == '' And '$(SephiriaDir)' != '' And Exists('$(SephiriaDir)/Sephiria_Data/Managed/Assembly-CSharp.dll')">$(SephiriaDir)/Sephiria_Data/Managed</ManagedDir>
+		<ManagedDir Condition="'$(ManagedDir)' == '' And '$(SephiriaDir)' != '' And Exists('$(SephiriaDir)/Sephiria.app/Contents/Resources/Data/Managed/Assembly-CSharp.dll')">$(SephiriaDir)/Sephiria.app/Contents/Resources/Data/Managed</ManagedDir>
+		<ManagedDir Condition="'$(ManagedDir)' == '' And '$(SephiriaDir)' != '' And Exists('$(SephiriaDir)/Contents/Resources/Data/Managed/Assembly-CSharp.dll')">$(SephiriaDir)/Contents/Resources/Data/Managed</ManagedDir>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<Reference Include="Assembly-CSharp">
-			<HintPath>$(ManagedDir)\Assembly-CSharp.dll</HintPath>
+			<HintPath>$(ManagedDir)/Assembly-CSharp.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="Mirror">
-			<HintPath>$(ManagedDir)\Mirror.dll</HintPath>
+			<HintPath>$(ManagedDir)/Mirror.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine">
-			<HintPath>$(ManagedDir)\UnityEngine.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.CoreModule">
-			<HintPath>$(ManagedDir)\UnityEngine.CoreModule.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.CoreModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.IMGUIModule">
-			<HintPath>$(ManagedDir)\UnityEngine.IMGUIModule.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.IMGUIModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.UI">
-			<HintPath>$(ManagedDir)\UnityEngine.UI.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.UI.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.UIModule">
-			<HintPath>$(ManagedDir)\UnityEngine.UIModule.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.UIModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.TextRenderingModule">
-			<HintPath>$(ManagedDir)\UnityEngine.TextRenderingModule.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.TextRenderingModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="UnityEngine.InputLegacyModule">
-			<HintPath>$(ManagedDir)\UnityEngine.InputLegacyModule.dll</HintPath>
+			<HintPath>$(ManagedDir)/UnityEngine.InputLegacyModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 		<Reference Include="Unity.TextMeshPro">
-			<HintPath>$(ManagedDir)\Unity.TextMeshPro.dll</HintPath>
+			<HintPath>$(ManagedDir)/Unity.TextMeshPro.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
 	</ItemGroup>
+
+	<Target Name="ResolveSephiriaManagedDir" BeforeTargets="ResolveAssemblyReferences">
+		<Exec
+			Condition="('$(ManagedDir)' == '' Or !Exists('$(ManagedDir)/Assembly-CSharp.dll')) And '$(OS)' == 'Windows_NT' And Exists('$(_DistDir)/install.ps1')"
+			Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_DistDir)/install.ps1&quot; -ResolveOnly -NonInteractive"
+			ConsoleToMSBuild="true"
+			IgnoreExitCode="true"
+			StandardOutputImportance="Low">
+			<Output TaskParameter="ConsoleOutput" PropertyName="_DynamicManagedDir" />
+		</Exec>
+
+		<Exec
+			Condition="('$(ManagedDir)' == '' Or !Exists('$(ManagedDir)/Assembly-CSharp.dll')) And '$(OS)' != 'Windows_NT' And Exists('$(_DistDir)/install.sh')"
+			Command="bash &quot;$(_DistDir)/install.sh&quot; --resolve-only --non-interactive"
+			ConsoleToMSBuild="true"
+			IgnoreExitCode="true"
+			StandardOutputImportance="Low">
+			<Output TaskParameter="ConsoleOutput" PropertyName="_DynamicManagedDir" />
+		</Exec>
+
+		<PropertyGroup Condition="'$(_DynamicManagedDir)' != '' And Exists('$(_DynamicManagedDir)/Assembly-CSharp.dll')">
+			<ManagedDir>$(_DynamicManagedDir)</ManagedDir>
+		</PropertyGroup>
+
+		<ItemGroup Condition="'$(_DynamicManagedDir)' != '' And Exists('$(_DynamicManagedDir)/Assembly-CSharp.dll')">
+			<_ReboundSephiriaRef Include="@(Reference)" Condition="'%(Reference.Private)' == 'false'">
+				<HintPath>$(ManagedDir)/%(Identity).dll</HintPath>
+			</_ReboundSephiriaRef>
+			<Reference Remove="@(_ReboundSephiriaRef)" />
+			<Reference Include="@(_ReboundSephiriaRef)" />
+		</ItemGroup>
+
+		<Error
+			Condition="'$(ManagedDir)' == '' Or !Exists('$(ManagedDir)/Assembly-CSharp.dll')"
+			Text="[SephiriaOptimizer] 세피리아 Managed DLL 경로를 찾지 못했습니다 (Sephiria_Data/Managed/Assembly-CSharp.dll). 해결 방법: (1) Dist/Install.bat (또는 ./Dist/install.sh) 1회 실행 후 자동 기억, (2) dotnet build -p:SephiriaDir=&quot;게임폴더경로&quot;, 또는 (3) 환경 변수 SEPHIRIA_GAME_DIR 설정." />
+	</Target>
+
+	<Target Name="PackageDistAndDeploy" AfterTargets="Build">
+		<PropertyGroup>
+			<_ReleaseZipStage>$(IntermediateOutputPath)ReleaseZipStage</_ReleaseZipStage>
+			<_BuiltDllDir>$([System.IO.Path]::GetDirectoryName('$(TargetPath)'))</_BuiltDllDir>
+		</PropertyGroup>
+
+		<Copy
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			SourceFiles="$(TargetPath);$(MSBuildProjectDirectory)/metadata.json"
+			DestinationFolder="$(_DistDir)"
+			SkipUnchangedFiles="true" />
+
+		<RemoveDir
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Directories="$(_ReleaseZipStage)" />
+
+		<MakeDir
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Directories="$(_ReleaseZipStage)" />
+
+		<ItemGroup Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'">
+			<_DistPackageFiles Include="$(_DistDir)/SephiriaOptimizer.dll" />
+			<_DistPackageFiles Include="$(_DistDir)/metadata.json" />
+			<_DistPackageFiles Include="$(_DistDir)/Install.bat" Condition="Exists('$(_DistDir)/Install.bat')" />
+			<_DistPackageFiles Include="$(_DistDir)/Uninstall.bat" Condition="Exists('$(_DistDir)/Uninstall.bat')" />
+			<_DistPackageFiles Include="$(_DistDir)/install.ps1" Condition="Exists('$(_DistDir)/install.ps1')" />
+			<_DistPackageFiles Include="$(_DistDir)/install.sh" Condition="Exists('$(_DistDir)/install.sh')" />
+		</ItemGroup>
+
+		<Copy
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			SourceFiles="@(_DistPackageFiles)"
+			DestinationFolder="$(_ReleaseZipStage)" />
+
+		<ZipDirectory
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			SourceDirectory="$(_ReleaseZipStage)"
+			DestinationFile="$(_DistDir)/SephiriaOptimizer_v$(Version).zip"
+			Overwrite="true" />
+
+		<PropertyGroup>
+			<_DeployGameArgWin Condition="'$(SephiriaDir)' != ''">-GameDir &quot;$(SephiriaDir.TrimEnd('\').TrimEnd('/'))&quot;</_DeployGameArgWin>
+			<_DeployGameArgUnix Condition="'$(SephiriaDir)' != ''">--game-dir &quot;$(SephiriaDir.TrimEnd('\').TrimEnd('/'))&quot;</_DeployGameArgUnix>
+		</PropertyGroup>
+
+		<Exec
+			Condition="'$(DeployToGame)' == 'true' And '$(OS)' == 'Windows_NT'"
+			Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(_DistDir)/install.ps1&quot; $(_DeployGameArgWin) -SourceDir &quot;$(_BuiltDllDir)&quot; -NonInteractive" />
+
+		<Exec
+			Condition="'$(DeployToGame)' == 'true' And '$(OS)' != 'Windows_NT'"
+			Command="bash &quot;$(_DistDir)/install.sh&quot; $(_DeployGameArgUnix) --source-dir &quot;$(_BuiltDllDir)&quot; --non-interactive" />
+	</Target>
 </Project>
