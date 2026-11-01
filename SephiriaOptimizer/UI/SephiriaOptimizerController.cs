@@ -1032,6 +1032,15 @@ namespace SephiriaOptimizer.UI {
 				? inventory.fixedEngravingsOnServer.Count
 				: 0;
 			hash = (hash * 31) + engravedCount;
+			int mysticPosCount = inventory.mysticPositions != null
+				? inventory.mysticPositions.Count
+				: 0;
+			hash = (hash * 31) + mysticPosCount;
+			for (int m = 0; m < mysticPosCount; m++) {
+				ItemPosition mPos = inventory.mysticPositions![m];
+				hash = (hash * 31) + mPos.x;
+				hash = (hash * 31) + mPos.y;
+			}
 
 			for (int s = 0; s < unlocked; s++) {
 				sbyte x = (sbyte)(s % width);

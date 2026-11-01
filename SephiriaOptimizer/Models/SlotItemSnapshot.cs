@@ -33,6 +33,8 @@ namespace SephiriaOptimizer.Models {
 		public bool IsWhitePaperCharm { get; }
 		public int WhitePaperMatchCount { get; }
 		public bool IsNearLevelDamageCharm { get; }
+		public bool IsCrystalOfHarmony { get; }
+		public float[] CrystalDamageBonusByLevel { get; }
 		public bool IsCompanionChaosCharm { get; }
 		public bool IsCompanionCharm { get; }
 		public bool IsPlanetModuleCharm { get; }
@@ -87,8 +89,11 @@ namespace SephiriaOptimizer.Models {
 			bool isPlanetCharm = false,
 			bool isNearMagicBulletCharm = false,
 			bool isWoodenBoxCharm = false,
-			bool isFireIcePositionCharm = false
+			bool isFireIcePositionCharm = false,
+			bool isCrystalOfHarmony = false,
+			float[]? crystalDamageBonusByLevel = null
 		) {
+			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
 			InstanceId = instanceId;
 			EntityId = entityId;
@@ -119,7 +124,9 @@ namespace SephiriaOptimizer.Models {
 			RowElementalBonusByLevel = rowElementalBonusByLevel ?? new[] { 2, 4, 6, 8 };
 			IsWhitePaperCharm = isWhitePaperCharm;
 			WhitePaperMatchCount = Math.Max(1, whitePaperMatchCount);
-			IsNearLevelDamageCharm = isNearLevelDamageCharm;
+			IsNearLevelDamageCharm = crystalFlag;
+			IsCrystalOfHarmony = crystalFlag;
+			CrystalDamageBonusByLevel = crystalDamageBonusByLevel ?? new[] { 1f, 2f };
 			IsCompanionChaosCharm = isCompanionChaosCharm;
 			IsCompanionCharm = isCompanionCharm;
 			IsPlanetModuleCharm = isPlanetModuleCharm;
@@ -157,6 +164,16 @@ namespace SephiriaOptimizer.Models {
 			}
 			int idx = Math.Clamp(effectiveLevel, 0, RowElementalBonusByLevel.Length - 1);
 			return RowElementalBonusByLevel[idx];
+		}
+
+		public float GetCrystalRatePerLevel(int effectiveLevel) {
+			if (CrystalDamageBonusByLevel.Length == 0) {
+				return effectiveLevel > 0 ? 2f : 1f;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, CrystalDamageBonusByLevel.Length - 1);
+			float rate = CrystalDamageBonusByLevel[idx];
+			return rate > 0f ? rate : (effectiveLevel > 0 ? 2f : 1f);
 		}
 	}
 }

@@ -9,7 +9,8 @@ namespace SephiriaOptimizer.Snapshot {
 			"EMBER",
 			"GLACIER",
 			"MAGITECH",
-			"STURDY"
+			"STURDY",
+			"MYSTIC"
 		};
 
 		public static InventorySnapshot CaptureSnapshot(
@@ -170,6 +171,11 @@ namespace SephiriaOptimizer.Snapshot {
 					int whitePaperMatch = charm is Charm_WhitePaper wpCharm ? Math.Max(1, wpCharm.match) : 2;
 
 					bool isNearLevelDamage = charm is Charm_NearLevelDamage;
+					float[]? crystalRates = charm is Charm_NearLevelDamage nearDmg
+						&& nearDmg.allDamageBonusByLevel != null
+						&& nearDmg.allDamageBonusByLevel.Length > 0
+						? (float[])nearDmg.allDamageBonusByLevel.Clone()
+						: null;
 					bool isCompanionChaos = charm is Charm_CompanionChaos;
 					bool isCompanion = charm is ICompanionCharm;
 					bool isPlanetModule = charm is Charm_PlanetModule;
@@ -268,7 +274,9 @@ namespace SephiriaOptimizer.Snapshot {
 						isPlanet,
 						isNearMagicBullet,
 						isWoodenBox,
-						isFireIce
+						isFireIce,
+						isNearLevelDamage,
+						crystalRates
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet tablet = itemInstance.StoneTablet;
@@ -376,6 +384,20 @@ namespace SephiriaOptimizer.Snapshot {
 				preferredChalcedonyId = chalCatId;
 			}
 
+			ulong[] mooreNeighborMasks = BuildMooreNeighborMasks(width, height, unlockedSlots);
+			ReadMysticConfiguration(
+				avatar,
+				inventory,
+				width,
+				height,
+				unlockedSlots,
+				out int mysticSlot0,
+				out int mysticSlot1,
+				out int mysticTier1Threshold,
+				out int mysticTier2Threshold,
+				out int[] extraMysticTier2Slots
+			);
+
 			return new InventorySnapshot(
 				width,
 				height,
@@ -391,8 +413,18 @@ namespace SephiriaOptimizer.Snapshot {
 				comboCategories,
 				talentRules,
 				settings.PreferredNeedleTargetInstanceId,
-				preferredChalcedonyId
+				preferredChalcedonyId,
+				mooreNeighborMasks,
+				mysticSlot0,
+				mysticSlot1,
+				mysticTier1Threshold,
+				mysticTier2Threshold,
+				extraMysticTier2Slots
 			);
+		}
+
+		public static ulong[] BuildMooreNeighborMasks(int width, int height, int unlockedSlots) {
+			return InventorySnapshot.ComputeMooreNeighborMasks(width, height, unlockedSlots);
 		}
 
 		private readonly struct RawQueryMetadata {
@@ -934,7 +966,7 @@ namespace SephiriaOptimizer.Snapshot {
 			if (hasServerEngravings) {
 				for (int i = 0; i < inventory.fixedEngravingsOnServer!.Count; i++) {
 					FixedEngraving engraving = inventory.fixedEngravingsOnServer[i];
-					if (engraving == null) {
+					if (engraving == null || engraving.createdByExternalSystem) {
 						continue;
 					}
 					AccumulateFixedDictionary(engraving.fixedLevel, baseSlotLevel, width, height, unlockedSlots);
@@ -1082,6 +1114,11 @@ namespace SephiriaOptimizer.Snapshot {
 							breakpoints[b] = catEntity.setStatus[b].itemCount;
 						}
 						Array.Sort(breakpoints);
+					} else if (catEntity.comboEffectPrefab != null
+						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffect_Mystic>(out var mysticPrefab)) {
+						int firstTier = mysticPrefab.first > 0 ? mysticPrefab.first : 2;
+						int secondTier = mysticPrefab.second > firstTier ? mysticPrefab.second : 4;
+						breakpoints = new[] { firstTier, secondTier };
 					} else if (catEntity.comboEffectPrefab != null
 						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffectBase>(out var comboPrefab)
 						&& comboPrefab.addStatByCombo != null
@@ -1258,6 +1295,75 @@ namespace SephiriaOptimizer.Snapshot {
 				int slotIdx = CoordToUnlockedSlot(pair.Key.x, pair.Key.y, width, height, unlockedSlots);
 				if (slotIdx >= 0) {
 					destination[slotIdx] += pair.Value;
+				}
+			}
+		}
+
+		private static void ReadMysticConfiguration(
+			PlayerAvatar? avatar,
+			GridInventory inventory,
+			int width,
+			int height,
+			int unlockedSlots,
+			out int mysticSlot0,
+			out int mysticSlot1,
+			out int mysticTier1Threshold,
+			out int mysticTier2Threshold,
+			out int[] extraMysticTier2Slots
+		) {
+			mysticSlot0 = -1;
+			mysticSlot1 = -1;
+			mysticTier1Threshold = 2;
+			mysticTier2Threshold = 4;
+			extraMysticTier2Slots = Array.Empty<int>();
+
+			if (unlockedSlots <= 0) {
+				return;
+			}
+
+			int firstCount = 1;
+			int secondCount = 1;
+			ItemCategoryEntity mysticCat = ItemDatabase.FindItemCategory("MYSTIC");
+			if (mysticCat != null
+				&& mysticCat.comboEffectPrefab != null
+				&& mysticCat.comboEffectPrefab.TryGetComponent<ComboEffect_Mystic>(out var mysticPrefab)) {
+				mysticTier1Threshold = mysticPrefab.first > 0 ? mysticPrefab.first : 2;
+				mysticTier2Threshold = mysticPrefab.second > mysticTier1Threshold ? mysticPrefab.second : 4;
+				firstCount = Math.Max(1, mysticPrefab.firstEngravingCount);
+				secondCount = Math.Max(1, mysticPrefab.secondEngravingCount);
+			}
+
+			int totalSlotsNeeded = firstCount + secondCount;
+			List<int> resolvedSlots = new List<int>(totalSlotsNeeded);
+
+			if (inventory.mysticPositions != null && inventory.mysticPositions.Count > 0) {
+				int maxRead = Math.Min(totalSlotsNeeded, inventory.mysticPositions.Count);
+				for (int i = 0; i < maxRead; i++) {
+					ItemPosition pos = inventory.mysticPositions[i];
+					int slotIdx = CoordToUnlockedSlot(pos.x, pos.y, width, height, unlockedSlots);
+					if (slotIdx >= 0 && !resolvedSlots.Contains(slotIdx)) {
+						resolvedSlots.Add(slotIdx);
+					}
+				}
+			} else if (avatar != null) {
+				for (int i = 0; i < 10 && resolvedSlots.Count < totalSlotsNeeded; i++) {
+					int generatedIdx = new Random(avatar.RandomID + i).Next(0, unlockedSlots);
+					if (generatedIdx >= 0 && generatedIdx < unlockedSlots && !resolvedSlots.Contains(generatedIdx)) {
+						resolvedSlots.Add(generatedIdx);
+					}
+				}
+			}
+
+			if (resolvedSlots.Count >= 1) {
+				mysticSlot0 = resolvedSlots[0];
+			}
+			if (resolvedSlots.Count >= 2) {
+				mysticSlot1 = resolvedSlots[1];
+			}
+			if (resolvedSlots.Count > 2) {
+				extraMysticTier2Slots = new int[resolvedSlots.Count - 2];
+				for (int i = 2; i < resolvedSlots.Count; i++) {
+					extraMysticTier2Slots[i - 2] = resolvedSlots[i];
 				}
 			}
 		}

@@ -1062,7 +1062,7 @@ namespace SephiriaOptimizer.Tests {
 				threeRots
 			);
 
-			Assert.Equal(-160, emptyOverlapScore);
+			Assert.Equal(-2 * ObjectiveEvaluator.WastedPositiveOnEmptySlotPenalty, emptyOverlapScore);
 			Assert.True(sacrificeOverlapScore < 0);
 		}
 
@@ -1118,8 +1118,8 @@ namespace SephiriaOptimizer.Tests {
 				new[] { 0, 0 }
 			);
 
-			Assert.Equal(-90, wastedMulScore);
-			Assert.Equal(140, negativeMulScore);
+			Assert.Equal(-ObjectiveEvaluator.WastedMultiplierPenalty, wastedMulScore);
+			Assert.Equal(4 * ObjectiveEvaluator.NeutralizedNegativeLevelBonus, negativeMulScore);
 		}
 
 		[Fact(DisplayName = "비활성화된 동적 태그 아티팩트의 시너지를 차단하고 북향의 금빛침 상호 순환 참조를 비트마스크로 즉시 종료한다")]
@@ -1358,6 +1358,1195 @@ namespace SephiriaOptimizer.Tests {
 			Assert.Empty(plan.SwapSteps);
 			Assert.Empty(plan.RotateSteps);
 			Assert.Equal(0, plan.TotalOperations);
+		}
+
+		[Fact(DisplayName = "동적 태그 확정 후 활성화된 신비 슬롯의 석판 및 각인 레벨을 2배로 증폭하고 최대 레벨 초과분 증발과 버프 낭비 2배 페널티를 반영한다")]
+		public void Evaluate_AmplifiesMysticSlotsAfterDynamicTagsAndClampsOverflowAndDoublesWastedPenalty() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+			uint mysticMask = 1u << 0;
+
+			SlotItemSnapshot mysticCharmA = new SlotItemSnapshot(
+				0,
+				1001,
+				1001,
+				"신비 성물 A",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				1,
+				1,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Normal,
+				mysticMask
+			);
+
+			SlotItemSnapshot whitePaper = new SlotItemSnapshot(
+				1,
+				1002,
+				1002,
+				"하얀 종이",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				0,
+				0,
+				1,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				true,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				null,
+				null,
+				1
+			);
+
+			SlotItemSnapshot highMaxCoreArtifact = new SlotItemSnapshot(
+				2,
+				1003,
+				1003,
+				"고레벨 주력 아티팩트",
+				SlotItemKind.Artifact,
+				4,
+				0,
+				false,
+				0,
+				8,
+				3,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Core
+			);
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			SlotItemSnapshot plus2Tablet = CreateTablet(3, 1004, 3, 0, false, rightPlus2Rules, 4);
+
+			SlotItemSnapshot lowMaxCoreArtifact = new SlotItemSnapshot(
+				4,
+				1005,
+				1005,
+				"저상한 주력 아티팩트",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				0,
+				1,
+				3,
+				1,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				5,
+				ArtifactPriorityTier.Core
+			);
+
+			ComboCategoryInfo[] comboInfos = new[] {
+				new ComboCategoryInfo(0, "MYSTIC", "신비", 1, new[] { 2, 4 }, true)
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { mysticCharmA, whitePaper, highMaxCoreArtifact, plus2Tablet, lowMaxCoreArtifact },
+				comboInfos,
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				4,
+				5
+			);
+
+			int[] activeMysticHighMaxLayout = new[] { 0, 1, 4, 3, 2, -1 };
+			int[] inactiveMysticHighMaxLayout = new[] { 0, 4, 1, 3, 2, -1 };
+			int[] activeMysticLowMaxOverflowLayout = new[] { 0, 1, 2, 3, 4, -1 };
+			int[] rotations = new[] { 0, 0, 0, 0, 0 };
+
+			SlotEvaluationDetail[] activeDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				activeMysticHighMaxLayout,
+				rotations
+			);
+			SlotEvaluationDetail[] inactiveDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				inactiveMysticHighMaxLayout,
+				rotations
+			);
+			SlotEvaluationDetail[] overflowDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				activeMysticLowMaxOverflowLayout,
+				rotations
+			);
+
+			int activeHighMaxScore = ObjectiveEvaluator.Evaluate(snapshot, activeMysticHighMaxLayout, rotations);
+			int overflowLowMaxScore = ObjectiveEvaluator.Evaluate(
+				snapshot,
+				activeMysticLowMaxOverflowLayout,
+				rotations
+			);
+
+			int[] tier2EngravedBaseLevels = new int[unlockedSlots];
+			tier2EngravedBaseLevels[5] = 3;
+			InventorySnapshot tier2MysticSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				tier2EngravedBaseLevels,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { highMaxCoreArtifact },
+				new[] { new ComboCategoryInfo(0, "MYSTIC", "신비", 4, new[] { 2, 4 }, false) },
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				4,
+				5
+			);
+			SlotEvaluationDetail[] tier2Details = ObjectiveEvaluator.EvaluateDetailed(
+				tier2MysticSnapshot,
+				new[] { -1, -1, -1, -1, -1, 0 },
+				new[] { 0 }
+			);
+
+			InventorySnapshot emptyMysticSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { plus2Tablet },
+				new[] { new ComboCategoryInfo(0, "MYSTIC", "신비", 2, new[] { 2, 4 }, false) },
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				4,
+				5
+			);
+			int emptyMysticWastedScore = ObjectiveEvaluator.Evaluate(
+				emptyMysticSnapshot,
+				new[] { -1, -1, -1, 0, -1, -1 },
+				new[] { 0 }
+			);
+
+			Assert.Equal(4, activeDetails[4].DisplayedLevel);
+			Assert.Equal(4, activeDetails[4].EffectiveLevel);
+			Assert.Equal(2, inactiveDetails[4].DisplayedLevel);
+			Assert.Equal(2, inactiveDetails[4].EffectiveLevel);
+			Assert.Equal(4, overflowDetails[4].DisplayedLevel);
+			Assert.Equal(1, overflowDetails[4].EffectiveLevel);
+			Assert.Equal(6, tier2Details[5].DisplayedLevel);
+			Assert.Equal(6, tier2Details[5].EffectiveLevel);
+			Assert.True(activeHighMaxScore > overflowLowMaxScore);
+			Assert.Equal(
+				ObjectiveEvaluator.ComboBreakpointReachedBonus
+					- (4 * ObjectiveEvaluator.WastedPositiveOnEmptySlotPenalty),
+				emptyMysticWastedScore
+			);
+		}
+
+		[Fact(DisplayName = "대규모 그리드에서 북향의 금빛침을 신비 슬롯 대신 주력 공격형 아티팩트 바로 아래 칸에 스냅 및 수직 쌍 동반 이동으로 배치한다")]
+		public void Solve_SnapsAndCouplesGoldenNeedleDirectlyBelowCoreAttackableArtifactInsteadOfMysticSlot() {
+			int width = 6;
+			int height = 4;
+			int unlockedSlots = 24;
+			uint mysticMask = 1u << 0;
+
+			int[] baseSlotLevels = new int[unlockedSlots];
+			baseSlotLevels[7] = 2;
+
+			SlotItemSnapshot coreAttackCharm = new SlotItemSnapshot(
+				0,
+				1101,
+				1101,
+				"주력 공격 아티팩트",
+				SlotItemKind.Artifact,
+				23,
+				0,
+				false,
+				0,
+				4,
+				3,
+				14,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				mysticMask
+			);
+
+			SlotItemSnapshot weakAttackCharm = new SlotItemSnapshot(
+				1,
+				1102,
+				1102,
+				"보조 소형 단검",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				1,
+				0,
+				3,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Low,
+				mysticMask
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				2,
+				1103,
+				1103,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				6,
+				0,
+				false,
+				0,
+				3,
+				2,
+				9,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				new[] { 15, 25, 35, 50 },
+				new[] { 15, 25, 35, 50 }
+			);
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			SlotItemSnapshot tablet = CreateTablet(3, 1104, 18, 0, true, rightPlus2Rules, 4);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				baseSlotLevels,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { coreAttackCharm, weakAttackCharm, goldenNeedle, tablet },
+				new[] { new ComboCategoryInfo(0, "MYSTIC", "신비", 2, new[] { 2, 4 }, true) },
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				7,
+				-1
+			);
+
+			int[] unlinkedTopRowSlots = new int[unlockedSlots];
+			Array.Fill(unlinkedTopRowSlots, -1);
+			unlinkedTopRowSlots[0] = 2;
+			unlinkedTopRowSlots[7] = 0;
+			unlinkedTopRowSlots[14] = 1;
+			int unlinkedScore = ObjectiveEvaluator.Evaluate(snapshot, unlinkedTopRowSlots, new int[4]);
+
+			int[] linkedBelowCoreSlots = new int[unlockedSlots];
+			Array.Fill(linkedBelowCoreSlots, -1);
+			linkedBelowCoreSlots[7] = 0;
+			linkedBelowCoreSlots[13] = 2;
+			linkedBelowCoreSlots[14] = 1;
+			int linkedScore = ObjectiveEvaluator.Evaluate(snapshot, linkedBelowCoreSlots, new int[4]);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot, 220);
+
+			int coreSlot = result.BestItemToSlotIndex[0];
+			int needleSlot = result.BestItemToSlotIndex[2];
+
+			Assert.True(linkedScore - unlinkedScore >= ObjectiveEvaluator.UnlinkedGoldenNeedlePenalty);
+			Assert.Equal(7, coreSlot);
+			Assert.Equal(coreSlot + width, needleSlot);
+			Assert.Equal(4, result.BestSlotDetails[coreSlot].EffectiveLevel);
+		}
+
+		[Fact(DisplayName = "조화의 수정이 사전 계산된 8방향 비트마스크를 통해 중앙 8칸 슬롯에서 주변 활성 아티팩트 유효 레벨 총합을 극대화한다")]
+		public void Solve_MaximizesCrystalOfHarmonyInInteriorMooreNeighborhoodUsingBitmasks() {
+			int width = 4;
+			int height = 4;
+			int unlockedSlots = 16;
+
+			ulong[] masks = GameInventoryReader.BuildMooreNeighborMasks(width, height, unlockedSlots);
+
+			SlotItemSnapshot[] items = new SlotItemSnapshot[10];
+			items[0] = new SlotItemSnapshot(
+				0,
+				1200,
+				1200,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				1,
+				2,
+				9,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.High,
+				0u,
+				false,
+				1,
+				null,
+				null,
+				null,
+				null,
+				2,
+				true,
+				false,
+				false,
+				false,
+				false,
+				false,
+				false,
+				false,
+				true,
+				new[] { 1f, 2f }
+			);
+
+			for (int i = 1; i <= 8; i++) {
+				items[i] = CreateArtifact(
+					i,
+					1200 + i,
+					i,
+					2,
+					3,
+					4,
+					ArtifactConstraintType.None,
+					2
+				);
+			}
+
+			TabletPlacementRule[] rightPlus1Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+			items[9] = CreateTablet(9, 1299, 15, 0, true, rightPlus1Rules, 3);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				items,
+				null,
+				null,
+				-1,
+				-1,
+				masks
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot, 220);
+
+			int crystalSlot = result.BestItemToSlotIndex[0];
+			int crystalX = crystalSlot % width;
+			int crystalY = crystalSlot / width;
+
+			int cornerNeighborCount = CountBits(masks[0]);
+			int edgeNeighborCount = CountBits(masks[1]);
+			int crystalNeighborCount = CountBits(masks[crystalSlot]);
+
+			Assert.Equal(3, cornerNeighborCount);
+			Assert.Equal(5, edgeNeighborCount);
+			Assert.Equal(8, crystalNeighborCount);
+			Assert.True(crystalX >= 1 && crystalX <= 2);
+			Assert.True(crystalY >= 1 && crystalY <= 2);
+			Assert.True(result.BestScore > result.InitialScore);
+		}
+
+		[Fact(DisplayName = "신비 슬롯 증폭과 금빛침 연쇄 및 조화의 수정 평가 루프가 단일 평가당 힙 메모리 할당 0바이트를 보장한다")]
+		public void Evaluate_GuaranteesZeroHeapAllocationAcrossThousandEvaluations() {
+			int width = 4;
+			int height = 3;
+			int unlockedSlots = 12;
+			uint mysticMask = 1u << 0;
+
+			SlotItemSnapshot attackCore = new SlotItemSnapshot(
+				0,
+				1301,
+				1301,
+				"주력 공격 아티팩트",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				1,
+				6,
+				3,
+				12,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				mysticMask
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				1302,
+				1302,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				0,
+				3,
+				2,
+				6,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				0u,
+				false,
+				1,
+				new[] { 15, 25, 35, 50 },
+				new[] { 15, 25, 35, 50 },
+				null,
+				null,
+				0
+			);
+
+			SlotItemSnapshot crystal = new SlotItemSnapshot(
+				2,
+				1303,
+				1303,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				6,
+				0,
+				false,
+				1,
+				2,
+				3,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Core,
+				mysticMask,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1f, 2f, 2f }
+			);
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			SlotItemSnapshot tablet = CreateTablet(3, 1304, 0, 0, false, rightPlus2Rules, 4);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { attackCore, goldenNeedle, crystal, tablet },
+				new[] { new ComboCategoryInfo(0, "MYSTIC", "신비", 2, new[] { 2, 4 }, true) },
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				InventorySnapshot.ComputeMooreNeighborMasks(width, height, unlockedSlots),
+				1,
+				6
+			);
+
+			int[] layout = new[] { 3, 0, -1, -1, -1, 1, 2, -1, -1, -1, -1, -1 };
+			int[] rotations = new[] { 0, 0, 0, 0 };
+
+			int warmupScore = ObjectiveEvaluator.Evaluate(snapshot, layout, rotations);
+			long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+			int checksum = 0;
+			for (int iter = 0; iter < 1000; iter++) {
+				checksum ^= ObjectiveEvaluator.Evaluate(snapshot, layout, rotations);
+			}
+			long allocatedAfter = GC.GetAllocatedBytesForCurrentThread();
+
+			Assert.True(warmupScore > 0);
+			Assert.Equal(0, checksum);
+			Assert.Equal(0L, allocatedAfter - allocatedBefore);
+		}
+
+		[Fact(DisplayName = "4계층 절대 우선순위가 석판 버프 중첩과 일반 아티팩트 비활성화 역전을 차단하고 조화의 수정 인접 석판 진입을 허용한다")]
+		public void EvaluateAndSolve_EnforcesFourTierHierarchyWithoutInversionAndAllowsCrystalTabletEntry() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot coreAttack = new SlotItemSnapshot(
+				0,
+				1401,
+				1401,
+				"최상 공격 아티팩트",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				6,
+				4,
+				20,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				1u,
+				isCrystalOfHarmony: false
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				1402,
+				1402,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				0,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal
+			);
+
+			SlotItemSnapshot coreCrystal = new SlotItemSnapshot(
+				2,
+				1403,
+				1403,
+				"강화 조화의 수정",
+				SlotItemKind.Artifact,
+				4,
+				0,
+				false,
+				1,
+				2,
+				4,
+				20,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Core,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1f, 2f, 2f }
+			);
+
+			SlotItemSnapshot lowArtifact = new SlotItemSnapshot(
+				3,
+				1404,
+				1404,
+				"낮음 등급 아티팩트",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				0,
+				1,
+				0,
+				1,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				4,
+				ArtifactPriorityTier.Low
+			);
+
+			TabletPlacementRule[] leftPlus1Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				-1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+			TabletPlacementRule[] leftPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				-1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+
+			SlotItemSnapshot tabletA = CreateTablet(4, 1405, 1, 0, false, leftPlus1Rules, 5);
+			SlotItemSnapshot tabletB = CreateTablet(5, 1406, 2, 0, false, leftPlus2Rules, 6);
+
+			InventorySnapshot overlapCheckSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { coreAttack, goldenNeedle, coreCrystal, lowArtifact, tabletA, tabletB },
+				new[] { new ComboCategoryInfo(0, "EMBER", "잉걸불", 1, new[] { 2 }, true) },
+				TalentRuleSnapshot.Default,
+				1401
+			);
+
+			int[] overlapLayout = new[] { 0, 5, 4, 1, 2, 3 };
+			int[] nonOverlapLayout = new[] { 0, 5, 3, 1, 2, 4 };
+			int[] sixRots = new[] { 0, 0, 0, 0, 0, 0 };
+			int overlapScore = ObjectiveEvaluator.Evaluate(overlapCheckSnapshot, overlapLayout, sixRots);
+			int nonOverlapScore = ObjectiveEvaluator.Evaluate(overlapCheckSnapshot, nonOverlapLayout, sixRots);
+
+			int[] blockedBottomRowLayout = new[] { 3, -1, -1, 0, 1, 2 };
+			int[] unblockedTopRowLayout = new[] { 0, -1, -1, 3, 1, 2 };
+			int blockedBottomScore = ObjectiveEvaluator.Evaluate(
+				overlapCheckSnapshot,
+				blockedBottomRowLayout,
+				sixRots
+			);
+			int unblockedTopScore = ObjectiveEvaluator.Evaluate(
+				overlapCheckSnapshot,
+				unblockedTopRowLayout,
+				sixRots
+			);
+
+			int[] baseDisable = new[] { 0, 0, 1, 0, 0, 0 };
+			InventorySnapshot deactivationCheckSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				baseDisable,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { coreAttack, goldenNeedle, lowArtifact },
+				Array.Empty<ComboCategoryInfo>(),
+				TalentRuleSnapshot.Default,
+				1401
+			);
+			int[] sacrificedLowForNeedleLayout = new[] { 0, -1, 2, 1, -1, -1 };
+			int[] safeLowWithLinkedNeedleLayout = new[] { 0, 2, -1, 1, -1, -1 };
+			int[] safeLowEvenWithoutNeedleLayout = new[] { 0, 2, -1, -1, 1, -1 };
+			int[] threeRots = new[] { 0, 0, 0 };
+			int deactivatedLowScore = ObjectiveEvaluator.Evaluate(
+				deactivationCheckSnapshot,
+				sacrificedLowForNeedleLayout,
+				threeRots
+			);
+			int safeLowUnlinkedScore = ObjectiveEvaluator.Evaluate(
+				deactivationCheckSnapshot,
+				safeLowEvenWithoutNeedleLayout,
+				threeRots
+			);
+			int safeLowLinkedScore = ObjectiveEvaluator.Evaluate(
+				deactivationCheckSnapshot,
+				safeLowWithLinkedNeedleLayout,
+				threeRots
+			);
+
+			int cWidth = 4;
+			int cHeight = 3;
+			int cSlots = 12;
+			TabletPlacementRule[] dualNeighborBuffRules = new TabletPlacementRule[cSlots * 4];
+			for (int s = 0; s < cSlots; s++) {
+				int sx = s % cWidth;
+				int sy = s / cWidth;
+				for (int r = 0; r < 4; r++) {
+					int leftTarget = CoordToSlot(sx - 1, sy, cWidth, cHeight, cSlots);
+					int downTarget = CoordToSlot(sx, sy + 1, cWidth, cHeight, cSlots);
+					PrecomputedEffect[] effs = new[] {
+						new PrecomputedEffect(
+							(sbyte)(sx - 1),
+							(sbyte)sy,
+							leftTarget,
+							TabletEffectType.IncreaseConstLevel,
+							2
+						),
+						new PrecomputedEffect(
+							(sbyte)sx,
+							(sbyte)(sy + 1),
+							downTarget,
+							TabletEffectType.IncreaseConstLevel,
+							2
+						)
+					};
+					dualNeighborBuffRules[(s * 4) + r] = new TabletPlacementRule(
+						Array.Empty<PrecomputedCondition>(),
+						effs
+					);
+				}
+			}
+
+			SlotItemSnapshot[] crystalGridItems = new SlotItemSnapshot[10];
+			crystalGridItems[0] = new SlotItemSnapshot(
+				0,
+				1500,
+				1500,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				1,
+				2,
+				3,
+				12,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1f, 2f, 2f }
+			);
+			for (int i = 1; i <= 8; i++) {
+				crystalGridItems[i] = CreateArtifact(
+					i,
+					1500 + i,
+					i - 1,
+					1,
+					4,
+					5,
+					ArtifactConstraintType.None,
+					2
+				);
+			}
+			crystalGridItems[9] = CreateTablet(9, 1599, 11, 0, false, dualNeighborBuffRules, 3);
+
+			InventorySnapshot crystalTabletSnapshot = CreateSimpleSnapshot(
+				cWidth,
+				cHeight,
+				cSlots,
+				crystalGridItems
+			);
+			int[] eightNeighborsNoTabletInside = new[] { 1, 2, 3, -1, 4, 0, 5, -1, 6, 7, 8, -1 };
+			int[] sevenNeighborsPlusTabletAtSlot2 = new[] { 1, 2, 9, 3, 4, 0, 5, -1, 6, 7, 8, -1 };
+			int[] tenRots = new int[10];
+			int excludedTabletScore = ObjectiveEvaluator.Evaluate(
+				crystalTabletSnapshot,
+				eightNeighborsNoTabletInside,
+				tenRots
+			);
+			int enteredTabletScore = ObjectiveEvaluator.Evaluate(
+				crystalTabletSnapshot,
+				sevenNeighborsPlusTabletAtSlot2,
+				tenRots
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			int lWidth = 6;
+			int lHeight = 4;
+			int lSlots = 24;
+			int[] largeDisable = new int[lSlots];
+			largeDisable[23] = 1;
+
+			TabletPlacementRule[] largeBuffRules = CreateDirectionalTabletRules(
+				lWidth,
+				lHeight,
+				lSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			SlotItemSnapshot[] largeItems = new SlotItemSnapshot[13];
+			largeItems[0] = new SlotItemSnapshot(
+				0,
+				1600,
+				1600,
+				"최상 공격 아티팩트",
+				SlotItemKind.Artifact,
+				18,
+				0,
+				false,
+				1,
+				6,
+				4,
+				20,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				1u
+			);
+			largeItems[1] = new SlotItemSnapshot(
+				1,
+				1601,
+				1601,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				0,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal
+			);
+			largeItems[2] = new SlotItemSnapshot(
+				2,
+				1602,
+				1602,
+				"낮음 아티팩트",
+				SlotItemKind.Artifact,
+				23,
+				0,
+				false,
+				0,
+				1,
+				0,
+				1,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Low
+			);
+			for (int i = 3; i < 10; i++) {
+				largeItems[i] = CreateArtifact(
+					i,
+					1600 + i,
+					i,
+					1,
+					4,
+					5,
+					ArtifactConstraintType.None,
+					4
+				);
+			}
+			for (int i = 10; i < 13; i++) {
+				largeItems[i] = CreateTablet(
+					i,
+					1600 + i,
+					i,
+					0,
+					true,
+					largeBuffRules,
+					5
+				);
+			}
+
+			InventorySnapshot largeSnapshot = new InventorySnapshot(
+				lWidth,
+				lHeight,
+				lSlots,
+				new int[lSlots],
+				largeDisable,
+				new int[lSlots],
+				new int[lSlots],
+				new bool[lSlots],
+				true,
+				1,
+				largeItems,
+				new[] { new ComboCategoryInfo(0, "EMBER", "잉걸불", 1, new[] { 2 }, true) },
+				TalentRuleSnapshot.Default,
+				1600
+			);
+			OptimizationResult largeResult = solver.Solve(largeSnapshot, 220);
+
+			Assert.True(nonOverlapScore > overlapScore);
+			Assert.True(unblockedTopScore - blockedBottomScore >= 2400);
+			Assert.True(safeLowUnlinkedScore > deactivatedLowScore);
+			Assert.True(safeLowLinkedScore > safeLowUnlinkedScore);
+			Assert.True(enteredTabletScore > excludedTabletScore);
+			Assert.False(largeResult.UsedExactBranchAndBound);
+			Assert.Equal(largeResult.BestItemToSlotIndex[0] + lWidth, largeResult.BestItemToSlotIndex[1]);
+			for (int i = 0; i < 10; i++) {
+				int placedSlot = largeResult.BestItemToSlotIndex[i];
+				Assert.True(largeResult.BestSlotDetails[placedSlot].IsEnabled);
+			}
+			for (int i = 10; i < 13; i++) {
+				int tabletSlot = largeResult.BestItemToSlotIndex[i];
+				Assert.True(largeResult.BestSlotDetails[tabletSlot].DisplayedLevel <= 0);
+			}
+		}
+
+		private static int CountBits(ulong mask) {
+			int count = 0;
+			while (mask != 0UL) {
+				mask &= mask - 1UL;
+				count++;
+			}
+			return count;
 		}
 
 		private static InventorySnapshot CreateSimpleSnapshot(
