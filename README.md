@@ -1,263 +1,153 @@
-# SephiriaOptimizer
+<div align="center">
 
-![.NET Standard 2.1](https://img.shields.io/badge/.NET%20Standard-2.1-512BD4?logo=dotnet)
-![Unity Mod](https://img.shields.io/badge/Sephiria-Native%20AddOnLoader-000000?logo=unity)
-![Zero Allocation](https://img.shields.io/badge/Evaluator%20GC-0%20Bytes%20(stackalloc)-success)
-![Unit Tests](https://img.shields.io/badge/Tests-21%2F21%20Passing-brightgreen)
+# Sephiria Optimizer
 
-**세피리아(Sephiria)** 인벤토리의 아티팩트, 석판, 세트 콤보(`#태그`), 재능 규칙을 분석하여 **자동 최적 재배치(`[F5]`)**, **슬롯 오버레이 가이드(`[F6]`)**, **빌드 맞춤 설정(`[F7]`)**을 제공하는 인게임 모드입니다.
+**세피리아(Sephiria) 인벤토리 석판·아티팩트 자동 정렬 및 배치 가이드 모드**
 
-> 별도의 모드 로더(`BepInEx` 등) 없이 세피리아 내장 공식 `AddOnLoader`로 동작합니다.
+[![Latest Release](https://img.shields.io/github/v/release/lij0825/SephiriaOptimizer?label=release&style=flat-square&color=2ea44f)](https://github.com/lij0825/SephiriaOptimizer/releases/latest)
+[![Game Version](https://img.shields.io/badge/Sephiria-v1.0.33-3b82f6?style=flat-square)](https://store.steampowered.com/app/2436940/Sephiria/)
+[![Loader](https://img.shields.io/badge/loader-내장%20AddOnLoader-1f2937?style=flat-square)](#설치)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Steam%20Deck%20%7C%20macOS-6366f1?style=flat-square)](#설치)
 
----
+[설치](#설치) · [사용법](#사용법) · [빌드 설정](#빌드-설정-f7) · [업데이트·버전 감지](#업데이트-및-버전-감지) · [반영 규칙](#반영되는-게임-규칙) · [문제 해결](#문제-해결) · [직접 빌드](#직접-빌드-및-릴리즈)
 
-## 목차
-1. [설치 및 제거](#1-설치-및-제거)
-2. [인게임 조작 및 UI](#2-인게임-조작-및-ui)
-3. [도메인 최적화 규칙](#3-도메인-최적화-규칙)
-4. [최적화 파이프라인 및 아키텍처](#4-최적화-파이프라인-및-아키텍처)
-5. [문제 해결 (FAQ & Troubleshooting)](#5-문제-해결-faq--troubleshooting)
-6. [개발 및 빌드](#6-개발-및-빌드)
+</div>
 
 ---
 
-## 1. 설치 및 제거
+별도 모드 로더(BepInEx 등) 없이 세피리아 기본 `AddOnLoader`에서 바로 동작합니다. 현재 인벤토리에 들어 있는 아티팩트, 석판, 세트 태그, 재능 상태를 읽어서 점수가 가장 높은 배치를 찾고 `F5` 한 번으로 정렬해 줍니다.
 
-### 1.1 설치 및 업데이트
-1. [**SephiriaOptimizer_v2.0.0.zip 다운로드**](https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/SephiriaOptimizer_v2.0.0.zip) 후 압축을 해제합니다 (`우클릭 → 모두 압축 풀기`).
-2. 압축을 푼 폴더에서 운영체제에 맞는 설치 스크립트를 실행합니다 (업데이트 시에도 동일):
+---
+
+## 설치
+
+1. [**최신 릴리즈 페이지**](https://github.com/lij0825/SephiriaOptimizer/releases/latest)에서 `SephiriaOptimizer_v2.1.0.zip`을 내려받아 **압축을 풉니다** *(접속이 안 되면 [저장소 직접 다운로드](https://raw.githubusercontent.com/lij0825/SephiriaOptimizer/main/Dist/SephiriaOptimizer_v2.1.0.zip) 이용)*.
+2. 압축을 푼 폴더에서 운영체제에 맞는 설치 파일을 실행합니다.
    - **Windows**: `Install.bat` 더블클릭
-   - **Linux / SteamOS (Steam Deck) / macOS**:
+   - **Steam Deck / Linux / macOS**:
      ```bash
      chmod +x ./install.sh && ./install.sh
      ```
-3. 설치 완료 알림 확인 후 게임을 실행하고 인벤토리(`I` 또는 `Tab`)를 열면 상단 컨트롤 바가 표시됩니다.
+3. 게임을 실행하고 인벤토리(`I` 또는 `Tab`)를 열면 화면 측면에 컨트롤 패널이 나타납니다.
 
-### 1.2 제거
-- **Windows**: `Uninstall.bat` 더블클릭
-- **Linux / SteamOS / macOS**:
-  ```bash
-  ./install.sh --uninstall
-  ```
+> **제거할 때**: Windows는 `Uninstall.bat` 더블클릭, Linux/macOS는 `./install.sh --uninstall`을 실행하면 `AddOns/SephiriaOptimizer` 폴더만 삭제됩니다.
 
-### 1.3 지원 환경 및 자동 처리 항목
-- **다중 스팀 라이브러리 탐색**: 기본 경로 외 타 드라이브(`D:\SteamLibrary` 등), `libraryfolders.vdf`, Steam Deck MicroSD(`/run/media/mmcblk0p1`), Linux Flatpak/Snap, macOS `Sephiria.app` 경로를 자동 탐색합니다.
-- **비표준 경로 1회 기억**: 자동 탐색이 불가능한 포터블 경로는 폴더 선택 창이 열리며, 1회 선택한 경로는 저장되어 이후 업데이트·제거 시 재입력이 필요 없습니다 (`--game-dir "<경로>"`로 변경 가능).
-- **한글·특수문자 경로 지원**: 계정명이나 폴더명에 한글, 공백, `(1)`, `[ ]`, `&`, `!`가 포함된 환경에서도 정상 동작합니다.
-- **권한·잠금·보안 차단 처리**: `Program Files (x86)` 관리자 권한(UAC) 승격 요청, Windows DLL 보안 차단(`Zone.Identifier`) 및 macOS 격리 속성(`com.apple.quarantine`) 해제, 게임 실행 중 파일 잠금 감지, 구버전 클라이언트(`AddOnLoader` 미포함) 감지를 자동 수행합니다.
+스팀 기본 폴더나 타 드라이브 라이브러리는 자동으로 찾으며, 별도 위치에 설치되어 못 찾는 경우에만 폴더 선택 창이 열립니다.
 
 ---
 
-## 2. 인게임 조작 및 UI
+## 사용법
 
-인벤토리 창(`I` 또는 `Tab`)을 열면 상단에 컨트롤 패널과 슬롯 오버레이가 표시되며, 인벤토리를 닫으면 숨겨집니다.
+인벤토리를 열었을 때만 UI가 표시됩니다. 컨트롤 패널은 **물약 가방**, 메인 인벤토리, 보조 가방을 가리지 않도록 화면 측면 여백에 자동 배치되며, 상점이나 세피라이트 제단이 왼쪽에 열리면 반대쪽 여백으로 비켜납니다.
 
-### 2.1 단축키 및 마우스 조작
+### 단축키 및 조작
 
-| 입력 / 조작 | 기능 | 설명 |
+| 조작 | 동작 | 비고 |
 | :---: | :--- | :--- |
-| **`[F5]`** (또는 상단 버튼) | **자동 최적 재배치** | 최적 배치로 아이템 위치 교환 및 석판 회전을 자동 실행합니다. 전투 중이거나 이동 잠금 상태일 때는 오버레이 가이드 모드로 전환됩니다. |
-| **`[F6]`** (또는 상단 버튼) | **가이드 오버레이 토글** | 슬롯 위 이동 목표 좌표, 회전 각도, 예상 레벨 배지를 켜거나 끕니다. |
-| **`[F7]`** (또는 상단 버튼) | **빌드 맞춤 설정 창** | 캘세더니 열쇠 속성, 목표 세트 콤보, 북향의 금빛침 대상, 아티팩트별 강화 우선순위를 설정합니다. |
-| **`[속도: 즉시/순차]` 버튼** | **실행 속도 전환** | `즉시`: 1프레임 일괄 실행 / `순차`: 프레임당 1스텝씩 실행 |
-| **슬롯 우클릭** *(Pin OFF)* | **우선순위 빠른 순환** | 아티팩트 우선순위를 `보통 → 최상 → 높음 → 낮음 → 최하` 순으로 변경하고 재계산합니다. |
-| **슬롯 우클릭** *(Pin ON)* | **슬롯 위치 고정(Pin)** | 해당 슬롯(아이템 또는 빈칸)의 위치와 회전을 고정하여 이동 대상에서 제외합니다. |
-| **슬롯 마우스 오버 / 좌클릭** | **이동 경로 표시** | 현재 슬롯(하늘색)에서 목표 슬롯(초록색)까지의 이동 연결선을 표시합니다. |
+| **`F5`** | **자동 정렬 실행** | 계산된 위치로 아이템 스왑과 석판 회전을 바로 실행합니다. 전투 중이거나 이동이 잠긴 상태에서는 가이드 표시로 대체됩니다. |
+| **`F6`** | **슬롯 가이드 켜기/끄기** | 각 칸의 이동 목표 좌표, 회전 각도, 예상 레벨 배지를 토글합니다. |
+| **`F7`** | **빌드 설정 창 열기/닫기** | 캘세더니 열쇠, 하얀 종이 목표 콤보, 금빛침 대상, 아티팩트 우선순위를 지정합니다. |
+| **슬롯 우클릭** *(Pin OFF)* | **우선순위 변경** | 아티팩트 등급을 `보통 → 최상 → 높음 → 낮음 → 최하` 순으로 바꿉니다. |
+| **슬롯 우클릭** *(Pin ON)* | **슬롯 위치 고정** | 선택한 칸(아이템 또는 빈칸)을 현재 자리에 고정합니다. |
+| **슬롯 마우스 오버 / 좌클릭** | **이동 경로선 표시** | 현재 칸(하늘색)에서 옮겨갈 칸(초록색)까지 선으로 이어 보여줍니다. |
+| **패널 제목줄 드래그 / `⇄` / `—`** | **패널 이동·도킹·접기** | 원하는 위치로 끌어다 놓거나 좌/우 도킹을 바꾸고, 작게 접어둘 수 있습니다. 위치는 자동 저장됩니다. |
 
-### 2.2 슬롯 오버레이 배지
+### 슬롯 위 표시 배지
 
-| 위치 | 표시 예시 | 색상 | 의미 |
-| :---: | :---: | :---: | :--- |
-| **상단** | `→[2, 3]` | 남색 | 최적 배치에서 `2열 3행`(`X=2, Y=3`) 슬롯으로 이동 |
-| **상단** | `↻ +90°` / `+180°` / `+270°` | 보라색 | 현재 슬롯에서 시계 방향 회전(우클릭) 각도 |
-| **우상단** | `최상` / `높음` / `낮음` / `최하` | 금색 / 청록 / 회색 / 자주색 | 지정된 강화 우선순위 등급 (`보통`은 생략) |
-| **좌상단** | `PIN` | 노란색 | 위치·회전이 고정된 슬롯 |
-| **하단** | `Lv.3 (MAX)` | 초록색 | 최대 레벨(`MaxLevel`) 달성 |
-| **하단** | `Lv.2/4` | 파란색 | 활성 상태 및 예상 유효 레벨 |
-| **하단** | `-1 (비활성 경고)` / `제약 미충족` / `비활성 (X)` | 빨간색 | 레벨 `-1` 이하, 위치 제약 미충족, 또는 석판 `"X"`로 인한 비활성화 경고 |
-| **하단** | `최하(콤보유지)` | 자주색 | `최하` 등급 아티팩트가 `-N`/`"X"` 디버프를 대신 흡수 중 (정적 `#태그` 카운트는 유지) |
-| **하단** | `각인 최적` | 금색 | **생존 20(석판 각인)** 보유 시 페널티가 그리드 밖으로 빠져 각인 효율이 가장 높은 석판 |
-
-### 2.3 `[F7]` 빌드 설정 창
-1. **캘세더니 열쇠 목표 속성 (`견고 / 잉걸불 / 빙하 / 마법공학`)**: 행(`Y % 4`)에 따라 부여되는 4종 속성 중 선택한 속성의 행에 배치합니다.
-2. **하얀 종이 & 세트 목표 콤보 (20종)**: `잉걸불`, `얼음무구`, `빙하`, `마법공학`, `그림자`, `수호`, `바람노래`, `신비`, `행성`, `동료`, `정밀`, `먹구름`, `견고`, `호수`, `태양검`, `아카데미`, `저주`, `교섭`, `원소`, `연금술` 중 선택한 태그를 공유하는 두 활성 아티팩트 사이에 하얀 종이를 우선 배치합니다.
-3. **북향의 금빛침 강화 대상**: 보유 중인 공격 아티팩트 목록에서 대상을 지정하면 금빛침을 해당 아티팩트 바로 아래 슬롯에 배치합니다 (`고급` 이하 등급은 `2배` 증폭 표시).
-4. **아티팩트 5단계 강화 우선순위 (`최상 / 높음 / 보통 / 낮음 / 최하`)**: 인벤토리 내 각 아티팩트의 강화 우선순위를 개별 지정합니다.
+| 위치 | 표시 예시 | 의미 |
+| :---: | :---: | :--- |
+| 상단 | `→[2, 3]` | `[2열, 3행]` 칸으로 이동 권장 |
+| 상단 | `↻ +90°` / `+180°` / `+270°` | 제자리에서 시계 방향 회전 필요 |
+| 우상단 | `최상` / `높음` / `낮음` / `최하` | 지정한 아티팩트 우선순위 (`보통`은 표시 생략) |
+| 좌상단 | `PIN` | 위치·회전 고정됨 |
+| 하단 | `Lv.3 (MAX)` / `Lv.2/4` | 배치 후 예상 유효 레벨 |
+| 하단 | `-1 (비활성 경고)` / `제약 미충족` / `비활성 (X)` | 음수 레벨, 위치 조건 불충족, 또는 석판 `X` 효과로 꺼진 상태 |
+| 하단 | `최하(콤보유지)` | `최하`로 지정한 토템 아티팩트가 디버프 칸을 대신 받아내는 상태 (태그 수는 유지) |
+| 하단 | `각인 최적` | 생존 20(석판 각인) 사용 중일 때 디버프를 인벤토리 밖으로 빼기 좋은 석판 |
 
 ---
 
-## 3. 도메인 최적화 규칙
+## 빌드 설정 (`F7`)
 
-### 3.1 유효 레벨·배율·신비 증폭 및 버프 낭비 방지
-- **슬롯 레벨 및 배율(`×M`) 계산**: 영구 각인·임시 레벨과 활성 석판의 `+N`/`-N` 레벨 효과를 합산하고 배율 석판(`MultiplyConstLevel`)을 적용합니다. 변화량이 `0`인 슬롯의 배율 낭비와 음수 디버프 증폭(`-2 → -4`)을 구분해 평가합니다.
-- **신비(`MYSTIC`) 2/4세트 증폭**: 동적 태그 확정 후 활성화된 신비 슬롯에 대해 석판 및 각인 레벨 수치를 `×2`로 증폭합니다.
-- **최대 레벨 클램핑**:
-  $$\text{DisplayedLevel}_i = \left(\text{BaseLevel}_i + \Delta L_s\right) \times \max(1, M_s), \quad L_i = \min\left(\text{MaxLevel}_i,\ \max(0, \text{DisplayedLevel}_i)\right)$$
-  `MaxLevel`을 초과한 잉여 버프에는 감점을 부여하여 다른 아티팩트로 버프를 분산합니다.
-- **버프 손실 및 중첩 차단**: 석판의 `+` 효과·`제약 무시`·`×배율`이 인벤토리 밖으로 이탈하거나 빈 슬롯(`+`/`-` 상쇄 포함)에 버려지는 배치, 다른 석판이 강화한 `+` 슬롯 위에 석판을 올리는 배치를 페널티로 차단합니다.
+1. **캘세더니 열쇠 속성**: 배치된 줄(`행 % 4`)에 따라 바뀌는 `견고 / 잉걸불 / 빙하 / 마법공학` 중 원하는 속성을 고르면 해당 줄에 맞춰 배치합니다.
+2. **하얀 종이 & 목표 세트 콤보 (20종)**: 노리고 있는 세트 태그를 체크해 두면 브레이크포인트 달성에 가산점을 주며, 해당 태그를 가진 두 활성 아티팩트 사이에 하얀 종이를 끼워 넣습니다.
+3. **북향의 금빛침 연결 대상**: 원하는 공격 아티팩트를 직접 찍어두면 그 바로 아래 칸에 금빛침을 붙입니다. `자동`일 때는 가장 효율이 높은 공격 아티팩트(`고급` 이하 2배 증폭 포함)를 알아서 고릅니다.
+4. **아티팩트 5단계 우선순위**:
+   - **`최상` / `높음`**: 주력 딜링 아티팩트. 석판 `+레벨`과 금빛침을 먼저 몰아줍니다.
+   - **`보통` / `낮음`**: 일반 또는 보조 아티팩트. 남는 안전 슬롯에 배치합니다.
+   - **`최하`**: 세트 숫자만 채우는 토템용. `+레벨` 칸을 차지하지 않고 `-레벨`이나 `X` 칸을 대신 막아줍니다.
 
-### 3.2 아티팩트·석판 위치 제약 조건
-비직사각형 해금 인벤토리(`UnlockedSlots % Width != 0`)에서도 유효 높이 `effectiveHeight = (UnlockedSlots + Width - 1) / Width` 기준으로 석판의 `Placed(TOP / BOTTOM / LEFTEND / RIGHTEND / BORDER / INNER / CORNER)` 조건과 아래 10종 아티팩트 제약을 판정합니다.
+---
 
-| 제약 타입 | 인게임 클래스 | 활성화 조건 (`UnlockedSlots` 기준) |
-| :--- | :--- | :--- |
-| **`TopInInventory`** | `CharmActivateCriteria_TopInInventory` | 최상단 행(`Y == 0`) |
-| **`BottomInInventory`** | `CharmActivateCriteria_BottomInInventory` | 하단 `Width`개 해금 슬롯(`slotIndex >= UnlockedSlots - Width`) |
-| **`SideEnd`** | `CharmActivateCriteria_SideEnd` | 좌측 끝(`X == 0`) 또는 우측 끝(`X == Width - 1`) 열 |
-| **`Outlined`** | `CharmActivateCriteria_Outlined` | 상단·하단·좌우 외곽 해금 슬롯 |
-| **`Inside`** | `CharmActivateCriteria_Inside` | 상하좌우가 모두 해금 슬롯으로 둘러싸인 내부 슬롯 |
-| **`BothSideCharm`** | `CharmActivateCriteria_BothSideCharm` | 좌우(`[X-1, Y]`, `[X+1, Y]`) 해금 슬롯에 모두 아티팩트 배치 |
-| **`BothSidesAreEmpty`** | `CharmActivateCriteria_BothSidesAreEmpty` | 좌우 슬롯이 모두 비어 있고 우하단 경계 조건 충족 |
-| **`Near8MagicBook`** | `CharmActivateCriteria_Near8MagicBook` | 인접 8방향 중 마법서(`Charm_Magic`) 1개 이상 존재 |
-| **`NeighborsAreFull`** | `CharmActivateCriteria_NeighborsAreFull` | 인접 8방향 슬롯이 모두 해금되어 있고 아이템으로 채워짐 |
-| **`FullHp`** | `CharmActivateCriteria_FullHP` | 현재 체력이 최대 체력 이상(`hp >= MaxHp`) |
+## 업데이트 및 버전 감지
 
-### 3.3 동적 `#태그` 콤보 파이프라인 (`Pre → Normal → Post`)
+- **인게임 원클릭 업데이트**: 게임을 시작할 때 GitHub Releases에 새 버전이 올라왔는지 한 번 확인합니다. 새 버전이 있으면 패널에 **`원클릭 업데이트`** 버튼이 나타나며, 클릭하면 게임이 켜진 상태에서 바로 새 파일을 받아 교체한 뒤 **`지금 게임 재시작`** 버튼으로 적용할 수 있습니다. 수동으로 확인하려면 패널 하단의 `업데이트 확인`을 누르면 됩니다.
+- **게임 버전 불일치 알림**: 세피리아가 업데이트되어 모드 기준 버전(`v1.0.33`)과 달라지면 패널 상단에 버전 알림이 뜹니다. 단순 버전 숫자만 바뀐 경우에는 알림을 닫고 그대로 쓸 수 있고, 인벤토리 내부 함수 구조까지 바뀌어 오작동 위험이 있으면 아이템 보호를 위해 `F5` 자동 스왑만 잠그고 가이드 오버레이 모드로 동작합니다.
 
-```mermaid
-flowchart LR
-    subgraph Step0["0. 활성 판정"]
-        S0["DisplayedLevel >= 0\n& 비활성(X) 아님\n& 제약 조건 충족"] --> A
-    end
-    subgraph Step1["1. Pre"]
-        A["캘세더니 열쇠"] -->|"활성 시 행(Y)별 부여"| B["견고 / 잉걸불 / 빙하 / 마법공학"]
-    end
-    subgraph Step2["2. Normal"]
-        C["북향의 금빛침"] -->|"활성 루트 추적 (순환 차단)"| D["대상 공격 아티팩트 #태그 복제"]
-    end
-    subgraph Step3["3. Post"]
-        E["하얀 종이"] -->|"좌·우 모두 활성 아티팩트"| F["양옆 공통 #태그 복제"]
-    end
-    B --> C
-    D --> E
-    F --> G["세트 브레이크포인트 및 신비 슬롯 확정"]
+---
+
+## 반영되는 게임 규칙
+
+- **유효 레벨과 신비(2/4) 증폭**: 석판 `+`/`-`, 배율 석판(`×`), 바닥 영구 각인 수치를 합산하며, **신비** 세트가 켜진 슬롯은 아티팩트 최대 레벨이 아니라 **그 칸에 들어가는 석판·각인 레벨을 2배**로 증폭해 계산합니다. 최대 레벨을 넘겨 낭비되는 버프나 다른 석판의 `+` 칸 위에 석판을 겹쳐 올리는 배치는 피합니다.
+- **북향의 금빛침**: 신비 슬롯에 억지로 넣지 않고, 강화할 주력 공격 아티팩트 바로 아래 칸에 붙이는 것을 최우선으로 둡니다. 금빛침 여러 개를 세로로 잇는 연쇄 배치도 지원합니다.
+- **조화의 수정**: 주변 8칸에 놓인 활성 아티팩트들의 유효 레벨 합계만큼 피해 증폭이 오르므로, 고레벨 아티팩트가 주변 8칸을 둘러싸도록 모으되 주변 레벨을 크게 올려주는 핵심 석판은 인접 진입을 허용합니다.
+- **동적 태그 순서**: 인게임 판정 순서 그대로 `캘세더니 열쇠(행 속성)` → `북향의 금빛침(대상 태그 복제)` → `하얀 종이(좌우 공통 태그 복제)` 순으로 계산하며, 본체나 대상이 비활성화되면 태그 복제도 함께 꺼집니다.
+- **위치 조건 및 시너지 아티팩트**: 최상단·최하단·양끝·외곽·내부·양옆 아티팩트·양옆 빈칸·주변 마법서·8방향 가득 참·최대 체력 조건 아티팩트와, **혼돈의 동료**(같은 줄 동료), **행성 모듈**(주변 8칸 행성), **마법 탄환**(같은 열 마법서), **목각 상자**(상단 0~5번 칸), **화염과 냉기**(주력 속성 기준 좌/우 반쪽), 마법서 우측 보조 아티팩트를 모두 고려합니다.
+- **재능**: 생존 20(석판 각인 `-12칸` 축소 인벤토리 경계 및 바닥 각인 합산), 고유한 한 쌍, 무한 콤보 등 찍혀 있는 재능을 자동으로 읽어들입니다.
+
+---
+
+## 문제 해결
+
+<details>
+<summary><b>Install.bat을 눌렀는데 SephiriaOptimizer.dll을 찾을 수 없다고 나옵니다.</b></summary>
+
+`.zip` 파일을 압축 해제하지 않고 윈도우 탐색기 미리보기 안에서 바로 실행했을 때 발생합니다. ZIP 파일을 **우클릭 → 모두 압축 풀기**로 푼 다음 `Install.bat`을 실행해 주세요.
+</details>
+
+<details>
+<summary><b>Program Files 경로에서 권한 오류가 납니다.</b></summary>
+
+`C:\Program Files (x86)\Steam` 아래에 게임이 설치된 경우 관리자 권한(UAC) 확인 창이 뜹니다. `예`를 누르거나 `Install.bat`을 **우클릭 → 관리자 권한으로 실행**해 주세요.
+</details>
+
+<details>
+<summary><b>패널이 안 보이거나 F5를 눌러도 아이템이 안 움직입니다.</b></summary>
+
+- 패널은 인벤토리(`I` 또는 `Tab`)가 열려 있을 때만 보입니다.
+- 전투 중, 상점/제단 외 인벤토리 조작 잠금 상태, 마우스로 아이템을 들고 있는 상태에서는 `F5`를 눌러도 스왑하지 않고 가이드 배지만 띄웁니다.
+- 현재 배치가 이미 최고 점수라면 불필요하게 아이템을 섞지 않습니다.
+</details>
+
+<details>
+<summary><b>이전에 지정한 게임 폴더 경로를 바꾸고 싶습니다.</b></summary>
+
+터미널(또는 명령 프롬프트)에서 새 경로를 넘겨 한 번 실행하면 저장된 경로가 갱신됩니다.
+```powershell
+Install.bat --game-dir "E:\Games\Sephiria"
 ```
-
-- 동적 태그 아티팩트 본체나 참조 대상 아티팩트가 비활성화된 경우 태그 부여·복제 및 시너지 점수가 차단됩니다.
-
-### 3.4 북향의 금빛침 (`Charm_UpCharmDamage`)
-- 주력 공격 아티팩트(`IAttackableCharm`) 바로 아래 슬롯(`rootSlot + Width`) 결합을 최우선으로 배치하며, 신비 슬롯을 불필요하게 점유하지 않습니다.
-- 대상 루트 아티팩트가 `고급(Uncommon)` 이하 등급이면 피해 증폭률을 `2배`로 계산합니다.
-- 다중 금빛침 연쇄(`침 B → 침 A → 공격 아티팩트`)를 지원하며, 상호 순환 참조(`A <-> B`)는 64비트 비트마스크로 즉시 차단합니다.
-
-### 3.5 아티팩트 5단계 강화 우선순위
-
-| 등급 | UI 표기 | 가중치 배율 | 동작 요약 |
-| :---: | :---: | :---: | :--- |
-| **`Core`** | **`최상`** | $\times 3.0$ | 주력 딜러 아티팩트. 석판 `+레벨` 버프와 금빛침을 최우선 배정 |
-| **`High`** | **`높음`** | $\times 1.8$ | 서브 딜러 및 주요 아티팩트 |
-| **`Normal`** | **`보통`** | $\times 1.0$ | 기본 등급 |
-| **`Low`** | **`낮음`** | $\times 0.33$ | 레벨 효율이 낮은 보조 아티팩트. 남는 안전 슬롯에 배치 |
-| **`Sacrifice`** | **`최하`** | $0$ | `#태그` 카운트용 토템. `+레벨`을 피하고 순수 `-N`/`"X"` 디버프 슬롯을 대신 흡수 |
-
-### 3.6 재능 및 특수 아티팩트 시너지
-- **재능 — 생존 20 (석판 각인)**: `-12칸` 축소 인벤토리 경계 재계산, 바닥 영구 각인 효과(`FixedEngraving`) 합산, 석판 페널티 외부 배출(`각인 최적`)을 반영합니다.
-- **재능 — 고유한 한 쌍 / 무한 콤보 / 콤보 당 최종 피해 / 배치 보너스**: 활성 재능 수치를 목적 함수에 자동 반영합니다.
-- **조화의 수정 (`Crystal of Harmony`) & `Charm_NearLevelDamage`**: 인접 8칸(3×3 Moore Neighborhood) 활성 아티팩트들의 유효 레벨 총합을 극대화하며, 주변 아티팩트 레벨을 높여주는 석판의 인접 진입을 허용합니다.
-- **기타 위치 시너지**: `혼돈의 동료`(동일 행 동료 밀집), `행성 모듈`(인접 8칸 행성 밀집), `마법 탄환`(동일 열 마법서 정렬), `목각 상자`(상단 0~5번 슬롯 충전), `화염과 냉기`(공격력 우세 속성 기준 좌·우 반쪽 배치), 마법서 우측 보조 아티팩트(`[X+1, Y]` 마법서 인접)를 모두 반영합니다.
-
----
-
-## 4. 최적화 파이프라인 및 아키텍처
-
-```mermaid
-flowchart TD
-    A["1단계: GameInventoryReader\n불변 스냅샷 캡처 & 정적 Placed 사전 프루닝"] --> B{"2단계: OptimizationSolver\n규모 판정 (Slots <= 8 & Items <= 6)"}
-    B -->|"Small Scale"| C["분기 한정법 (Branch & Bound)\n상한 가지치기 & 40,000 노드 폴백"]
-    B -->|"Large Scale"| D["LAHC (L=256) + 담금질(SA) & 재가열\n수직 쌍 동반 이동 / 3-Way Swap / 2-Opt 폴리싱"]
-    C --> E["3단계: ObjectiveEvaluator.Evaluate\n단일 평가 힙 할당 0 Bytes (stackalloc)\n4계층 우선순위 (Tier 0 ~ Tier 3)"]
-    D --> E
-    E --> F["4단계: CycleDecomposition & AutoSwap\n동형 아이템(SymmetryGroupId) 스왑 제거\n3중 무결성 검증 코루틴 실행"]
-```
-
-- **무할당 평가기 (`0 Bytes` GC Alloc)**: [`ObjectiveEvaluator.Evaluate()`](./SephiriaOptimizer/Solver/ObjectiveEvaluator.cs) 및 탐색 루프는 `stackalloc`, `Span<T>`, `ulong` 비트마스크만 사용하여 힙 할당 없이 동작합니다.
-- **4계층 절대 우선순위 (`Tier 0 ~ Tier 3`)**: 아티팩트 비활성화 방지 및 석판 `+` 칸 침범 금지(`Tier 0`) → 핵심 결합·세트 브레이크포인트(`Tier 1`) → 우선순위별 유효 레벨 및 조화의 수정 증폭(`Tier 2`) → 잉여 버프 정리 및 타이브레이커(`Tier 3`) 순으로 계층 간 점수 역전을 방지합니다.
-- **최소 스왑 실행 및 무결성 검증**: [`CycleDecomposition.BuildExecutionPlan()`](./SephiriaOptimizer/Execution/CycleDecomposition.cs)으로 동형 아이템·빈 슬롯 간 불필요한 이동을 제거하고, [`SephiriaOptimizerController`](./SephiriaOptimizer/UI/SephiriaOptimizerController.cs)가 매 스텝 인벤토리 상태·커서 파지 여부·`InstanceID` 일치 여부를 검증합니다.
-
----
-
-## 5. 문제 해결 (FAQ & Troubleshooting)
-
-<details>
-<summary><b>Q1. Install.bat 실행 시 SephiriaOptimizer.dll을 찾을 수 없다고 표시됩니다. (종료 코드 2)</b></summary>
-
-- `.zip` 파일을 압축 해제하지 않고 탐색기 미리보기(`%TEMP%`) 안에서 바로 실행한 경우입니다.
-- `SephiriaOptimizer_v2.0.0.zip`을 **우클릭 → [모두 압축 풀기]**로 일반 폴더에 푼 뒤 `Install.bat`(또는 `install.sh`)을 실행하세요.
-</details>
-
-<details>
-<summary><b>Q2. 게임이 실행 중이거나 파일이 잠겨 있다는 경고가 표시됩니다. (종료 코드 3)</b></summary>
-
-- 게임 실행 중에는 `SephiriaOptimizer.dll`이 잠겨 교체할 수 없습니다. 게임을 종료한 뒤 알림창의 **`[다시 시도]`**(콘솔은 `R` 입력)를 누르세요.
-</details>
-
-<details>
-<summary><b>Q3. Program Files (x86) 경로에서 쓰기 권한 오류가 발생합니다. (종료 코드 4)</b></summary>
-
-- 자동 표시되는 **관리자 권한(UAC) 창**에서 **`[예]`**를 눌러 승인하거나, `Install.bat`을 **우클릭 → [관리자 권한으로 실행]**(Linux/macOS는 `sudo ./install.sh`)하세요.
-</details>
-
-<details>
-<summary><b>Q4. 공식 내장 AddOnLoader가 없다는 오류가 표시됩니다. (종료 코드 5)</b></summary>
-
-- 세피리아 클라이언트가 구버전이거나 손상된 상태입니다. **Steam → 세피리아 속성 → 설치된 파일 → [게임 파일 무결성 검사]** 및 최신 업데이트 후 다시 실행하세요.
-</details>
-
-<details>
-<summary><b>Q5. 저장된 게임 경로를 다른 폴더로 변경하고 싶습니다. (종료 코드 1)</b></summary>
-
-- 아래 명령으로 새 경로를 지정해 실행하면 저장된 캐시(`game_path.txt`)가 즉시 갱신됩니다:
-  ```powershell
-  Install.bat --game-dir "E:\MyGames\Sephiria"
-  ```
-</details>
-
-<details>
-<summary><b>Q6. UI가 보이지 않거나 [F5]를 눌러도 아이템이 이동하지 않습니다.</b></summary>
-
-- 모드 UI는 **인벤토리 창(`I` 또는 `Tab`)이 열려 있을 때만** 표시됩니다.
-- 전투 중, 인벤토리 이동 잠금 상태, 마우스 커서로 아이템을 집고 있는 상태에서는 안전을 위해 오버레이 가이드 모드(`[F6]`)로만 동작하며, 이미 최고 점수 배치인 경우 추가 스왑을 수행하지 않습니다.
 </details>
 
 ---
 
-## 6. 개발 및 빌드
+## 직접 빌드 및 릴리즈
 
-### 디렉터리 구조
-
-```text
-SephiriaOptimizer/
-├── Dist/                                     # 배포 패키지 및 크로스 플랫폼 설치 스크립트
-│   ├── SephiriaOptimizer_v2.0.0.zip          # Release 빌드 시 자동 생성되는 배포 패키지
-│   ├── Install.bat / Uninstall.bat           # Windows 설치·제거 런처
-│   ├── install.ps1                           # 자동 경로 탐색·검증·설치 코어 스크립트
-│   ├── install.sh                            # Linux / SteamOS / macOS 설치·제거 스크립트
-│   └── SephiriaOptimizer.dll / metadata.json # 빌드 바이너리 및 애드온 메타데이터
-├── SephiriaOptimizer/                        # 메인 모드 프로젝트 (.NET Standard 2.1)
-│   ├── Execution/CycleDecomposition.cs       # 동형 매칭 및 순열 사이클 분해
-│   ├── Models/                               # 불변 스냅샷, 제약 조건, 콤보·재능 모델
-│   ├── Snapshot/GameInventoryReader.cs       # 인게임 인벤토리 리더 및 석판 쿼리 파서
-│   ├── Solver/ObjectiveEvaluator.cs          # stackalloc 무할당 4계층 목적 함수 평가기
-│   ├── Solver/OptimizationSolver.cs          # B&B + LAHC/SA 최적화 솔버
-│   ├── UI/SephiriaOptimizerController.cs     # 인게임 단축키·오버레이·설정 창 컨트롤러
-│   └── SephiriaOptimizerMod.cs               # HorayModBase 엔트리포인트
-└── SephiriaOptimizer.Tests/                  # xUnit 단위 테스트 프로젝트 (.NET 8.0+, 21종)
-```
-
-### 빌드 및 테스트 명령어
-
-`SephiriaOptimizer.csproj`는 환경 변수(`SEPHIRIA_GAME_DIR`), 저장된 경로 캐시(`.sephiria-path`, `game_path.txt`), 레지스트리, 다중 드라이브 및 `libraryfolders.vdf`를 순차 탐색하여 `Sephiria_Data/Managed` 참조를 자동 연결합니다.
+소스를 수정해 직접 빌드하려면 **.NET 8 SDK 이상**과 로컬에 설치된 세피리아 클라이언트가 필요합니다 (`Sephiria_Data/Managed` 참조를 자동으로 찾아 연결합니다).
 
 ```powershell
-# Release 빌드 및 Dist/SephiriaOptimizer_v2.0.0.zip 패키지 갱신
+# Release 빌드 및 Dist/SephiriaOptimizer_v2.1.0.zip 생성
 dotnet build SephiriaOptimizer.sln -c Release --no-incremental
 
-# 빌드 후 로컬 게임 폴더(AddOns/SephiriaOptimizer)에 즉시 배포
+# 빌드와 동시에 로컬 세피리아 AddOns 폴더에 바로 적용
 dotnet build SephiriaOptimizer.sln -c Release -p:DeployToGame=true
 
-# 게임 경로 수동 지정 빌드
-dotnet build SephiriaOptimizer.sln -c Release -p:SephiriaDir="E:\CustomGames\Sephiria"
-
-# 단위 테스트 실행 (21 tests)
+# 단위 테스트 실행 (27개)
 dotnet test SephiriaOptimizer.sln -c Release --no-build
+```
+
+새 버전을 GitHub Releases에 배포할 때는 `SephiriaOptimizer.csproj`와 `metadata.json`의 버전을 올리고 `dotnet build -c Release`로 `Dist/` 산출물을 갱신해 커밋한 뒤, `v*.*.*` 태그를 푸시하면 `.github/workflows/release.yml`이 자동으로 ZIP 패키지가 첨부된 릴리즈를 발행합니다.
+
+```bash
+git tag v2.1.0
+git push origin v2.1.0
 ```
