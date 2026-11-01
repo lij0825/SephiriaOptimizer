@@ -1,4 +1,5 @@
 using SephiriaOptimizer.UI;
+using SephiriaOptimizer.Update;
 using UnityEngine;
 
 namespace SephiriaOptimizer {
@@ -10,10 +11,18 @@ namespace SephiriaOptimizer {
 			if (hostGameObject != null) {
 				return;
 			}
+
+			string modDirectory = VersionCompatibilityChecker.ResolveModDirectory();
+			int removedBackups = GitHubReleaseUpdater.CleanupOldBackupFiles(modDirectory);
+			if (removedBackups > 0) {
+				Debug.Log($"[SephiriaOptimizer] Cleaned up {removedBackups} previous update backup file(s).");
+			}
+
 			hostGameObject = new GameObject("SephiriaOptimizer_Host");
 			Object.DontDestroyOnLoad(hostGameObject);
-			hostGameObject.AddComponent<SephiriaOptimizerController>();
-			Debug.Log("[SephiriaOptimizer] Hybrid Auto-Swap & Overlay Guide Mod initialized.");
+			SephiriaOptimizerController controller = hostGameObject.AddComponent<SephiriaOptimizerController>();
+			controller.InitializeModContext(metadata.modVersion, modDirectory);
+			Debug.Log($"[SephiriaOptimizer] v{ModVersionConstants.CurrentModVersion} initialized.");
 		}
 
 		protected override void OnModUnloaded() {

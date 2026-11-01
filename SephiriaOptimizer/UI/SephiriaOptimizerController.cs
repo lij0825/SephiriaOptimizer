@@ -6,10 +6,28 @@ using SephiriaOptimizer.Execution;
 using SephiriaOptimizer.Models;
 using SephiriaOptimizer.Snapshot;
 using SephiriaOptimizer.Solver;
+using SephiriaOptimizer.Update;
 using UnityEngine;
 
 namespace SephiriaOptimizer.UI {
 	public sealed class SephiriaOptimizerController : MonoBehaviour {
+		private enum PanelDockMode {
+			Auto = 0,
+			Left = 1,
+			Right = 2,
+			Custom = 3
+		}
+
+		private const string PrefKeyDockMode = "SephiriaOptimizer.UI.DockMode";
+		private const string PrefKeyCustomX = "SephiriaOptimizer.UI.CustomX";
+		private const string PrefKeyCustomY = "SephiriaOptimizer.UI.CustomY";
+		private const string PrefKeyCollapsed = "SephiriaOptimizer.UI.Collapsed";
+
+		private const float SidePanelWidth = 276f;
+		private const float CollapsedPanelWidth = 224f;
+		private const float CollapsedPanelHeight = 32f;
+		private const float ScreenEdgeMargin = 12f;
+
 		private static readonly (string Id, string KorName)[] ChalcedonyComboTags = new[] {
 			("STURDY", "견고"),
 			("EMBER", "잉걸불"),
@@ -44,14 +62,31 @@ namespace SephiriaOptimizer.UI {
 		private readonly Dictionary<int, int> customEntityWeights = new Dictionary<int, int>();
 		private readonly OptimizerUserSettings userSettings = new OptimizerUserSettings();
 		private readonly Vector3[] worldCornersBuffer = new Vector3[4];
+		private readonly List<Rect> potionObstacleRects = new List<Rect>(8);
+		private readonly List<Rect> inventoryObstacleRects = new List<Rect>(6);
+		private readonly List<Rect> sidePanelObstacleRects = new List<Rect>(6);
 		private readonly OptimizationSolver solver = new OptimizationSolver();
+		private readonly GitHubReleaseUpdater releaseUpdater = new GitHubReleaseUpdater();
 
 		private InventorySnapshot? latestSnapshot;
 		private OptimizationResult? latestResult;
-		private ExecutionPlan? latestPlan;
+		private GameCompatibilityReport? compatibilityReport;
 
 		private Task<OptimizationResult>? activeSolveTask;
 		private InventorySnapshot? pendingTaskSnapshot;
+
+		private string installedModVersion = ModVersionConstants.CurrentModVersion;
+		private string modDirectoryPath = string.Empty;
+		private bool hasInitializedRuntimeChecks;
+		private bool isVersionWarningDismissed;
+		private bool isRestartPromptDismissed;
+
+		private PanelDockMode dockMode = PanelDockMode.Auto;
+		private Vector2 customPanelPosition = new Vector2(14f, 14f);
+		private bool isPanelCollapsed;
+		private bool isDraggingPanel;
+		private Vector2 dragPointerOffset;
+		private Rect lastRenderedSidePanelRect;
 
 		private bool isOverlayEnabled = true;
 		private bool isPinModeEnabled;
@@ -61,24 +96,88 @@ namespace SephiriaOptimizer.UI {
 		private int lastObservedStateHash;
 		private int selectedSlotIndex = -1;
 		private Vector2 configScrollPos;
-		private string statusBannerText = "준비 완료 — [F5] 자동 배치 / [F6] 가이드 / [F7] 우선순위·콤보 설정";
+		private string statusBannerText = "준비 완료 — [F5] 자동 정렬 / [F6] 가이드 / [F7] 빌드 설정";
 
-		private GUIStyle? panelBoxStyle;
 		private GUIStyle? headerLabelStyle;
 		private GUIStyle? subHeaderStyle;
+		private GUIStyle? statusWrapStyle;
+		private GUIStyle? alertLabelStyle;
 		private GUIStyle? buttonStyle;
+		private GUIStyle? compactButtonStyle;
 		private GUIStyle? activePinButtonStyle;
 		private GUIStyle? selectedButtonStyle;
+		private GUIStyle? accentUpdateButtonStyle;
 		private GUIStyle? badgeStyle;
 		private GUIStyle? coordBadgeStyle;
 		private GUIStyle? pinTagStyle;
 
+		public void InitializeModContext(string? loadedModVersion, string? loadedModDirectory) {
+			if (!string.IsNullOrWhiteSpace(loadedModDirectory)) {
+				modDirectoryPath = loadedModDirectory;
+			}
+			if (!string.IsNullOrWhiteSpace(loadedModVersion)) {
+				installedModVersion = VersionCompatibilityChecker.NormalizeVersionText(loadedModVersion);
+			}
+		}
+
+		private void Start() {
+			LoadLayoutPreferences();
+			EnsureRuntimeChecksInitialized();
+		}
+
+		private void EnsureRuntimeChecksInitialized() {
+			if (hasInitializedRuntimeChecks) {
+				return;
+			}
+			hasInitializedRuntimeChecks = true;
+
+			if (string.IsNullOrWhiteSpace(modDirectoryPath)) {
+				modDirectoryPath = VersionCompatibilityChecker.ResolveModDirectory();
+			}
+			if (VersionCompatibilityChecker.TryReadInstalledMetadata(
+				modDirectoryPath,
+				out string metaModVer,
+				out string metaTargetGameVer
+			)) {
+				installedModVersion = metaModVer;
+				compatibilityReport = VersionCompatibilityChecker.EvaluateCompatibility(
+					Application.version,
+					metaTargetGameVer,
+					installedModVersion,
+					true
+				);
+			} else {
+				compatibilityReport = VersionCompatibilityChecker.EvaluateRuntimeCompatibility(modDirectoryPath);
+			}
+
+			if (compatibilityReport.ShouldWarnUser) {
+				Debug.LogWarning($"[SephiriaOptimizer] {compatibilityReport.BannerMessage}");
+			}
+
+			StartCoroutine(releaseUpdater.CheckForUpdatesCoroutine(installedModVersion, OnUpdaterStateUpdated));
+		}
+
+		private void OnUpdaterStateUpdated() {
+			if (releaseUpdater.CurrentState == UpdateCheckState.UpdateAvailable
+				&& releaseUpdater.LatestRelease != null) {
+				SetStatusBanner(
+					$"새 버전 v{releaseUpdater.LatestRelease.NormalizedVersion} 출시됨 — 패널에서 바로 업데이트 가능"
+				);
+			} else if (releaseUpdater.CurrentState == UpdateCheckState.AppliedPendingRestart) {
+				isRestartPromptDismissed = false;
+				SetStatusBanner(releaseUpdater.StatusMessage);
+			}
+		}
+
 		private void Update() {
+			EnsureRuntimeChecksInitialized();
+
 			UI_CharacterStatusPanel? statusPanel = GetOpenInventoryPanel();
 			if (statusPanel == null) {
 				if (activeSolveTask != null && activeSolveTask.IsCompleted) {
 					activeSolveTask = null;
 				}
+				isDraggingPanel = false;
 				selectedSlotIndex = -1;
 				return;
 			}
@@ -93,7 +192,14 @@ namespace SephiriaOptimizer.UI {
 				return;
 			}
 
-			int currentStateHash = ComputeInventoryStateHash(inventory);
+			int currentStateHash = 0;
+			try {
+				currentStateHash = ComputeInventoryStateHash(inventory);
+			} catch (Exception hashEx) {
+				Debug.LogError($"[SephiriaOptimizer] State hash failed: {hashEx.Message}");
+				SetStatusBanner($"인벤토리 스캔 오류 ({hashEx.GetType().Name}) — 게임 버전을 확인하세요");
+				return;
+			}
 			if (currentStateHash != lastObservedStateHash && !isAutoSwapRunning && activeSolveTask == null) {
 				lastObservedStateHash = currentStateHash;
 				StartBackgroundSolve(avatar, inventory);
@@ -107,8 +213,8 @@ namespace SephiriaOptimizer.UI {
 				isOverlayEnabled = !isOverlayEnabled;
 				SetStatusBanner(
 					isOverlayEnabled
-						? "시각적 오버레이 가이드가 활성화되었습니다."
-						: "시각적 오버레이 가이드가 숨겨졌습니다."
+						? "오버레이 가이드가 켜졌습니다."
+						: "오버레이 가이드가 숨겨졌습니다."
 				);
 			}
 
@@ -116,8 +222,8 @@ namespace SephiriaOptimizer.UI {
 				isConfigPanelOpen = !isConfigPanelOpen;
 				SetStatusBanner(
 					isConfigPanelOpen
-						? "캘세더니 열쇠 / 하얀 종이 / 금빛침 / 강화 우선순위 설정 창이 열렸습니다."
-						: "설정 창이 닫혔습니다."
+						? "빌드 맞춤 설정 창을 열었습니다."
+						: "설정 창을 닫았습니다."
 				);
 			}
 		}
@@ -135,17 +241,17 @@ namespace SephiriaOptimizer.UI {
 			}
 
 			EnsureGuiStyles();
-			DrawTopSummaryControlPanel(statusPanel, avatar, inventory);
+
+			bool shouldDrawSlotOverlay = isOverlayEnabled && latestSnapshot != null && latestResult != null;
+			if (shouldDrawSlotOverlay) {
+				DrawSlotOverlays(statusPanel, latestSnapshot!, latestResult!);
+			}
+
+			DrawSideControlPanel(statusPanel, avatar, inventory);
 
 			if (isConfigPanelOpen && latestSnapshot != null) {
-				DrawConfigPanel(latestSnapshot);
+				DrawConfigPanel(statusPanel, inventory, latestSnapshot);
 			}
-
-			if (!isOverlayEnabled || latestSnapshot == null || latestResult == null) {
-				return;
-			}
-
-			DrawSlotOverlays(statusPanel, latestSnapshot, latestResult);
 		}
 
 		private void StartBackgroundSolve(PlayerAvatar avatar, GridInventory inventory) {
@@ -161,6 +267,7 @@ namespace SephiriaOptimizer.UI {
 				activeSolveTask = Task.Run(() => solver.Solve(snapshot));
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Snapshot capture failed: {ex.Message}");
+				SetStatusBanner($"스냅샷 캡처 오류 ({ex.GetType().Name})");
 			}
 		}
 
@@ -173,13 +280,6 @@ namespace SephiriaOptimizer.UI {
 					OptimizationResult result = activeSolveTask.Result;
 					latestSnapshot = pendingTaskSnapshot;
 					latestResult = result;
-					latestPlan = CycleDecomposition.BuildExecutionPlan(
-						pendingTaskSnapshot,
-						pendingTaskSnapshot.InitialSlotToItemIndex,
-						result.BestSlotToItemIndex,
-						pendingTaskSnapshot.InitialItemRotations,
-						result.BestItemRotations
-					);
 				}
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Solver task failed: {ex.Message}");
@@ -194,6 +294,12 @@ namespace SephiriaOptimizer.UI {
 			PlayerAvatar avatar,
 			GridInventory inventory
 		) {
+			if (compatibilityReport != null && compatibilityReport.ShouldLockAutoSwap) {
+				isOverlayEnabled = true;
+				SetStatusBanner(compatibilityReport.BannerMessage);
+				return;
+			}
+
 			if (isAutoSwapRunning) {
 				SetStatusBanner("자동 재배치가 이미 진행 중입니다.");
 				return;
@@ -211,29 +317,37 @@ namespace SephiriaOptimizer.UI {
 				string reason = avatar.IsInBattle
 					? "전투 중에는 자동 스왑이 제한됩니다"
 					: "현재 인벤토리 이동이 잠겨 있습니다";
-				SetStatusBanner($"{reason} → 오버레이 가이드 모드로 자동 전환됨!");
+				SetStatusBanner($"{reason} → 가이드 모드로 전환됨");
 				return;
 			}
 
-			InventorySnapshot snapshot = GameInventoryReader.CaptureSnapshot(
-				avatar,
-				inventory,
-				pinnedSlotIndices,
-				customEntityWeights,
-				userSettings
-			);
-			OptimizationResult result = solver.Solve(snapshot);
-			ExecutionPlan plan = CycleDecomposition.BuildExecutionPlan(
-				snapshot,
-				snapshot.InitialSlotToItemIndex,
-				result.BestSlotToItemIndex,
-				snapshot.InitialItemRotations,
-				result.BestItemRotations
-			);
+			InventorySnapshot snapshot;
+			OptimizationResult result;
+			ExecutionPlan plan;
+			try {
+				snapshot = GameInventoryReader.CaptureSnapshot(
+					avatar,
+					inventory,
+					pinnedSlotIndices,
+					customEntityWeights,
+					userSettings
+				);
+				result = solver.Solve(snapshot);
+				plan = CycleDecomposition.BuildExecutionPlan(
+					snapshot,
+					snapshot.InitialSlotToItemIndex,
+					result.BestSlotToItemIndex,
+					snapshot.InitialItemRotations,
+					result.BestItemRotations
+				);
+			} catch (Exception solveEx) {
+				Debug.LogError($"[SephiriaOptimizer] AutoSwap solve failed: {solveEx.Message}");
+				SetStatusBanner($"최적화 계산 실패 ({solveEx.GetType().Name})");
+				return;
+			}
 
 			latestSnapshot = snapshot;
 			latestResult = result;
-			latestPlan = plan;
 
 			if (result.BestScore <= result.InitialScore || plan.TotalOperations == 0) {
 				SetStatusBanner($"이미 최적 배치 상태입니다 (점수: {result.BestScore}).");
@@ -252,7 +366,7 @@ namespace SephiriaOptimizer.UI {
 			OptimizationResult targetResult
 		) {
 			isAutoSwapRunning = true;
-			SetStatusBanner($"자동 정렬 실행 중... (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)");
+			SetStatusBanner($"자동 정렬 중... (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)");
 
 			int unlockedSlots = snapshot.UnlockedSlots;
 			int[] expectedSlotInstanceIds = new int[unlockedSlots];
@@ -263,20 +377,20 @@ namespace SephiriaOptimizer.UI {
 					: -1;
 			}
 
-			bool canVerifyPerStep = inventory.isServer || !executeInSingleFrame;
+			bool canVerifyPerStep = inventory.isServer;
 			if (!canVerifyPerStep && !VerifyAllSlotInstanceIds(inventory, snapshot, expectedSlotInstanceIds)) {
-				AbortAutoSwap("슬롯 아이템 상태 변경 감지됨 → 자동 스왑 중단 및 상태 재스캔");
+				AbortAutoSwap("슬롯 아이템 상태 변경 감지됨 → 자동 스왑 중단 및 재스캔");
 				yield break;
 			}
 
 			IReadOnlyList<SlotSwapStep> swaps = plan.SwapSteps;
 			for (int i = 0; i < swaps.Count; i++) {
 				if (!CanContinueAutoSwap(statusPanel, avatar, inventory)) {
-					AbortAutoSwap("이동 제한 감지됨 → 자동 스왑 중단 및 오버레이 가이드로 폴백");
+					AbortAutoSwap("이동 제한 감지됨 → 자동 스왑 중단 및 가이드 폴백");
 					yield break;
 				}
 				if (IsCursorHoldingAnyItem()) {
-					AbortAutoSwap("커서 아이템 파지(HoldItem) 감지됨 → 자동 스왑 즉시 중단 및 상태 재스캔");
+					AbortAutoSwap("커서 아이템 집기 감지됨 → 자동 스왑 중단 및 재스캔");
 					yield break;
 				}
 
@@ -293,7 +407,7 @@ namespace SephiriaOptimizer.UI {
 						expectedSlotInstanceIds[step.SecondSlotIndex]
 					);
 					if (!firstValid || !secondValid) {
-						AbortAutoSwap("슬롯 InstanceID 불일치 감지됨 → 자동 스왑 즉시 중단 및 상태 재스캔");
+						AbortAutoSwap("슬롯 InstanceID 불일치 감지됨 → 자동 스왑 중단 및 재스캔");
 						yield break;
 					}
 				}
@@ -324,15 +438,15 @@ namespace SephiriaOptimizer.UI {
 
 				for (int click = 0; click < rotStep.ClickCount; click++) {
 					if (!CanContinueAutoSwap(statusPanel, avatar, inventory)) {
-						AbortAutoSwap("이동 제한 감지됨 → 자동 회전 중단 및 오버레이 가이드로 폴백");
+						AbortAutoSwap("이동 제한 감지됨 → 자동 회전 중단 및 가이드 폴백");
 						yield break;
 					}
 					if (IsCursorHoldingAnyItem()) {
-						AbortAutoSwap("커서 아이템 파지(HoldItem) 감지됨 → 자동 회전 즉시 중단 및 상태 재스캔");
+						AbortAutoSwap("커서 아이템 집기 감지됨 → 자동 회전 중단 및 재스캔");
 						yield break;
 					}
 					if (canVerifyPerStep && !VerifySlotInstanceId(inventory, rotStep.TargetCoord, expectedId)) {
-						AbortAutoSwap("석판 슬롯 InstanceID 불일치 감지됨 → 자동 회전 즉시 중단 및 상태 재스캔");
+						AbortAutoSwap("석판 InstanceID 불일치 감지됨 → 자동 회전 중단 및 재스캔");
 						yield break;
 					}
 
@@ -350,7 +464,7 @@ namespace SephiriaOptimizer.UI {
 			isAutoSwapRunning = false;
 			lastObservedStateHash = 0;
 			SetStatusBanner(
-				$"자동 재배치 완료! ({targetResult.InitialScore}점 → {targetResult.BestScore}점, "
+				$"재배치 완료 ({targetResult.InitialScore} → {targetResult.BestScore}점, "
 				+ $"{plan.SwapSteps.Count}회 스왑)"
 			);
 		}
@@ -414,120 +528,731 @@ namespace SephiriaOptimizer.UI {
 			return true;
 		}
 
-		private void DrawTopSummaryControlPanel(
+		private void DrawSideControlPanel(
 			UI_CharacterStatusPanel statusPanel,
 			PlayerAvatar avatar,
 			GridInventory inventory
 		) {
-			float panelWidth = 840f;
-			float panelHeight = 92f;
-			float panelX = Mathf.Max(16f, (Screen.width - panelWidth) * 0.5f);
-			float panelY = 12f;
+			bool showVersionStrip = compatibilityReport != null
+				&& compatibilityReport.ShouldWarnUser
+				&& (!isVersionWarningDismissed || compatibilityReport.ShouldLockAutoSwap);
+			bool showUpdateStrip = ShouldDisplayUpdateStrip();
 
-			if (TryGetInventoryGridBounds(statusPanel, inventory, out Rect gridBounds)) {
-				panelX = Mathf.Clamp(
-					gridBounds.center.x - (panelWidth * 0.5f),
-					12f,
-					Mathf.Max(12f, Screen.width - panelWidth - 12f)
-				);
-				panelY = Mathf.Max(10f, gridBounds.yMin - panelHeight - 10f);
+			float targetWidth = isPanelCollapsed ? CollapsedPanelWidth : SidePanelWidth;
+			float targetHeight = isPanelCollapsed
+				? CollapsedPanelHeight
+				: CalculateExpandedPanelHeight(showVersionStrip, showUpdateStrip);
+
+			Rect panelRect = ComputeSafeSidePanelRect(statusPanel, inventory, targetWidth, targetHeight);
+			lastRenderedSidePanelRect = panelRect;
+
+			DrawColoredBox(panelRect, new Color(0.06f, 0.08f, 0.13f, 0.94f));
+			Color borderColor = compatibilityReport != null && compatibilityReport.ShouldLockAutoSwap
+				? new Color(0.95f, 0.28f, 0.28f, 0.92f)
+				: (showUpdateStrip
+					? new Color(0.25f, 0.88f, 0.55f, 0.92f)
+					: new Color(0.32f, 0.62f, 0.92f, 0.88f));
+			DrawRectBorder(panelRect, borderColor, 1.5f);
+
+			if (isPanelCollapsed) {
+				DrawCollapsedPanelHeader(panelRect, showVersionStrip || showUpdateStrip);
+				return;
 			}
 
-			Rect panelRect = new Rect(panelX, panelY, panelWidth, panelHeight);
-			GUI.Box(panelRect, GUIContent.none, panelBoxStyle!);
+			float padX = panelRect.x + 8f;
+			float innerWidth = panelRect.width - 16f;
+			float curY = panelRect.y + 6f;
+
+			Rect dragHeaderRect = new Rect(padX, curY, innerWidth - 58f, 22f);
+			string dockTag = GetDockShortLabel(dockMode);
+			GUI.Label(
+				dragHeaderRect,
+				$"Optimizer v{installedModVersion} [{dockTag}]",
+				headerLabelStyle!
+			);
+
+			if (GUI.Button(new Rect(panelRect.xMax - 60f, curY, 26f, 22f), "⇄", compactButtonStyle!)) {
+				CycleDockMode();
+			}
+			if (GUI.Button(new Rect(panelRect.xMax - 31f, curY, 23f, 22f), "—", compactButtonStyle!)) {
+				isPanelCollapsed = true;
+				SaveLayoutPreferences();
+				return;
+			}
+			HandlePanelDragEvents(dragHeaderRect, panelRect);
+			curY += 26f;
+
+			if (showVersionStrip && compatibilityReport != null) {
+				curY = DrawVersionCompatibilityStrip(padX, curY, innerWidth, compatibilityReport);
+			}
+
+			if (showUpdateStrip) {
+				curY = DrawReleaseUpdateStrip(padX, curY, innerWidth);
+			}
+
+			Rect scoreBox = new Rect(padX, curY, innerWidth, 40f);
+			DrawColoredBox(scoreBox, new Color(0.11f, 0.15f, 0.22f, 0.92f));
 
 			int curScore = latestResult != null ? latestResult.InitialScore : 0;
 			int optScore = latestResult != null ? latestResult.BestScore : 0;
 			int delta = optScore - curScore;
+			string deltaStr = delta >= 0 ? $"+{delta}" : delta.ToString();
 			string solverMode = latestResult != null
 				? (latestResult.UsedExactBranchAndBound ? "Exact B&B" : "LAHC+SA")
-				: "대기 중";
-			string timeStr = latestResult != null
-				? $"{latestResult.ElapsedMilliseconds:F1}ms"
-				: "-";
-			string deltaStr = delta >= 0 ? $"+{delta}" : delta.ToString();
-
+				: "스캔 대기";
+			string timeStr = latestResult != null ? $"{latestResult.ElapsedMilliseconds:F1}ms" : "-";
 			string talentInfo = BuildTalentSummaryBadge(latestSnapshot);
-			string scoreHeader = $"[Sephiria Optimizer] 현재: {curScore} vs 최적: {optScore} ({deltaStr}) "
-				+ $"| {solverMode} ({timeStr}){talentInfo}";
 
-			GUI.Label(new Rect(panelX + 12f, panelY + 6f, panelWidth - 24f, 22f), scoreHeader, headerLabelStyle!);
+			GUI.Label(
+				new Rect(padX + 6f, curY + 2f, innerWidth - 12f, 19f),
+				$"점수: {curScore} → {optScore} ({deltaStr})",
+				headerLabelStyle!
+			);
+			GUI.Label(
+				new Rect(padX + 6f, curY + 20f, innerWidth - 12f, 18f),
+				$"{solverMode} ({timeStr}){talentInfo}",
+				subHeaderStyle!
+			);
+			curY += 45f;
 
-			float btnY = panelY + 32f;
-			float btnH = 26f;
-
-			if (GUI.Button(new Rect(panelX + 12f, btnY, 132f, btnH), "[F5] 자동 정렬 실행", buttonStyle!)) {
+			bool isSwapLocked = compatibilityReport != null && compatibilityReport.ShouldLockAutoSwap;
+			string f5Text = isSwapLocked ? "[F5] 자동 정렬 잠김 (API 변경)" : "[F5] 자동 정렬 실행";
+			if (GUI.Button(new Rect(padX, curY, innerWidth, 27f), f5Text, buttonStyle!)) {
 				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
 			}
+			curY += 31f;
 
+			float halfW = (innerWidth - 4f) * 0.5f;
 			string f6Label = isOverlayEnabled ? "[F6] 가이드: 켜짐" : "[F6] 가이드: 꺼짐";
-			if (GUI.Button(new Rect(panelX + 148f, btnY, 126f, btnH), f6Label, buttonStyle!)) {
+			GUIStyle f6Style = isOverlayEnabled ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(padX, curY, halfW, 25f), f6Label, f6Style)) {
 				isOverlayEnabled = !isOverlayEnabled;
 			}
 
-			string f7Label = isConfigPanelOpen ? "[F7] 빌드 설정: 닫기" : "[F7] 우선순위·콤보 설정";
-			GUIStyle cfgBtnStyle = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 278f, btnY, 154f, btnH), f7Label, cfgBtnStyle)) {
+			string f7Label = isConfigPanelOpen ? "[F7] 설정 닫기" : "[F7] 빌드 설정";
+			GUIStyle f7Style = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 25f), f7Label, f7Style)) {
 				isConfigPanelOpen = !isConfigPanelOpen;
 			}
+			curY += 29f;
 
 			int pinCount = pinnedSlotIndices.Count;
-			string pinLabel = isPinModeEnabled
-				? $"[Pin: ON] (고정:{pinCount})"
-				: $"[Pin: OFF] (고정:{pinCount})";
+			string pinLabel = isPinModeEnabled ? $"Pin: ON ({pinCount})" : $"Pin: OFF ({pinCount})";
 			GUIStyle currentPinStyle = isPinModeEnabled ? activePinButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 436f, btnY, 152f, btnH), pinLabel, currentPinStyle)) {
+			if (GUI.Button(new Rect(padX, curY, halfW, 25f), pinLabel, currentPinStyle)) {
 				isPinModeEnabled = !isPinModeEnabled;
 				SetStatusBanner(
 					isPinModeEnabled
-						? "Pin 모드 ON: 슬롯 우클릭 시 위치 고정 (OFF일 땐 우클릭으로 아티팩트 우선순위 변경)"
-						: "Pin 모드 OFF: 아티팩트 슬롯 우클릭 시 강화 우선순위(최상/높음/보통/낮음/최하)가 순환됩니다."
+						? "Pin ON: 슬롯 우클릭으로 위치 고정"
+						: "Pin OFF: 아티팩트 우클릭으로 우선순위 변경"
 				);
 			}
 
-			string speedLabel = executeInSingleFrame ? "속도: 즉시(1프레임)" : "속도: 순차(프레임별)";
+			string speedLabel = executeInSingleFrame ? "속도: 즉시(1F)" : "속도: 순차";
 			GUIStyle speedStyle = executeInSingleFrame ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(panelX + 592f, btnY, 124f, btnH), speedLabel, speedStyle)) {
+			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 25f), speedLabel, speedStyle)) {
 				executeInSingleFrame = !executeInSingleFrame;
 				SetStatusBanner(
 					executeInSingleFrame
-						? "고속 실행 모드 ON: 단일 프레임 내 일괄 스왑 및 회전 처리"
-						: "순차 실행 모드 ON: 프레임별 스텝 실행 및 실시간 무결성 검증"
+						? "고속 모드: 단일 프레임 일괄 스왑·회전"
+						: "순차 모드: 프레임별 실행 및 실시간 검증"
 				);
 			}
+			curY += 29f;
 
-			if (GUI.Button(new Rect(panelX + 720f, btnY, 108f, btnH), "설정/고정 초기화", buttonStyle!)) {
-				pinnedSlotIndices.Clear();
-				userSettings.InstancePriorities.Clear();
-				userSettings.PreferredChalcedonyCategory = string.Empty;
-				userSettings.TargetComboCategories.Clear();
-				userSettings.PreferredNeedleTargetInstanceId = -1;
-				lastObservedStateHash = 0;
-				SetStatusBanner("모든 슬롯 고정 및 우선순위/콤보 설정이 초기화되었습니다.");
+			if (GUI.Button(new Rect(padX, curY, halfW, 23f), "설정/고정 초기화", compactButtonStyle!)) {
+				ResetUserCustomizations();
 			}
 
+			string checkBtnLabel = releaseUpdater.CurrentState == UpdateCheckState.Checking
+				? "확인 중..."
+				: "업데이트 확인";
+			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 23f), checkBtnLabel, compactButtonStyle!)) {
+				TriggerManualUpdateCheck();
+			}
+			curY += 27f;
+
 			GUI.Label(
-				new Rect(panelX + 12f, panelY + 64f, panelWidth - 24f, 20f),
-				$"상태: {statusBannerText}",
-				badgeStyle!
+				new Rect(padX + 2f, curY, innerWidth - 4f, 34f),
+				statusBannerText,
+				statusWrapStyle!
 			);
 		}
 
-		private void DrawConfigPanel(InventorySnapshot snapshot) {
-			float width = 530f;
-			float height = Mathf.Min(600f, Screen.height - 125f);
-			float panelX = 16f;
-			float panelY = 112f;
+		private void DrawCollapsedPanelHeader(Rect panelRect, bool hasAttentionAlert) {
+			float padX = panelRect.x + 8f;
+			Rect dragRect = new Rect(padX, panelRect.y + 4f, panelRect.width - 70f, 24f);
+			string alertMark = hasAttentionAlert ? " ●" : string.Empty;
+			GUI.Label(dragRect, $"Optimizer v{installedModVersion}{alertMark}", headerLabelStyle!);
 
-			Rect winRect = new Rect(panelX, panelY, width, height);
-			DrawColoredBox(winRect, new Color(0.07f, 0.09f, 0.14f, 0.96f));
+			if (GUI.Button(new Rect(panelRect.xMax - 58f, panelRect.y + 5f, 25f, 22f), "⇄", compactButtonStyle!)) {
+				CycleDockMode();
+			}
+			if (GUI.Button(new Rect(panelRect.xMax - 30f, panelRect.y + 5f, 23f, 22f), "+", compactButtonStyle!)) {
+				isPanelCollapsed = false;
+				SaveLayoutPreferences();
+				return;
+			}
+			HandlePanelDragEvents(dragRect, panelRect);
+		}
+
+		private float DrawVersionCompatibilityStrip(
+			float x,
+			float y,
+			float width,
+			GameCompatibilityReport report
+		) {
+			float stripHeight = 42f;
+			Rect stripRect = new Rect(x, y, width, stripHeight);
+			Color fill = report.ShouldLockAutoSwap
+				? new Color(0.45f, 0.10f, 0.12f, 0.94f)
+				: new Color(0.42f, 0.28f, 0.06f, 0.94f);
+			Color border = report.ShouldLockAutoSwap
+				? new Color(0.95f, 0.30f, 0.30f, 0.95f)
+				: new Color(0.95f, 0.72f, 0.20f, 0.95f);
+
+			DrawColoredBox(stripRect, fill);
+			DrawRectBorder(stripRect, border, 1f);
+
+			float textWidth = report.ShouldLockAutoSwap ? width - 10f : width - 30f;
+			GUI.Label(
+				new Rect(x + 6f, y + 3f, textWidth, stripHeight - 6f),
+				report.BannerMessage,
+				alertLabelStyle!
+			);
+
+			if (!report.ShouldLockAutoSwap
+				&& GUI.Button(new Rect(x + width - 24f, y + 4f, 20f, 18f), "✕", compactButtonStyle!)) {
+				isVersionWarningDismissed = true;
+			}
+			return y + stripHeight + 5f;
+		}
+
+		private float DrawReleaseUpdateStrip(float x, float y, float width) {
+			UpdateCheckState state = releaseUpdater.CurrentState;
+			GitHubReleaseInfo? release = releaseUpdater.LatestRelease;
+
+			if (state == UpdateCheckState.Downloading) {
+				float dlHeight = 34f;
+				Rect dlRect = new Rect(x, y, width, dlHeight);
+				DrawColoredBox(dlRect, new Color(0.10f, 0.26f, 0.38f, 0.95f));
+				DrawRectBorder(dlRect, new Color(0.35f, 0.78f, 1f, 0.9f), 1f);
+				int pct = Mathf.Clamp(Mathf.RoundToInt(releaseUpdater.DownloadProgress * 100f), 0, 100);
+				GUI.Label(
+					new Rect(x + 6f, y + 7f, width - 12f, 20f),
+					$"업데이트 다운로드·설치 중... ({pct}%)",
+					alertLabelStyle!
+				);
+				return y + dlHeight + 5f;
+			}
+
+			float stripHeight = 52f;
+			Rect boxRect = new Rect(x, y, width, stripHeight);
+			Color bgColor = state == UpdateCheckState.Failed
+				? new Color(0.42f, 0.14f, 0.14f, 0.94f)
+				: new Color(0.08f, 0.30f, 0.20f, 0.95f);
+			Color lineColor = state == UpdateCheckState.Failed
+				? new Color(0.92f, 0.38f, 0.38f, 0.92f)
+				: new Color(0.28f, 0.92f, 0.55f, 0.92f);
+
+			DrawColoredBox(boxRect, bgColor);
+			DrawRectBorder(boxRect, lineColor, 1f);
+
+			if (state == UpdateCheckState.UpdateAvailable && release != null) {
+				GUI.Label(
+					new Rect(x + 6f, y + 3f, width - 12f, 20f),
+					$"새 버전 v{release.NormalizedVersion} 출시 (현재 v{installedModVersion})",
+					alertLabelStyle!
+				);
+				float primaryW = width - 74f;
+				if (release.HasDownloadableAsset) {
+					if (GUI.Button(
+						new Rect(x + 5f, y + 25f, primaryW, 22f),
+						"원클릭 업데이트",
+						accentUpdateButtonStyle!
+					)) {
+						StartCoroutine(releaseUpdater.DownloadAndApplyUpdateCoroutine(
+							modDirectoryPath,
+							OnUpdaterStateUpdated
+						));
+					}
+				} else if (GUI.Button(
+					new Rect(x + 5f, y + 25f, primaryW, 22f),
+					"GitHub 다운로드 열기",
+					accentUpdateButtonStyle!
+				)) {
+					Application.OpenURL(release.HtmlUrl);
+				}
+
+				if (GUI.Button(new Rect(x + primaryW + 9f, y + 25f, 60f, 22f), "노트", compactButtonStyle!)) {
+					Application.OpenURL(release.HtmlUrl);
+				}
+			} else if (state == UpdateCheckState.AppliedPendingRestart) {
+				GUI.Label(
+					new Rect(x + 6f, y + 3f, width - 12f, 20f),
+					releaseUpdater.StatusMessage,
+					alertLabelStyle!
+				);
+				float restartW = width - 66f;
+				if (GUI.Button(
+					new Rect(x + 5f, y + 25f, restartW, 22f),
+					"지금 게임 재시작",
+					accentUpdateButtonStyle!
+				)) {
+					RestartGameViaSteam();
+				}
+				if (GUI.Button(new Rect(x + restartW + 9f, y + 25f, 52f, 22f), "나중에", compactButtonStyle!)) {
+					isRestartPromptDismissed = true;
+				}
+			} else if (state == UpdateCheckState.Failed) {
+				GUI.Label(
+					new Rect(x + 6f, y + 3f, width - 12f, 20f),
+					releaseUpdater.StatusMessage,
+					alertLabelStyle!
+				);
+				float halfBtn = (width - 14f) * 0.5f;
+				if (GUI.Button(new Rect(x + 5f, y + 25f, halfBtn, 22f), "다시 확인", compactButtonStyle!)) {
+					TriggerManualUpdateCheck();
+				}
+				if (GUI.Button(
+					new Rect(x + 9f + halfBtn, y + 25f, halfBtn, 22f),
+					"릴리즈 열기",
+					compactButtonStyle!
+				)) {
+					string targetUrl = release != null
+						? release.HtmlUrl
+						: ModVersionConstants.GitHubReleasesPageUrl;
+					Application.OpenURL(targetUrl);
+				}
+			}
+
+			return y + stripHeight + 5f;
+		}
+
+		private bool ShouldDisplayUpdateStrip() {
+			return releaseUpdater.CurrentState switch {
+				UpdateCheckState.UpdateAvailable => true,
+				UpdateCheckState.Downloading => true,
+				UpdateCheckState.AppliedPendingRestart => !isRestartPromptDismissed,
+				UpdateCheckState.Failed => true,
+				_ => false
+			};
+		}
+
+		private float CalculateExpandedPanelHeight(bool showVersionStrip, bool showUpdateStrip) {
+			float totalHeight = 232f;
+			if (showVersionStrip) {
+				totalHeight += 47f;
+			}
+			if (showUpdateStrip) {
+				totalHeight += releaseUpdater.CurrentState == UpdateCheckState.Downloading ? 39f : 57f;
+			}
+			return totalHeight;
+		}
+
+		private void TriggerManualUpdateCheck() {
+			if (releaseUpdater.CurrentState == UpdateCheckState.Checking
+				|| releaseUpdater.CurrentState == UpdateCheckState.Downloading) {
+				return;
+			}
+			SetStatusBanner("GitHub Releases 최신 버전을 확인하고 있습니다...");
+			StartCoroutine(releaseUpdater.CheckForUpdatesCoroutine(
+				installedModVersion,
+				() => {
+					OnUpdaterStateUpdated();
+					if (releaseUpdater.CurrentState == UpdateCheckState.UpToDate) {
+						SetStatusBanner(releaseUpdater.StatusMessage);
+					}
+				}
+			));
+		}
+
+		private static void RestartGameViaSteam() {
+			Application.OpenURL(ModVersionConstants.SteamRunGameUri);
+			Application.Quit();
+		}
+
+		private void ResetUserCustomizations() {
+			pinnedSlotIndices.Clear();
+			userSettings.InstancePriorities.Clear();
+			userSettings.PreferredChalcedonyCategory = string.Empty;
+			userSettings.TargetComboCategories.Clear();
+			userSettings.PreferredNeedleTargetInstanceId = -1;
+			lastObservedStateHash = 0;
+			SetStatusBanner("슬롯 고정 및 우선순위·콤보 설정을 초기화했습니다.");
+		}
+
+		private Rect ComputeSafeSidePanelRect(
+			UI_CharacterStatusPanel statusPanel,
+			GridInventory inventory,
+			float panelWidth,
+			float panelHeight
+		) {
+			if (dockMode == PanelDockMode.Custom) {
+				return ClampRectToScreen(
+					new Rect(customPanelPosition.x, customPanelPosition.y, panelWidth, panelHeight)
+				);
+			}
+
+			CollectProtectedGameUiRects(statusPanel, inventory, out bool hasLeftFacilityOpen);
+
+			Rect centralColumnBounds = BuildCentralColumnBounds(statusPanel, inventory);
+			float topAlignY = centralColumnBounds.width > 1f
+				? Mathf.Max(ScreenEdgeMargin, centralColumnBounds.yMin)
+				: ScreenEdgeMargin;
+
+			float leftOfSetX = centralColumnBounds.xMin - panelWidth - 12f;
+			for (int i = 0; i < sidePanelObstacleRects.Count; i++) {
+				Rect sideObs = sidePanelObstacleRects[i];
+				if (sideObs.center.x < centralColumnBounds.center.x) {
+					leftOfSetX = Mathf.Min(leftOfSetX, sideObs.xMin - panelWidth - 10f);
+				}
+			}
+
+			float rightOfCentralX = centralColumnBounds.width > 1f
+				? centralColumnBounds.xMax + 12f
+				: Screen.width - panelWidth - ScreenEdgeMargin;
+
+			Rect candImmediateLeft = ClampRectToScreen(new Rect(leftOfSetX, topAlignY, panelWidth, panelHeight));
+			Rect candTopLeft = ClampRectToScreen(
+				new Rect(ScreenEdgeMargin, ScreenEdgeMargin, panelWidth, panelHeight)
+			);
+			Rect candBottomLeft = ClampRectToScreen(
+				new Rect(
+					ScreenEdgeMargin,
+					Screen.height - panelHeight - ScreenEdgeMargin,
+					panelWidth,
+					panelHeight
+				)
+			);
+			Rect candImmediateRight = ClampRectToScreen(
+				new Rect(rightOfCentralX, topAlignY, panelWidth, panelHeight)
+			);
+			Rect candTopRight = ClampRectToScreen(
+				new Rect(
+					Screen.width - panelWidth - ScreenEdgeMargin,
+					ScreenEdgeMargin,
+					panelWidth,
+					panelHeight
+				)
+			);
+			Rect candBottomRight = ClampRectToScreen(
+				new Rect(
+					Screen.width - panelWidth - ScreenEdgeMargin,
+					Screen.height - panelHeight - ScreenEdgeMargin,
+					panelWidth,
+					panelHeight
+				)
+			);
+
+			Rect[] orderedCandidates;
+			if (dockMode == PanelDockMode.Left) {
+				orderedCandidates = new[] {
+					candImmediateLeft,
+					candTopLeft,
+					candBottomLeft,
+					candTopRight,
+					candImmediateRight,
+					candBottomRight
+				};
+			} else if (dockMode == PanelDockMode.Right || hasLeftFacilityOpen) {
+				orderedCandidates = new[] {
+					candTopRight,
+					candImmediateRight,
+					candBottomRight,
+					candTopLeft,
+					candImmediateLeft,
+					candBottomLeft
+				};
+			} else {
+				orderedCandidates = new[] {
+					candTopLeft,
+					candImmediateLeft,
+					candTopRight,
+					candImmediateRight,
+					candBottomLeft,
+					candBottomRight
+				};
+			}
+
+			Rect bestRect = orderedCandidates[0];
+			float bestPenalty = float.MaxValue;
+			for (int i = 0; i < orderedCandidates.Length; i++) {
+				Rect candidate = orderedCandidates[i];
+				float penalty = EvaluateCandidateOverlapPenalty(candidate, hasLeftFacilityOpen) + (i * 2f);
+				if (penalty < bestPenalty) {
+					bestPenalty = penalty;
+					bestRect = candidate;
+				}
+			}
+			return bestRect;
+		}
+
+		private void CollectProtectedGameUiRects(
+			UI_CharacterStatusPanel statusPanel,
+			GridInventory inventory,
+			out bool hasLeftFacilityOpen
+		) {
+			potionObstacleRects.Clear();
+			inventoryObstacleRects.Clear();
+			sidePanelObstacleRects.Clear();
+
+			TryAddActiveRect(statusPanel.potionZone, potionObstacleRects);
+			TryAddActiveRect(statusPanel.potionStorageCover, potionObstacleRects);
+			if (statusPanel.potionIcons != null) {
+				for (int i = 0; i < statusPanel.potionIcons.Length; i++) {
+					UI_NewInventoryIcon pIcon = statusPanel.potionIcons[i];
+					if (pIcon != null) {
+						TryAddActiveRect(pIcon.rectTransform, potionObstacleRects);
+					}
+				}
+			}
+
+			TryAddActiveRect(statusPanel.inventoryZone, inventoryObstacleRects);
+			TryAddActiveRect(statusPanel.inventoryScrollParent, inventoryObstacleRects);
+			TryAddActiveRect(statusPanel.subBagZone, inventoryObstacleRects);
+			TryAddActiveRect(statusPanel.subBagCover, inventoryObstacleRects);
+			if (TryGetInventoryGridBounds(statusPanel, inventory, out Rect gridRect)) {
+				inventoryObstacleRects.Add(gridRect);
+			}
+
+			TryAddActiveRect(statusPanel.setEffectPanel, sidePanelObstacleRects);
+			TryAddActiveRect(statusPanel.skillPanel, sidePanelObstacleRects);
+
+			hasLeftFacilityOpen = IsAnyLeftFacilityPanelOpen();
+		}
+
+		private Rect BuildCentralColumnBounds(UI_CharacterStatusPanel statusPanel, GridInventory inventory) {
+			bool hasAny = false;
+			float minX = float.MaxValue;
+			float minY = float.MaxValue;
+			float maxX = float.MinValue;
+			float maxY = float.MinValue;
+
+			for (int i = 0; i < potionObstacleRects.Count; i++) {
+				EncapsulateRect(potionObstacleRects[i], ref hasAny, ref minX, ref minY, ref maxX, ref maxY);
+			}
+			for (int i = 0; i < inventoryObstacleRects.Count; i++) {
+				EncapsulateRect(inventoryObstacleRects[i], ref hasAny, ref minX, ref minY, ref maxX, ref maxY);
+			}
+
+			if (!hasAny && TryGetInventoryGridBounds(statusPanel, inventory, out Rect fallbackGrid)) {
+				return fallbackGrid;
+			}
+			if (!hasAny) {
+				float centerW = 320f;
+				float centerH = 320f;
+				return new Rect(
+					(Screen.width - centerW) * 0.5f,
+					(Screen.height - centerH) * 0.5f,
+					centerW,
+					centerH
+				);
+			}
+			return Rect.MinMaxRect(minX, minY, maxX, maxY);
+		}
+
+		private static void EncapsulateRect(
+			Rect rect,
+			ref bool hasAny,
+			ref float minX,
+			ref float minY,
+			ref float maxX,
+			ref float maxY
+		) {
+			if (rect.width <= 2f || rect.height <= 2f) {
+				return;
+			}
+			hasAny = true;
+			if (rect.xMin < minX) {
+				minX = rect.xMin;
+			}
+			if (rect.yMin < minY) {
+				minY = rect.yMin;
+			}
+			if (rect.xMax > maxX) {
+				maxX = rect.xMax;
+			}
+			if (rect.yMax > maxY) {
+				maxY = rect.yMax;
+			}
+		}
+
+		private float EvaluateCandidateOverlapPenalty(Rect candidate, bool hasLeftFacilityOpen) {
+			float penalty = 0f;
+
+			for (int i = 0; i < potionObstacleRects.Count; i++) {
+				penalty += ComputeOverlapArea(candidate, ExpandRect(potionObstacleRects[i], 6f)) * 1000f;
+			}
+			for (int i = 0; i < inventoryObstacleRects.Count; i++) {
+				penalty += ComputeOverlapArea(candidate, ExpandRect(inventoryObstacleRects[i], 6f)) * 500f;
+			}
+			for (int i = 0; i < sidePanelObstacleRects.Count; i++) {
+				penalty += ComputeOverlapArea(candidate, ExpandRect(sidePanelObstacleRects[i], 4f)) * 75f;
+			}
+
+			if (hasLeftFacilityOpen) {
+				Rect leftFacilityZone = new Rect(0f, 0f, Screen.width * 0.44f, Screen.height);
+				penalty += ComputeOverlapArea(candidate, leftFacilityZone) * 280f;
+			}
+			return penalty;
+		}
+
+		private void TryAddActiveRect(RectTransform? rectTransform, List<Rect> targetList) {
+			if (rectTransform == null || !rectTransform.gameObject.activeInHierarchy) {
+				return;
+			}
+			Rect screenRect = GetScreenGuiRect(rectTransform);
+			if (screenRect.width > 4f && screenRect.height > 4f) {
+				targetList.Add(screenRect);
+			}
+		}
+
+		private static bool IsAnyLeftFacilityPanelOpen() {
+			if (UIManager.Instance == null) {
+				return false;
+			}
+			UI_ShopPanel shop = UIManager.Instance.GetElement<UI_ShopPanel>();
+			if (shop != null && shop.IsOpened) {
+				return true;
+			}
+			UI_SephiriteRewardPanel reward = UIManager.Instance.GetElement<UI_SephiriteRewardPanel>();
+			if (reward != null && reward.IsOpened) {
+				return true;
+			}
+			UI_MysticPotPanel pot = UIManager.Instance.GetElement<UI_MysticPotPanel>();
+			if (pot != null && pot.IsOpened) {
+				return true;
+			}
+			UI_TabletMixPanel mix = UIManager.Instance.GetElement<UI_TabletMixPanel>();
+			if (mix != null && mix.IsOpened) {
+				return true;
+			}
+			return false;
+		}
+
+		private static Rect ExpandRect(Rect rect, float padding) {
+			return new Rect(
+				rect.x - padding,
+				rect.y - padding,
+				rect.width + (padding * 2f),
+				rect.height + (padding * 2f)
+			);
+		}
+
+		private static float ComputeOverlapArea(Rect first, Rect second) {
+			float xOverlap = Mathf.Min(first.xMax, second.xMax) - Mathf.Max(first.xMin, second.xMin);
+			if (xOverlap <= 0f) {
+				return 0f;
+			}
+			float yOverlap = Mathf.Min(first.yMax, second.yMax) - Mathf.Max(first.yMin, second.yMin);
+			if (yOverlap <= 0f) {
+				return 0f;
+			}
+			return xOverlap * yOverlap;
+		}
+
+		private static Rect ClampRectToScreen(Rect rect) {
+			float maxX = Mathf.Max(ScreenEdgeMargin, Screen.width - rect.width - ScreenEdgeMargin);
+			float maxY = Mathf.Max(ScreenEdgeMargin, Screen.height - rect.height - ScreenEdgeMargin);
+			float clampedX = Mathf.Clamp(rect.x, ScreenEdgeMargin, maxX);
+			float clampedY = Mathf.Clamp(rect.y, ScreenEdgeMargin, maxY);
+			return new Rect(clampedX, clampedY, rect.width, rect.height);
+		}
+
+		private void HandlePanelDragEvents(Rect dragHandleRect, Rect fullPanelRect) {
+			Event? currentEvent = Event.current;
+			if (currentEvent == null) {
+				return;
+			}
+
+			if (currentEvent.type == EventType.MouseDown
+				&& currentEvent.button == 0
+				&& dragHandleRect.Contains(currentEvent.mousePosition)) {
+				isDraggingPanel = true;
+				dragPointerOffset = currentEvent.mousePosition - fullPanelRect.position;
+				customPanelPosition = fullPanelRect.position;
+				dockMode = PanelDockMode.Custom;
+				currentEvent.Use();
+			} else if (isDraggingPanel && currentEvent.type == EventType.MouseDrag) {
+				Vector2 targetPos = currentEvent.mousePosition - dragPointerOffset;
+				Rect clamped = ClampRectToScreen(
+					new Rect(targetPos.x, targetPos.y, fullPanelRect.width, fullPanelRect.height)
+				);
+				customPanelPosition = clamped.position;
+				currentEvent.Use();
+			} else if (isDraggingPanel && currentEvent.type == EventType.MouseUp) {
+				isDraggingPanel = false;
+				SaveLayoutPreferences();
+				currentEvent.Use();
+			}
+		}
+
+		private void CycleDockMode() {
+			dockMode = dockMode switch {
+				PanelDockMode.Auto => PanelDockMode.Left,
+				PanelDockMode.Left => PanelDockMode.Right,
+				PanelDockMode.Right => PanelDockMode.Auto,
+				_ => PanelDockMode.Auto
+			};
+			SaveLayoutPreferences();
+			SetStatusBanner($"패널 위치 모드 변경 → [{GetDockShortLabel(dockMode)}] (제목줄 드래그로 자유 이동 가능)");
+		}
+
+		private static string GetDockShortLabel(PanelDockMode mode) {
+			return mode switch {
+				PanelDockMode.Auto => "자동",
+				PanelDockMode.Left => "좌측",
+				PanelDockMode.Right => "우측",
+				PanelDockMode.Custom => "고정",
+				_ => "자동"
+			};
+		}
+
+		private void LoadLayoutPreferences() {
+			int savedMode = PlayerPrefs.GetInt(PrefKeyDockMode, (int)PanelDockMode.Auto);
+			if (savedMode >= (int)PanelDockMode.Auto && savedMode <= (int)PanelDockMode.Custom) {
+				dockMode = (PanelDockMode)savedMode;
+			}
+			customPanelPosition = new Vector2(
+				PlayerPrefs.GetFloat(PrefKeyCustomX, ScreenEdgeMargin),
+				PlayerPrefs.GetFloat(PrefKeyCustomY, ScreenEdgeMargin)
+			);
+			isPanelCollapsed = PlayerPrefs.GetInt(PrefKeyCollapsed, 0) == 1;
+		}
+
+		private void SaveLayoutPreferences() {
+			PlayerPrefs.SetInt(PrefKeyDockMode, (int)dockMode);
+			PlayerPrefs.SetFloat(PrefKeyCustomX, customPanelPosition.x);
+			PlayerPrefs.SetFloat(PrefKeyCustomY, customPanelPosition.y);
+			PlayerPrefs.SetInt(PrefKeyCollapsed, isPanelCollapsed ? 1 : 0);
+			PlayerPrefs.Save();
+		}
+
+		private void DrawConfigPanel(
+			UI_CharacterStatusPanel statusPanel,
+			GridInventory inventory,
+			InventorySnapshot snapshot
+		) {
+			float width = 530f;
+			float height = Mathf.Min(580f, Screen.height - 40f);
+			Rect winRect = ComputeConfigWindowRect(statusPanel, inventory, width, height);
+
+			DrawColoredBox(winRect, new Color(0.07f, 0.09f, 0.14f, 0.97f));
 			DrawRectBorder(winRect, new Color(0.35f, 0.65f, 0.95f, 0.9f), 2f);
 
+			float panelX = winRect.x;
+			float panelY = winRect.y;
+
 			GUI.Label(
-				new Rect(panelX + 12f, panelY + 8f, width - 24f, 22f),
-				"빌드 맞춤 최적화 설정 (캘세더니 열쇠 / 하얀 종이 / 금빛침 / 강화 우선순위)",
+				new Rect(panelX + 12f, panelY + 8f, width - 52f, 22f),
+				"빌드 맞춤 최적화 설정 (캘세더니 / 하얀 종이 / 금빛침 / 우선순위)",
 				headerLabelStyle!
 			);
+			if (GUI.Button(new Rect(winRect.xMax - 34f, panelY + 7f, 24f, 22f), "✕", compactButtonStyle!)) {
+				isConfigPanelOpen = false;
+				return;
+			}
 
 			Rect viewRect = new Rect(panelX + 8f, panelY + 34f, width - 16f, height - 42f);
 			int artifactCount = 0;
@@ -615,7 +1340,7 @@ namespace SephiriaOptimizer.UI {
 			curY += 6f;
 			GUI.Label(
 				new Rect(4f, curY, contentRect.width - 8f, 20f),
-				"3. 북향의 금빛침 강화 대상 선택 — 지정한 공격형 아티팩트 아래(오프셋 역방향)에 침 배치",
+				"3. 북향의 금빛침 강화 대상 선택 — 지정한 공격형 아티팩트 바로 아래 칸에 배치",
 				subHeaderStyle!
 			);
 			curY += 22f;
@@ -680,6 +1405,38 @@ namespace SephiriaOptimizer.UI {
 			GUI.EndScrollView();
 		}
 
+		private Rect ComputeConfigWindowRect(
+			UI_CharacterStatusPanel statusPanel,
+			GridInventory inventory,
+			float width,
+			float height
+		) {
+			Rect central = BuildCentralColumnBounds(statusPanel, inventory);
+			bool sideIsOnLeft = lastRenderedSidePanelRect.center.x <= Screen.width * 0.5f;
+
+			if (sideIsOnLeft) {
+				float belowSideY = lastRenderedSidePanelRect.yMax + 8f;
+				if (belowSideY + height <= Screen.height - ScreenEdgeMargin
+					&& ScreenEdgeMargin + width <= central.xMin - 6f) {
+					return ClampRectToScreen(new Rect(ScreenEdgeMargin, belowSideY, width, height));
+				}
+				float rightOfCentralX = central.xMax + 12f;
+				if (rightOfCentralX + width <= Screen.width - ScreenEdgeMargin) {
+					return ClampRectToScreen(new Rect(rightOfCentralX, ScreenEdgeMargin, width, height));
+				}
+				return ClampRectToScreen(
+					new Rect(lastRenderedSidePanelRect.xMax + 10f, ScreenEdgeMargin, width, height)
+				);
+			}
+
+			if (ScreenEdgeMargin + width <= central.xMin - 6f) {
+				return ClampRectToScreen(new Rect(ScreenEdgeMargin, ScreenEdgeMargin, width, height));
+			}
+			return ClampRectToScreen(
+				new Rect(lastRenderedSidePanelRect.xMin - width - 10f, ScreenEdgeMargin, width, height)
+			);
+		}
+
 		private void DrawPriorityTierButtons(
 			int instanceId,
 			ArtifactPriorityTier currentTier,
@@ -694,15 +1451,15 @@ namespace SephiriaOptimizer.UI {
 				(ArtifactPriorityTier.Sacrifice, "최하", 48f)
 			};
 
-			float x = startX;
+			float curX = startX;
 			for (int i = 0; i < tiers.Length; i++) {
-				(ArtifactPriorityTier tier, string label, float w) = tiers[i];
+				(ArtifactPriorityTier tier, string label, float btnWidth) = tiers[i];
 				GUIStyle style = currentTier == tier ? selectedButtonStyle! : buttonStyle!;
-				if (GUI.Button(new Rect(x, y, w, 24f), label, style)) {
+				if (GUI.Button(new Rect(curX, y, btnWidth, 24f), label, style)) {
 					userSettings.InstancePriorities[instanceId] = tier;
 					lastObservedStateHash = 0;
 				}
-				x += w + 4f;
+				curX += btnWidth + 4f;
 			}
 		}
 
@@ -716,6 +1473,8 @@ namespace SephiriaOptimizer.UI {
 			bool[] hasValidRect = new bool[unlockedSlots];
 
 			Vector2 mouseGuiPos = Event.current != null ? Event.current.mousePosition : Vector2.zero;
+			bool mouseOverSidePanel = lastRenderedSidePanelRect.width > 1f
+				&& lastRenderedSidePanelRect.Contains(mouseGuiPos);
 			int hoveredSlot = -1;
 
 			for (int s = 0; s < unlockedSlots; s++) {
@@ -727,7 +1486,7 @@ namespace SephiriaOptimizer.UI {
 				Rect rect = GetScreenGuiRect(icon.rectTransform);
 				slotScreenRects[s] = rect;
 				hasValidRect[s] = rect.width > 4f && rect.height > 4f;
-				if (hasValidRect[s] && rect.Contains(mouseGuiPos)) {
+				if (!mouseOverSidePanel && hasValidRect[s] && rect.Contains(mouseGuiPos)) {
 					hoveredSlot = s;
 				}
 			}
@@ -748,7 +1507,7 @@ namespace SephiriaOptimizer.UI {
 							ArtifactPriorityTier nextTier = userSettings.GetPriority(clickedArt.InstanceId);
 							lastObservedStateHash = 0;
 							SetStatusBanner(
-								$"[{clickedArt.DisplayName}] 강화 우선순위 변경 → [{GetPriorityShortLabel(nextTier)}]"
+								$"[{clickedArt.DisplayName}] 우선순위 → [{GetPriorityShortLabel(nextTier)}]"
 							);
 							Event.current.Use();
 						}
@@ -909,7 +1668,7 @@ namespace SephiriaOptimizer.UI {
 			List<string> tags = new List<string>(3);
 			TalentRuleSnapshot rules = snapshot.TalentRules;
 			if (rules.TabletEngravingCount > 0) {
-				tags.Add($"생존20(각인:{rules.TabletEngravingCount})");
+				tags.Add($"각인:{rules.TabletEngravingCount}");
 			}
 			if (rules.UniquePairCount > 0) {
 				tags.Add($"한쌍:{rules.UniquePairCount}");
@@ -960,9 +1719,9 @@ namespace SephiriaOptimizer.UI {
 			bool foundAny = false;
 
 			for (int s = 0; s < unlocked; s++) {
-				sbyte x = (sbyte)(s % width);
-				sbyte y = (sbyte)(s / width);
-				UI_NewInventoryIcon icon = statusPanel.GetItemIcon(new ItemPosition(x, y));
+				sbyte gridX = (sbyte)(s % width);
+				sbyte gridY = (sbyte)(s / width);
+				UI_NewInventoryIcon icon = statusPanel.GetItemIcon(new ItemPosition(gridX, gridY));
 				if (icon == null || icon.rectTransform == null) {
 					continue;
 				}
@@ -1043,11 +1802,15 @@ namespace SephiriaOptimizer.UI {
 			}
 
 			for (int s = 0; s < unlocked; s++) {
-				sbyte x = (sbyte)(s % width);
-				sbyte y = (sbyte)(s / width);
-				NewItemOwnInstance item = inventory.FindItem(x, y);
+				sbyte gridX = (sbyte)(s % width);
+				sbyte gridY = (sbyte)(s / width);
+				NewItemOwnInstance item = inventory.FindItem(gridX, gridY);
 				int instanceId = item != null ? item.InstanceID : -1;
-				int rot = item != null && item.StoneTablet != null ? item.StoneTablet.rotation : 0;
+				StoneTablet? tablet = item != null ? item.StoneTablet : null;
+				if (tablet == null && item != null && inventory.stoneTablets != null) {
+					inventory.stoneTablets.TryGetValue(new ItemPosition(gridX, gridY), out tablet);
+				}
+				int rot = tablet != null ? tablet.rotation : 0;
 				hash = (hash * 31) + instanceId;
 				hash = (hash * 31) + rot;
 			}
@@ -1062,23 +1825,39 @@ namespace SephiriaOptimizer.UI {
 		}
 
 		private void EnsureGuiStyles() {
-			if (panelBoxStyle != null) {
+			if (headerLabelStyle != null) {
 				return;
 			}
 
-			panelBoxStyle = new GUIStyle(GUI.skin.box);
 			headerLabelStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 13,
+				fontSize = 12,
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(0.95f, 0.96f, 1f, 1f) }
 			};
 			subHeaderStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 12,
+				fontSize = 11,
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(0.55f, 0.88f, 1f, 1f) }
 			};
+			statusWrapStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 11,
+				wordWrap = true,
+				alignment = TextAnchor.UpperLeft,
+				normal = { textColor = new Color(0.84f, 0.88f, 0.94f, 1f) }
+			};
+			alertLabelStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				wordWrap = true,
+				alignment = TextAnchor.MiddleLeft,
+				normal = { textColor = new Color(1f, 0.96f, 0.88f, 1f) }
+			};
 			buttonStyle = new GUIStyle(GUI.skin.button) {
 				fontSize = 11,
+				fontStyle = FontStyle.Bold
+			};
+			compactButtonStyle = new GUIStyle(GUI.skin.button) {
+				fontSize = 10,
 				fontStyle = FontStyle.Bold
 			};
 			activePinButtonStyle = new GUIStyle(GUI.skin.button) {
@@ -1090,6 +1869,11 @@ namespace SephiriaOptimizer.UI {
 				fontSize = 11,
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(0.25f, 1f, 0.45f, 1f) }
+			};
+			accentUpdateButtonStyle = new GUIStyle(GUI.skin.button) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.35f, 1f, 0.65f, 1f) }
 			};
 			badgeStyle = new GUIStyle(GUI.skin.label) {
 				fontSize = 11,

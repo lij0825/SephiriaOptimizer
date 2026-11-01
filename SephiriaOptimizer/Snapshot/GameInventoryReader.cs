@@ -84,7 +84,14 @@ namespace SephiriaOptimizer.Snapshot {
 						);
 					}
 				}
-				if (itemInstance.Charm is Charm_3Elemental_ByRow elemCharm && elemCharm.lineCategory != null) {
+				Charm_Basic? preScanCharm = ResolveSlotCharm(
+					inventory,
+					itemInstance,
+					itemInstance.Entity,
+					xCoord,
+					yCoord
+				);
+				if (preScanCharm is Charm_3Elemental_ByRow elemCharm && elemCharm.lineCategory != null) {
 					for (int c = 0; c < elemCharm.lineCategory.Length; c++) {
 						RegisterCategoryKey(
 							elemCharm.lineCategory[c],
@@ -116,19 +123,23 @@ namespace SephiriaOptimizer.Snapshot {
 				int rarityTier = (int)entity.rarity;
 
 				if (entity.type == EItemType.Charm) {
-					Charm_Basic charm = itemInstance.Charm;
+					Charm_Basic? charm = ResolveSlotCharm(inventory, itemInstance, entity, xCoord, yCoord);
 					int baseLevel = ReadEnchantLevel(itemInstance.InstanceID);
 					int maxLevel = charm != null ? charm.maxLevel : 0;
 					ArtifactConstraintType constraintType = MapConstraintType(
 						charm != null ? charm.criteria : null
 					);
 
-					bool dualDisabled = entity.IsDisabledFor(avatar);
+					bool dualDisabled = avatar != null && entity.IsDisabledFor(avatar);
+					WeaponControllerSimple? weaponCtrl = charm != null ? charm.WeaponController : null;
+					if (weaponCtrl == null && avatar != null) {
+						weaponCtrl = avatar.GetComponent<WeaponControllerSimple>();
+					}
 					bool weaponMismatch = charm != null
 						&& charm.isWeaponRelatedCharm
-						&& (charm.WeaponController == null
-							|| charm.WeaponController.currentWeapon == null
-							|| charm.WeaponController.currentWeapon.weaponType != charm.relatedWeapon);
+						&& (weaponCtrl == null
+							|| weaponCtrl.currentWeapon == null
+							|| weaponCtrl.currentWeapon.weaponType != charm.relatedWeapon);
 					bool isDisabledByWeaponOrDual = dualDisabled || weaponMismatch;
 
 					bool isMagicBook = charm is Charm_Magic;
@@ -279,8 +290,15 @@ namespace SephiriaOptimizer.Snapshot {
 						crystalRates
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
-					StoneTablet tablet = itemInstance.StoneTablet;
-					int initialRotation = tablet != null ? (tablet.rotation & 3) : 0;
+					StoneTablet? tablet = ResolveSlotTablet(
+						inventory,
+						itemInstance,
+						entity,
+						xCoord,
+						yCoord,
+						out bool isLiveTabletInstance
+					);
+					int initialRotation = tablet != null && isLiveTabletInstance ? (tablet.rotation & 3) : 0;
 					bool isRotatable = tablet != null
 						&& DungeonManager.IsTabletRotatable(itemInstance.InstanceID, tablet.isRotatable);
 					string conditionQuery = tablet != null
@@ -1379,6 +1397,55 @@ namespace SephiriaOptimizer.Snapshot {
 			int assigned = nextGroupId++;
 			symmetryGroupMap[key] = assigned;
 			return assigned;
+		}
+
+		private static Charm_Basic? ResolveSlotCharm(
+			GridInventory inventory,
+			NewItemOwnInstance itemInstance,
+			ItemEntity entity,
+			sbyte xCoord,
+			sbyte yCoord
+		) {
+			if (itemInstance.Charm != null) {
+				return itemInstance.Charm;
+			}
+			if (inventory.charms != null
+				&& inventory.charms.TryGetValue(new ItemPosition(xCoord, yCoord), out Charm_Basic? syncedCharm)
+				&& syncedCharm != null) {
+				return syncedCharm;
+			}
+			if (entity.resourcePrefab != null) {
+				return entity.resourcePrefab.GetComponent<Charm_Basic>();
+			}
+			return null;
+		}
+
+		private static StoneTablet? ResolveSlotTablet(
+			GridInventory inventory,
+			NewItemOwnInstance itemInstance,
+			ItemEntity entity,
+			sbyte xCoord,
+			sbyte yCoord,
+			out bool isLiveInstance
+		) {
+			if (itemInstance.StoneTablet != null) {
+				isLiveInstance = true;
+				return itemInstance.StoneTablet;
+			}
+			if (inventory.stoneTablets != null
+				&& inventory.stoneTablets.TryGetValue(
+					new ItemPosition(xCoord, yCoord),
+					out StoneTablet? syncedTablet
+				)
+				&& syncedTablet != null) {
+				isLiveInstance = true;
+				return syncedTablet;
+			}
+			isLiveInstance = false;
+			if (entity.resourcePrefab != null) {
+				return entity.resourcePrefab.GetComponent<StoneTablet>();
+			}
+			return null;
 		}
 	}
 }

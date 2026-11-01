@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 	<PropertyGroup>
 		<TargetFramework>netstandard2.1</TargetFramework>
-		<Version>2.0.0</Version>
+		<Version>2.1.0</Version>
 		<LangVersion>latest</LangVersion>
 		<Nullable>enable</Nullable>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -105,6 +105,10 @@
 			<HintPath>$(ManagedDir)/UnityEngine.InputLegacyModule.dll</HintPath>
 			<Private>false</Private>
 		</Reference>
+		<Reference Include="UnityEngine.UnityWebRequestModule">
+			<HintPath>$(ManagedDir)/UnityEngine.UnityWebRequestModule.dll</HintPath>
+			<Private>false</Private>
+		</Reference>
 		<Reference Include="Unity.TextMeshPro">
 			<HintPath>$(ManagedDir)/Unity.TextMeshPro.dll</HintPath>
 			<Private>false</Private>
@@ -168,6 +172,7 @@
 			Directories="$(_ReleaseZipStage)" />
 
 		<ItemGroup Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'">
+			<_StaleReleaseZips Include="$(_DistDir)/SephiriaOptimizer_v*.zip" />
 			<_DistPackageFiles Include="$(_DistDir)/SephiriaOptimizer.dll" />
 			<_DistPackageFiles Include="$(_DistDir)/metadata.json" />
 			<_DistPackageFiles Include="$(_DistDir)/Install.bat" Condition="Exists('$(_DistDir)/Install.bat')" />
@@ -175,6 +180,10 @@
 			<_DistPackageFiles Include="$(_DistDir)/install.ps1" Condition="Exists('$(_DistDir)/install.ps1')" />
 			<_DistPackageFiles Include="$(_DistDir)/install.sh" Condition="Exists('$(_DistDir)/install.sh')" />
 		</ItemGroup>
+
+		<Delete
+			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Files="@(_StaleReleaseZips)" />
 
 		<Copy
 			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
