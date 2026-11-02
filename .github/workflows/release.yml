@@ -4,6 +4,10 @@ on:
   push:
     tags:
       - "v*.*.*"
+    branches:
+      - main
+    paths:
+      - ".github/release-notes/**"
   workflow_dispatch:
     inputs:
       tag_name:
@@ -21,13 +25,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ github.event.inputs.tag_name }}" ]]; then
+            RAW_TAG="${{ github.event.inputs.tag_name }}"
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            RAW_TAG="${GITHUB_REF_NAME}"
+          else
+            RAW_TAG="v$(python3 -c 'import json; print(json.load(open("Dist/metadata.json", encoding="utf-8"))["modVersion"])')"
+          fi
+          TAG_VER="${RAW_TAG#v}"
+          echo "tag_name=v${TAG_VER}" >> "${GITHUB_OUTPUT}"
+          echo "tag_ver=${TAG_VER}" >> "${GITHUB_OUTPUT}"
+
+          NOTES_PATH=".github/release-notes/v${TAG_VER}.md"
+          if [[ -f "${NOTES_PATH}" ]]; then
+            echo "notes_path=${NOTES_PATH}" >> "${GITHUB_OUTPUT}"
+            echo "has_notes=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "notes_path=" >> "${GITHUB_OUTPUT}"
+            echo "has_notes=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: Prepare release archive from Dist payload
         id: package
         shell: bash
         run: |
           set -euo pipefail
-          RAW_TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
-          TAG_VER="${RAW_TAG#v}"
+          TAG_VER="${{ steps.tag.outputs.tag_ver }}"
 
           if [[ ! -f "Dist/SephiriaOptimizer.dll" || ! -f "Dist/metadata.json" ]]; then
             echo "::error::Dist/SephiriaOptimizer.dll or Dist/metadata.json is missing. Run 'dotnet build -c Release' before tagging."
@@ -36,43 +64,31 @@ jobs:
 
           META_VER="$(python3 -c 'import json; print(json.load(open("Dist/metadata.json", encoding="utf-8")).get("modVersion", ""))')"
           if [[ "${META_VER}" != "${TAG_VER}" ]]; then
-            echo "::warning::Dist/metadata.json modVersion (${META_VER}) differs from tag (${TAG_VER}); syncing metadata.json to ${TAG_VER}."
-            python3 - "${TAG_VER}" <<'PY'
-          import json, sys
-          with open("Dist/metadata.json", "r", encoding="utf-8") as fp:
-              data = json.load(fp)
-          data["modVersion"] = sys.argv[1]
-          with open("Dist/metadata.json", "w", encoding="utf-8", newline="\n") as fp:
-              json.dump(data, fp, indent="\t", ensure_ascii=False)
-              fp.write("\n")
-          PY
+            echo "::error::Dist/metadata.json modVersion (${META_VER}) does not match release tag (${TAG_VER})."
+            exit 1
           fi
 
           OUT_DIR="$(mktemp -d)"
-          ARCHIVE_NAME="SephiriaOptimizer_v${TAG_VER}.zip"
-          ARCHIVE_PATH="${OUT_DIR}/${ARCHIVE_NAME}"
-
+          ARCHIVE_PATH="${OUT_DIR}/SephiriaOptimizer_v${TAG_VER}.zip"
           STAGE_DIR="${OUT_DIR}/stage"
           mkdir -p "${STAGE_DIR}"
-          cp -f Dist/SephiriaOptimizer.dll "${STAGE_DIR}/"
-          cp -f Dist/metadata.json "${STAGE_DIR}/"
+          cp -f Dist/SephiriaOptimizer.dll Dist/metadata.json "${STAGE_DIR}/"
           for script_file in Install.bat Uninstall.bat install.ps1 install.sh; do
             if [[ -f "Dist/${script_file}" ]]; then
               cp -f "Dist/${script_file}" "${STAGE_DIR}/"
             fi
           done
-
           (cd "${STAGE_DIR}" && zip -9 -r "${ARCHIVE_PATH}" .)
 
-          echo "tag_name=v${TAG_VER}" >> "${GITHUB_OUTPUT}"
           echo "archive_path=${ARCHIVE_PATH}" >> "${GITHUB_OUTPUT}"
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.package.outputs.tag_name }}
-          name: "SephiriaOptimizer ${{ steps.package.outputs.tag_name }}"
-          generate_release_notes: true
+          tag_name: ${{ steps.tag.outputs.tag_name }}
+          name: "SephiriaOptimizer ${{ steps.tag.outputs.tag_name }}"
+          body_path: ${{ steps.tag.outputs.notes_path }}
+          generate_release_notes: ${{ steps.tag.outputs.has_notes != 'true' }}
           draft: false
           prerelease: false
           files: |
