@@ -50,6 +50,12 @@ namespace SephiriaOptimizer.Solver {
 	public sealed class OptimizationResult {
 		public int InitialScore { get; }
 		public int BestScore { get; }
+		public int InitialEstimatedDps { get; }
+		public int BestEstimatedDps { get; }
+		public int EstimatedDpsDelta { get; }
+		public double EstimatedDpsGainPercent { get; }
+		public DpsBreakdown CurrentBreakdown { get; }
+		public DpsBreakdown OptimizedBreakdown { get; }
 		public int[] BestSlotToItemIndex { get; }
 		public int[] BestItemToSlotIndex { get; }
 		public int[] BestItemRotations { get; }
@@ -69,10 +75,22 @@ namespace SephiriaOptimizer.Solver {
 			SlotEvaluationDetail[] bestSlotDetails,
 			bool usedExactBranchAndBound,
 			int evaluationsPerformed,
-			double elapsedMilliseconds
+			double elapsedMilliseconds,
+			int initialEstimatedDps = 0,
+			int bestEstimatedDps = 0,
+			DpsBreakdown currentBreakdown = default,
+			DpsBreakdown optimizedBreakdown = default
 		) {
 			InitialScore = initialScore;
 			BestScore = bestScore;
+			InitialEstimatedDps = Math.Max(0, initialEstimatedDps);
+			BestEstimatedDps = Math.Max(0, bestEstimatedDps);
+			EstimatedDpsDelta = BestEstimatedDps - InitialEstimatedDps;
+			EstimatedDpsGainPercent = InitialEstimatedDps > 0
+				? ((double)EstimatedDpsDelta * 100.0) / InitialEstimatedDps
+				: 0.0;
+			CurrentBreakdown = currentBreakdown;
+			OptimizedBreakdown = optimizedBreakdown;
 			BestSlotToItemIndex = bestSlotToItemIndex ?? Array.Empty<int>();
 			BestItemToSlotIndex = bestItemToSlotIndex ?? Array.Empty<int>();
 			BestItemRotations = bestItemRotations ?? Array.Empty<int>();

@@ -46,6 +46,10 @@ namespace SephiriaOptimizer.Models {
 		public string[] Categories { get; }
 		public TabletPlacementRule[] PlacementRules { get; }
 		public int SymmetryGroupId { get; }
+		public float[] AttackDamageByLevel { get; }
+		public float BaseProcsPerSecond { get; }
+		public float[] StatBonusPercentByLevel { get; }
+		public float[] FinalDamagePercentByLevel { get; }
 
 		public SlotItemSnapshot(
 			int itemIndex,
@@ -91,7 +95,11 @@ namespace SephiriaOptimizer.Models {
 			bool isWoodenBoxCharm = false,
 			bool isFireIcePositionCharm = false,
 			bool isCrystalOfHarmony = false,
-			float[]? crystalDamageBonusByLevel = null
+			float[]? crystalDamageBonusByLevel = null,
+			float[]? attackDamageByLevel = null,
+			float baseProcsPerSecond = 1f,
+			float[]? statBonusPercentByLevel = null,
+			float[]? finalDamagePercentByLevel = null
 		) {
 			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
@@ -138,6 +146,27 @@ namespace SephiriaOptimizer.Models {
 			Categories = categories ?? Array.Empty<string>();
 			PlacementRules = placementRules ?? Array.Empty<TabletPlacementRule>();
 			SymmetryGroupId = symmetryGroupId;
+			BaseProcsPerSecond = baseProcsPerSecond > 0.05f ? baseProcsPerSecond : 1f;
+			AttackDamageByLevel = attackDamageByLevel ?? BuildDefaultAttackDamageTable(
+				kind,
+				isAttackableCharm,
+				MaxLevel,
+				rarityTier,
+				CustomWeight,
+				priorityTier
+			);
+			StatBonusPercentByLevel = statBonusPercentByLevel ?? BuildDefaultStatBonusTable(
+				kind,
+				isAttackableCharm,
+				hasDependencyTarget,
+				crystalFlag,
+				isElementalByRowCharm,
+				MaxLevel,
+				rarityTier,
+				CustomWeight,
+				priorityTier
+			);
+			FinalDamagePercentByLevel = finalDamagePercentByLevel ?? Array.Empty<float>();
 		}
 
 		public TabletPlacementRule GetPlacementRule(int slotIndex, int rotation) {
@@ -174,6 +203,95 @@ namespace SephiriaOptimizer.Models {
 			int idx = Math.Clamp(clampedLevel, 0, CrystalDamageBonusByLevel.Length - 1);
 			float rate = CrystalDamageBonusByLevel[idx];
 			return rate > 0f ? rate : (effectiveLevel > 0 ? 2f : 1f);
+		}
+
+		public float GetAttackRawDpsAtLevel(int effectiveLevel) {
+			if (AttackDamageByLevel.Length == 0) {
+				return 0f;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, AttackDamageByLevel.Length - 1);
+			return AttackDamageByLevel[idx] * BaseProcsPerSecond;
+		}
+
+		public float GetStatBonusPercentAtLevel(int effectiveLevel) {
+			if (StatBonusPercentByLevel.Length == 0) {
+				return 0f;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, StatBonusPercentByLevel.Length - 1);
+			return StatBonusPercentByLevel[idx];
+		}
+
+		public float GetFinalDamagePercentAtLevel(int effectiveLevel) {
+			if (FinalDamagePercentByLevel.Length == 0) {
+				return 0f;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, FinalDamagePercentByLevel.Length - 1);
+			return FinalDamagePercentByLevel[idx];
+		}
+
+		private static float[] BuildDefaultAttackDamageTable(
+			SlotItemKind kind,
+			bool isAttackableCharm,
+			int maxLevel,
+			int rarityTier,
+			int customWeight,
+			ArtifactPriorityTier priorityTier
+		) {
+			if (kind != SlotItemKind.Artifact || !isAttackableCharm || priorityTier == ArtifactPriorityTier.Sacrifice) {
+				return Array.Empty<float>();
+			}
+			float tierScale = priorityTier switch {
+				ArtifactPriorityTier.Core => 1.6f,
+				ArtifactPriorityTier.High => 1.25f,
+				ArtifactPriorityTier.Normal => 1.0f,
+				ArtifactPriorityTier.Low => 0.65f,
+				_ => 0.25f
+			};
+			float baseDmg = (35f + (Math.Clamp(rarityTier, 0, 5) * 14f) + (Math.Min(customWeight, 30) * 2.5f)) * tierScale;
+			float perLevelDmg = (18f + (Math.Clamp(rarityTier, 0, 5) * 6f) + (Math.Min(customWeight, 30) * 1.5f)) * tierScale;
+			float[] table = new float[maxLevel + 1];
+			for (int lv = 0; lv <= maxLevel; lv++) {
+				table[lv] = baseDmg + (lv * perLevelDmg);
+			}
+			return table;
+		}
+
+		private static float[] BuildDefaultStatBonusTable(
+			SlotItemKind kind,
+			bool isAttackableCharm,
+			bool hasDependencyTarget,
+			bool isCrystalOfHarmony,
+			bool isElementalByRowCharm,
+			int maxLevel,
+			int rarityTier,
+			int customWeight,
+			ArtifactPriorityTier priorityTier
+		) {
+			if (kind != SlotItemKind.Artifact
+				|| isAttackableCharm
+				|| hasDependencyTarget
+				|| isCrystalOfHarmony
+				|| isElementalByRowCharm
+				|| priorityTier == ArtifactPriorityTier.Sacrifice) {
+				return Array.Empty<float>();
+			}
+			float tierScale = priorityTier switch {
+				ArtifactPriorityTier.Core => 1.5f,
+				ArtifactPriorityTier.High => 1.2f,
+				ArtifactPriorityTier.Normal => 1.0f,
+				ArtifactPriorityTier.Low => 0.6f,
+				_ => 0.2f
+			};
+			float basePct = (4f + (Math.Clamp(rarityTier, 0, 5) * 2f) + (Math.Min(customWeight, 30) * 0.5f)) * tierScale;
+			float perLevelPct = (3.5f + (Math.Clamp(rarityTier, 0, 5) * 1.2f) + (Math.Min(customWeight, 30) * 0.4f)) * tierScale;
+			float[] table = new float[maxLevel + 1];
+			for (int lv = 0; lv <= maxLevel; lv++) {
+				table[lv] = basePct + (lv * perLevelPct);
+			}
+			return table;
 		}
 	}
 }

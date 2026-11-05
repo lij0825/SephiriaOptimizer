@@ -2540,6 +2540,481 @@ namespace SephiriaOptimizer.Tests {
 			}
 		}
 
+		[Fact(DisplayName = "허수아비 예상 DPS 계산 공식이 금빛침 증폭과 신비 2배 증폭 및 조화의 수정 최종 피해 배율을 힙 할당 없이 정확히 산출한다")]
+		public void CalculateEstimatedDummyDps_ComputesExactDummyDpsFormulaWithZeroHeapAllocation() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+			uint mysticMask = 1u << 0;
+
+			SlotItemSnapshot attackArtifact = new SlotItemSnapshot(
+				0,
+				1701,
+				1701,
+				"화염 투창",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				4,
+				2,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				mysticMask,
+				attackDamageByLevel: new[] { 100f, 150f, 220f, 300f, 400f },
+				baseProcsPerSecond: 2f
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				1702,
+				1702,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				1,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 10, 20, 30, 50 }
+			);
+
+			SlotItemSnapshot crystalOfHarmony = new SlotItemSnapshot(
+				2,
+				1703,
+				1703,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				4,
+				0,
+				false,
+				1,
+				2,
+				3,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "MYSTIC" },
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.High,
+				mysticMask,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1f, 2f, 2f }
+			);
+
+			TabletPlacementRule[] leftPlus1Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				-1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+			SlotItemSnapshot tabletPlus1 = CreateTablet(3, 1704, 1, 0, false, leftPlus1Rules, 4);
+
+			PlayerCombatBaseline baseline = new PlayerCombatBaseline(50f, 2.0f, 0f, 1.5f, 0f);
+			ComboCategoryInfo[] comboCategories = new[] {
+				new ComboCategoryInfo(0, "MYSTIC", "신비", 2, new[] { 2, 4 }, true, new[] { 10f, 25f })
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { attackArtifact, goldenNeedle, crystalOfHarmony, tabletPlus1 },
+				comboCategories,
+				TalentRuleSnapshot.Default,
+				1701,
+				-1,
+				null,
+				0,
+				-1,
+				2,
+				4,
+				null,
+				baseline
+			);
+
+			int[] unlinkedNoBuffLayout = new[] { 1, 0, -1, 3, -1, 2 };
+			int[] optimalSynergyLayout = new[] { 0, 3, -1, 1, 2, -1 };
+			int[] rotations = new[] { 0, 0, 0, 0 };
+
+			int unlinkedDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				unlinkedNoBuffLayout,
+				rotations
+			);
+			int optimalDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				optimalSynergyLayout,
+				rotations
+			);
+
+			long beforeBytes = GC.GetAllocatedBytesForCurrentThread();
+			int accum = 0;
+			for (int iter = 0; iter < 1000; iter++) {
+				accum ^= ObjectiveEvaluator.CalculateEstimatedDummyDps(snapshot, optimalSynergyLayout, rotations);
+			}
+			long afterBytes = GC.GetAllocatedBytesForCurrentThread();
+
+			Assert.True(optimalDps > unlinkedDps);
+			Assert.Equal(0L, afterBytes - beforeBytes);
+			Assert.NotEqual(-1, accum);
+		}
+
+		[Fact(DisplayName = "최적화 솔버가 유효 배치 중에서 예상 DPS가 가장 높은 해를 최우선 선택하고 상승량 지표를 반환한다")]
+		public void Solve_MaximizesEstimatedDummyDpsAndPopulatesOptimizationResultDpsMetrics() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot highScalingAttack = new SlotItemSnapshot(
+				0,
+				1801,
+				1801,
+				"고계수 번개 창",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				0,
+				3,
+				3,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				attackDamageByLevel: new[] { 60f, 180f, 340f, 560f },
+				baseProcsPerSecond: 2.0f
+			);
+
+			SlotItemSnapshot lowScalingUtility = new SlotItemSnapshot(
+				1,
+				1802,
+				1802,
+				"저계수 보조 부적",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				0,
+				3,
+				1,
+				4,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Low,
+				statBonusPercentByLevel: new[] { 2f, 4f, 6f, 8f }
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				2,
+				1803,
+				1803,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 15, 25, 40, 60 }
+			);
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			SlotItemSnapshot plus2Tablet = CreateTablet(3, 1804, 2, 0, true, rightPlus2Rules, 4);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { highScalingAttack, lowScalingUtility, goldenNeedle, plus2Tablet }
+			);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot, 200);
+
+			int attackSlot = result.BestItemToSlotIndex[0];
+			int needleSlot = result.BestItemToSlotIndex[2];
+
+			Assert.True(result.BestEstimatedDps > result.InitialEstimatedDps);
+			Assert.Equal(result.BestEstimatedDps - result.InitialEstimatedDps, result.EstimatedDpsDelta);
+			Assert.True(result.EstimatedDpsGainPercent > 0.0);
+			Assert.Equal(2, result.BestSlotDetails[attackSlot].EffectiveLevel);
+			Assert.Equal(attackSlot + width, needleSlot);
+		}
+
+		[Fact(DisplayName = "DPS 상세 분석기가 기본 딜과 금빛침 및 조화의 수정 증폭 기여도를 정확히 분리하고 미연결 경고를 캐싱한다")]
+		public void CalculateBreakdown_DecomposesBaseNeedleAndHarmonyDpsAndCachesTooltipStrings() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot attackArtifact = new SlotItemSnapshot(
+				0,
+				1901,
+				1901,
+				"화염 마법봉",
+				SlotItemKind.Artifact,
+				5,
+				0,
+				false,
+				2,
+				3,
+				2,
+				9,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				attackDamageByLevel: new[] { 100f, 150f, 200f, 300f },
+				baseProcsPerSecond: 2.0f,
+				statBonusPercentByLevel: new[] { 10f, 15f, 20f, 30f }
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				1902,
+				1902,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				2,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 20, 35, 50, 75 }
+			);
+
+			SlotItemSnapshot crystalOfHarmony = new SlotItemSnapshot(
+				2,
+				1903,
+				1903,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				2,
+				3,
+				3,
+				9,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.High,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1f, 1f, 2f, 2f }
+			);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { attackArtifact, goldenNeedle, crystalOfHarmony }
+			);
+
+			DpsBreakdown unlinkedCurrent = snapshot.CurrentBreakdown;
+			Assert.False(unlinkedCurrent.HasActiveGoldenNeedle);
+			Assert.True(unlinkedCurrent.HasOwnedGoldenNeedle);
+			Assert.True(unlinkedCurrent.HasUnlinkedGoldenNeedle);
+			Assert.Equal(0.0, unlinkedCurrent.GoldenNeedleAddedDps);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot, 200);
+			DpsBreakdown optimized = result.OptimizedBreakdown;
+
+			Assert.True(optimized.HasActiveGoldenNeedle);
+			Assert.False(optimized.HasUnlinkedGoldenNeedle);
+			Assert.Equal(50.0, optimized.GoldenNeedleAmpPercent, 3);
+			Assert.True(optimized.GoldenNeedleAddedDps > 0.0);
+			Assert.True(optimized.HasActiveHarmonyCrystal);
+			Assert.Equal(4, optimized.HarmonyNeighborLevelSum);
+			Assert.Equal(8.0, optimized.HarmonyAmpPercent, 3);
+			Assert.True(optimized.HarmonyAddedDps > 0.0);
+
+			double additiveSum = optimized.BaseEffectiveDps
+				+ optimized.GoldenNeedleAddedDps
+				+ optimized.HarmonyAddedDps;
+			Assert.Equal(optimized.TotalEstimatedDps, additiveSum, 4);
+			Assert.Equal(result.BestEstimatedDps, (int)Math.Round(optimized.TotalEstimatedDps));
+
+			double shareSum = optimized.BaseSharePercent
+				+ optimized.GoldenNeedleSharePercent
+				+ optimized.HarmonySharePercent;
+			Assert.Equal(100.0, shareSum, 3);
+
+			DpsTooltipCache tooltipCache = DpsEstimator.BuildTooltipCache(
+				result.CurrentBreakdown,
+				result.OptimizedBreakdown,
+				result.UsedExactBranchAndBound,
+				result.ElapsedMilliseconds
+			);
+			Assert.True(tooltipCache.IsPopulated);
+			Assert.True(tooltipCache.HasOptimizedComparison);
+			Assert.True(tooltipCache.HasGoldenNeedleWarning);
+			Assert.Contains("미적용 (0% - 미연결)", tooltipCache.GoldenNeedleValueLine);
+			Assert.Contains("증폭 +50.0%", tooltipCache.GoldenNeedleValueLine);
+			Assert.Contains("모든 피해 +8% (인접 8칸 레벨 합: 4)", tooltipCache.HarmonyValueLine);
+		}
+
+		[Fact(DisplayName = "우측 고정 모달의 툴팁 좌표가 좌측에 기본 배치되고 화면 상하좌우 경계 안으로 클램핑된다")]
+		public void ComputeClampedTooltipPosition_ClampsLeftwardTooltipInsideScreenBounds() {
+			(float normalX, float normalY) = DpsEstimator.ComputeClampedTooltipPosition(
+				1620f,
+				120f,
+				442f,
+				294f,
+				1920f,
+				1080f,
+				12f
+			);
+			Assert.Equal(1168f, normalX);
+			Assert.Equal(120f, normalY);
+
+			(float narrowLeftX, float bottomOverflowY) = DpsEstimator.ComputeClampedTooltipPosition(
+				200f,
+				950f,
+				442f,
+				294f,
+				1280f,
+				1000f,
+				12f
+			);
+			Assert.Equal(12f, narrowLeftX);
+			Assert.Equal(694f, bottomOverflowY);
+		}
+
+
 		private static int CountBits(ulong mask) {
 			int count = 0;
 			while (mask != 0UL) {

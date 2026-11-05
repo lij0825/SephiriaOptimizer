@@ -107,10 +107,10 @@ $Msg = @{
 		'\uC124\uCE58\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4!\n\n' +
 		'\uC124\uCE58 \uACBD\uB85C: {0}\n\n' +
 		'\uAC8C\uC784 \uC2E4\uD589 \uD6C4 \uC778\uBCA4\uD1A0\uB9AC(I \uB610\uB294 Tab)\uB97C \uC5F4\uBA74 ' +
-		'\uCE21\uBA74 \uCEE8\uD2B8\uB864 \uD328\uB110\uC774 \uD45C\uC2DC\uB429\uB2C8\uB2E4.\n' +
-		'- [F5] \uC790\uB3D9 \uCD5C\uC801 \uC7AC\uBC30\uCE58\n' +
-		'- [F6] \uAC00\uC774\uB4DC \uC624\uBC84\uB808\uC774 \uD1A0\uAE00\n' +
-		'- [F7] \uC544\uD2F0\uD329\uD2B8 \uC6B0\uC120\uC21C\uC704 / \uBAA9\uD45C \uCF64\uBCF4 / ' +
+		'\uC6B0\uCE21 \uCEE8\uD2B8\uB864 \uD328\uB110\uC774 \uD45C\uC2DC\uB429\uB2C8\uB2E4.\n' +
+		'- [\uC790\uB3D9 \uC815\uB82C \uC2E4\uD589] \uBC84\uD2BC \uD074\uB9AD\uC73C\uB85C \uC989\uC2DC \uCD5C\uC801 \uC7AC\uBC30\uCE58\n' +
+		'- [\uC608\uC0C1 DPS] \uC601\uC5ED \uB9C8\uC6B0\uC2A4 \uC624\uBC84\uB85C DPS \uC0C1\uC138 \uBD84\uC11D \uD234\uD301 \uD655\uC778\n' +
+		'- [\uBE4C\uB4DC \uC124\uC815] \uBC84\uD2BC\uC73C\uB85C \uC6B0\uC120\uC21C\uC704 / \uBAA9\uD45C \uCF64\uBCF4 / ' +
 		'\uAE08\uBE5B\uCE68 \uC124\uC815'
 	)
 	DoneUninstall = ConvertFrom-UnicodeEscape (
@@ -1100,7 +1100,9 @@ $targetModDir = $layout.ModDir
 $targetDll = Join-Path $targetModDir 'SephiriaOptimizer.dll'
 $targetMeta = Join-Path $targetModDir 'metadata.json'
 
-Wait-UntilUnlockedOrExit -GameRoot $layout.GameRoot -TargetDllPath $targetDll
+if ($Uninstall) {
+	Wait-UntilUnlockedOrExit -GameRoot $layout.GameRoot -TargetDllPath $targetDll
+}
 
 $sourceRootForElevation = if ($null -ne $payload) { $payload.SourceRoot } else { '' }
 if (-not (Test-DirectoryWriteAccess -TargetPath $targetModDir)) {
@@ -1137,6 +1139,17 @@ if ($Uninstall) {
 
 [void][System.IO.Directory]::CreateDirectory($targetModDir)
 
+try {
+	foreach ($oldBackup in [System.IO.Directory]::GetFiles($targetModDir, 'SephiriaOptimizer.dll.old*')) {
+		try {
+			Clear-ReadOnlyAttribute -TargetPath $oldBackup
+			[System.IO.File]::Delete($oldBackup)
+		} catch {
+		}
+	}
+} catch {
+}
+
 $tmpDll = $targetDll + '.tmp'
 $tmpMeta = $targetMeta + '.tmp'
 
@@ -1160,7 +1173,28 @@ try {
 	Clear-SecurityQuarantine -FilePath $tmpDll
 	Clear-SecurityQuarantine -FilePath $tmpMeta
 
-	[System.IO.File]::Copy($tmpDll, $targetDll, $true)
+	try {
+		[System.IO.File]::Copy($tmpDll, $targetDll, $true)
+	} catch [System.IO.IOException] {
+		$backupDll = $targetDll + '.old'
+		if ([System.IO.File]::Exists($backupDll)) {
+			try {
+				Clear-ReadOnlyAttribute -TargetPath $backupDll
+				[System.IO.File]::Delete($backupDll)
+			} catch {
+				$backupDll = $targetDll + '.old.' + [System.DateTime]::UtcNow.Ticks
+			}
+		}
+		try {
+			if ([System.IO.File]::Exists($targetDll)) {
+				[System.IO.File]::Move($targetDll, $backupDll)
+			}
+			[System.IO.File]::Copy($tmpDll, $targetDll, $true)
+		} catch [System.IO.IOException] {
+			Wait-UntilUnlockedOrExit -GameRoot $layout.GameRoot -TargetDllPath $targetDll
+			[System.IO.File]::Copy($tmpDll, $targetDll, $true)
+		}
+	}
 	[System.IO.File]::Copy($tmpMeta, $targetMeta, $true)
 	Clear-SecurityQuarantine -FilePath $targetDll
 	Clear-SecurityQuarantine -FilePath $targetMeta

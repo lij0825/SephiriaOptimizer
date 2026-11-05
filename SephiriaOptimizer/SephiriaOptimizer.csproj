@@ -158,20 +158,20 @@
 		</PropertyGroup>
 
 		<Copy
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			SourceFiles="$(TargetPath);$(MSBuildProjectDirectory)/metadata.json"
 			DestinationFolder="$(_DistDir)"
 			SkipUnchangedFiles="true" />
 
 		<RemoveDir
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			Directories="$(_ReleaseZipStage)" />
 
 		<MakeDir
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			Directories="$(_ReleaseZipStage)" />
 
-		<ItemGroup Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'">
+		<ItemGroup Condition="'$(SkipDistPackage)' != 'true'">
 			<_StaleReleaseZips Include="$(_DistDir)/SephiriaOptimizer_v*.zip" />
 			<_DistPackageFiles Include="$(_DistDir)/SephiriaOptimizer.dll" />
 			<_DistPackageFiles Include="$(_DistDir)/metadata.json" />
@@ -182,16 +182,16 @@
 		</ItemGroup>
 
 		<Delete
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			Files="@(_StaleReleaseZips)" />
 
 		<Copy
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			SourceFiles="@(_DistPackageFiles)"
 			DestinationFolder="$(_ReleaseZipStage)" />
 
 		<ZipDirectory
-			Condition="'$(Configuration)' == 'Release' And '$(SkipDistPackage)' != 'true'"
+			Condition="'$(SkipDistPackage)' != 'true'"
 			SourceDirectory="$(_ReleaseZipStage)"
 			DestinationFile="$(_DistDir)/SephiriaOptimizer_v$(Version).zip"
 			Overwrite="true" />

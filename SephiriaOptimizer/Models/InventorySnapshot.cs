@@ -1,4 +1,5 @@
 using System;
+using SephiriaOptimizer.Solver;
 
 namespace SephiriaOptimizer.Models {
 	public sealed class InventorySnapshot {
@@ -33,6 +34,8 @@ namespace SephiriaOptimizer.Models {
 		public int[] ExtraMysticTier2Slots { get; }
 		public uint UserTargetCategoryMask { get; }
 		public int DependencyArtifactCount { get; }
+		public PlayerCombatBaseline CombatBaseline { get; }
+		public DpsBreakdown CurrentBreakdown { get; }
 
 		public InventorySnapshot(
 			int width,
@@ -55,7 +58,8 @@ namespace SephiriaOptimizer.Models {
 			int mysticSlot1 = -1,
 			int mysticTier1Threshold = 2,
 			int mysticTier2Threshold = 4,
-			int[]? extraMysticTier2Slots = null
+			int[]? extraMysticTier2Slots = null,
+			PlayerCombatBaseline? combatBaseline = null
 		) {
 			Width = Math.Max(1, width);
 			UnlockedSlots = Math.Clamp(unlockedSlots, 0, MaxSupportedSlots);
@@ -92,6 +96,7 @@ namespace SephiriaOptimizer.Models {
 			TalentRules = talentRules ?? TalentRuleSnapshot.Default;
 			PreferredNeedleTargetInstanceId = preferredNeedleTargetInstanceId;
 			PreferredChalcedonyCategoryId = preferredChalcedonyCategoryId;
+			CombatBaseline = combatBaseline ?? PlayerCombatBaseline.Default;
 
 			MysticCategoryId = FindCategoryId("MYSTIC");
 			StaticMysticTagCount = ResolveStaticMysticCount(MysticCategoryId, ComboCategories, Items);
@@ -134,6 +139,7 @@ namespace SephiriaOptimizer.Models {
 				}
 			}
 			DependencyArtifactCount = depCount;
+			CurrentBreakdown = DpsEstimator.CalculateCurrentBreakdown(this);
 		}
 
 		public static ulong[] ComputeMooreNeighborMasks(int width, int height, int unlockedSlots) {

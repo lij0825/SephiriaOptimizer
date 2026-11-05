@@ -11,22 +11,14 @@ using UnityEngine;
 
 namespace SephiriaOptimizer.UI {
 	public sealed class SephiriaOptimizerController : MonoBehaviour {
-		private enum PanelDockMode {
-			Auto = 0,
-			Left = 1,
-			Right = 2,
-			Custom = 3
-		}
-
-		private const string PrefKeyDockMode = "SephiriaOptimizer.UI.DockMode";
-		private const string PrefKeyCustomX = "SephiriaOptimizer.UI.CustomX";
-		private const string PrefKeyCustomY = "SephiriaOptimizer.UI.CustomY";
 		private const string PrefKeyCollapsed = "SephiriaOptimizer.UI.Collapsed";
 
-		private const float SidePanelWidth = 276f;
+		private const float SidePanelWidth = 286f;
 		private const float CollapsedPanelWidth = 224f;
 		private const float CollapsedPanelHeight = 32f;
 		private const float ScreenEdgeMargin = 12f;
+		private const float BreakdownTooltipWidth = 442f;
+		private const float BreakdownTooltipHeight = 294f;
 
 		private static readonly (string Id, string KorName)[] ChalcedonyComboTags = new[] {
 			("STURDY", "견고"),
@@ -81,22 +73,20 @@ namespace SephiriaOptimizer.UI {
 		private bool isVersionWarningDismissed;
 		private bool isRestartPromptDismissed;
 
-		private PanelDockMode dockMode = PanelDockMode.Auto;
-		private Vector2 customPanelPosition = new Vector2(14f, 14f);
 		private bool isPanelCollapsed;
-		private bool isDraggingPanel;
-		private Vector2 dragPointerOffset;
 		private Rect lastRenderedSidePanelRect;
+		private Rect lastRenderedDpsBoxRect;
+		private bool isDpsBoxHovered;
+		private DpsTooltipCache cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
 
 		private bool isOverlayEnabled = true;
 		private bool isPinModeEnabled;
 		private bool isConfigPanelOpen;
 		private bool isAutoSwapRunning;
-		private bool executeInSingleFrame = true;
 		private int lastObservedStateHash;
 		private int selectedSlotIndex = -1;
 		private Vector2 configScrollPos;
-		private string statusBannerText = "준비 완료 — [F5] 자동 정렬 / [F6] 가이드 / [F7] 빌드 설정";
+		private string statusBannerText = "준비 완료 — 버튼을 클릭하여 자동 정렬 및 빌드 설정";
 
 		private GUIStyle? headerLabelStyle;
 		private GUIStyle? subHeaderStyle;
@@ -110,6 +100,12 @@ namespace SephiriaOptimizer.UI {
 		private GUIStyle? badgeStyle;
 		private GUIStyle? coordBadgeStyle;
 		private GUIStyle? pinTagStyle;
+		private GUIStyle? tooltipTitleStyle;
+		private GUIStyle? tooltipSectionHeaderStyle;
+		private GUIStyle? tooltipValueStyle;
+		private GUIStyle? tooltipDescStyle;
+		private GUIStyle? tooltipWarningStyle;
+		private GUIStyle? tooltipTotalStyle;
 
 		public void InitializeModContext(string? loadedModVersion, string? loadedModDirectory) {
 			if (!string.IsNullOrWhiteSpace(loadedModDirectory)) {
@@ -177,7 +173,6 @@ namespace SephiriaOptimizer.UI {
 				if (activeSolveTask != null && activeSolveTask.IsCompleted) {
 					activeSolveTask = null;
 				}
-				isDraggingPanel = false;
 				selectedSlotIndex = -1;
 				return;
 			}
@@ -203,28 +198,6 @@ namespace SephiriaOptimizer.UI {
 			if (currentStateHash != lastObservedStateHash && !isAutoSwapRunning && activeSolveTask == null) {
 				lastObservedStateHash = currentStateHash;
 				StartBackgroundSolve(avatar, inventory);
-			}
-
-			if (Input.GetKeyDown(KeyCode.F5)) {
-				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
-			}
-
-			if (Input.GetKeyDown(KeyCode.F6)) {
-				isOverlayEnabled = !isOverlayEnabled;
-				SetStatusBanner(
-					isOverlayEnabled
-						? "오버레이 가이드가 켜졌습니다."
-						: "오버레이 가이드가 숨겨졌습니다."
-				);
-			}
-
-			if (Input.GetKeyDown(KeyCode.F7)) {
-				isConfigPanelOpen = !isConfigPanelOpen;
-				SetStatusBanner(
-					isConfigPanelOpen
-						? "빌드 맞춤 설정 창을 열었습니다."
-						: "설정 창을 닫았습니다."
-				);
 			}
 		}
 
@@ -252,6 +225,10 @@ namespace SephiriaOptimizer.UI {
 			if (isConfigPanelOpen && latestSnapshot != null) {
 				DrawConfigPanel(statusPanel, inventory, latestSnapshot);
 			}
+
+			if (isDpsBoxHovered && !isPanelCollapsed) {
+				DrawDpsBreakdownTooltip();
+			}
 		}
 
 		private void StartBackgroundSolve(PlayerAvatar avatar, GridInventory inventory) {
@@ -264,6 +241,10 @@ namespace SephiriaOptimizer.UI {
 					userSettings
 				);
 				pendingTaskSnapshot = snapshot;
+				if (latestSnapshot == null) {
+					latestSnapshot = snapshot;
+					RefreshCachedDpsTooltip();
+				}
 				activeSolveTask = Task.Run(() => solver.Solve(snapshot));
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Snapshot capture failed: {ex.Message}");
@@ -280,6 +261,7 @@ namespace SephiriaOptimizer.UI {
 					OptimizationResult result = activeSolveTask.Result;
 					latestSnapshot = pendingTaskSnapshot;
 					latestResult = result;
+					RefreshCachedDpsTooltip();
 				}
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Solver task failed: {ex.Message}");
@@ -348,9 +330,12 @@ namespace SephiriaOptimizer.UI {
 
 			latestSnapshot = snapshot;
 			latestResult = result;
+			RefreshCachedDpsTooltip();
 
-			if (result.BestScore <= result.InitialScore || plan.TotalOperations == 0) {
-				SetStatusBanner($"이미 최적 배치 상태입니다 (점수: {result.BestScore}).");
+			bool noImprovement = result.BestEstimatedDps <= result.InitialEstimatedDps
+				&& result.BestScore <= result.InitialScore;
+			if (noImprovement || plan.TotalOperations == 0) {
+				SetStatusBanner($"이미 최적 배치 상태입니다 (예상 DPS: {result.BestEstimatedDps:N0} DPS).");
 				return;
 			}
 
@@ -422,10 +407,6 @@ namespace SephiriaOptimizer.UI {
 				int tempInstanceId = expectedSlotInstanceIds[step.FirstSlotIndex];
 				expectedSlotInstanceIds[step.FirstSlotIndex] = expectedSlotInstanceIds[step.SecondSlotIndex];
 				expectedSlotInstanceIds[step.SecondSlotIndex] = tempInstanceId;
-
-				if (!executeInSingleFrame) {
-					yield return null;
-				}
 			}
 
 			IReadOnlyList<TabletRotateStep> rotates = plan.RotateSteps;
@@ -451,21 +432,19 @@ namespace SephiriaOptimizer.UI {
 					}
 
 					inventory.DoClickAction(pos);
-					if (!executeInSingleFrame) {
-						yield return null;
-					}
 				}
 			}
 
-			if (executeInSingleFrame) {
-				yield return null;
-			}
+			yield return null;
 
 			isAutoSwapRunning = false;
 			lastObservedStateHash = 0;
+			string pctStr = targetResult.EstimatedDpsGainPercent >= 0.0
+				? $"+{targetResult.EstimatedDpsGainPercent:F1}%"
+				: $"{targetResult.EstimatedDpsGainPercent:F1}%";
 			SetStatusBanner(
-				$"재배치 완료 ({targetResult.InitialScore} → {targetResult.BestScore}점, "
-				+ $"{plan.SwapSteps.Count}회 스왑)"
+				$"재배치 완료: {targetResult.InitialEstimatedDps:N0} DPS -> "
+				+ $"{targetResult.BestEstimatedDps:N0} DPS ({pctStr}, {plan.SwapSteps.Count}회 스왑)"
 			);
 		}
 
@@ -555,6 +534,7 @@ namespace SephiriaOptimizer.UI {
 			DrawRectBorder(panelRect, borderColor, 1.5f);
 
 			if (isPanelCollapsed) {
+				isDpsBoxHovered = false;
 				DrawCollapsedPanelHeader(panelRect, showVersionStrip || showUpdateStrip);
 				return;
 			}
@@ -563,23 +543,19 @@ namespace SephiriaOptimizer.UI {
 			float innerWidth = panelRect.width - 16f;
 			float curY = panelRect.y + 6f;
 
-			Rect dragHeaderRect = new Rect(padX, curY, innerWidth - 58f, 22f);
-			string dockTag = GetDockShortLabel(dockMode);
+			Rect headerRect = new Rect(padX, curY, innerWidth - 30f, 22f);
 			GUI.Label(
-				dragHeaderRect,
-				$"Optimizer v{installedModVersion} [{dockTag}]",
+				headerRect,
+				$"Sephiria Optimizer v{installedModVersion}",
 				headerLabelStyle!
 			);
 
-			if (GUI.Button(new Rect(panelRect.xMax - 60f, curY, 26f, 22f), "⇄", compactButtonStyle!)) {
-				CycleDockMode();
-			}
 			if (GUI.Button(new Rect(panelRect.xMax - 31f, curY, 23f, 22f), "—", compactButtonStyle!)) {
 				isPanelCollapsed = true;
+				isDpsBoxHovered = false;
 				SaveLayoutPreferences();
 				return;
 			}
-			HandlePanelDragEvents(dragHeaderRect, panelRect);
 			curY += 26f;
 
 			if (showVersionStrip && compatibilityReport != null) {
@@ -590,72 +566,72 @@ namespace SephiriaOptimizer.UI {
 				curY = DrawReleaseUpdateStrip(padX, curY, innerWidth);
 			}
 
-			Rect scoreBox = new Rect(padX, curY, innerWidth, 40f);
-			DrawColoredBox(scoreBox, new Color(0.11f, 0.15f, 0.22f, 0.92f));
+			Rect dpsBox = new Rect(padX, curY, innerWidth, 42f);
+			lastRenderedDpsBoxRect = dpsBox;
+			isDpsBoxHovered = Event.current != null && dpsBox.Contains(Event.current.mousePosition);
 
-			int curScore = latestResult != null ? latestResult.InitialScore : 0;
-			int optScore = latestResult != null ? latestResult.BestScore : 0;
-			int delta = optScore - curScore;
-			string deltaStr = delta >= 0 ? $"+{delta}" : delta.ToString();
-			string solverMode = latestResult != null
-				? (latestResult.UsedExactBranchAndBound ? "Exact B&B" : "LAHC+SA")
-				: "스캔 대기";
-			string timeStr = latestResult != null ? $"{latestResult.ElapsedMilliseconds:F1}ms" : "-";
-			string talentInfo = BuildTalentSummaryBadge(latestSnapshot);
+			Color dpsBoxBg = isDpsBoxHovered
+				? new Color(0.14f, 0.20f, 0.30f, 0.96f)
+				: new Color(0.11f, 0.15f, 0.22f, 0.92f);
+			DrawColoredBox(dpsBox, dpsBoxBg);
+			if (isDpsBoxHovered) {
+				DrawRectBorder(dpsBox, new Color(0.45f, 0.82f, 1.0f, 0.92f), 1f);
+			}
 
 			GUI.Label(
-				new Rect(padX + 6f, curY + 2f, innerWidth - 12f, 19f),
-				$"점수: {curScore} → {optScore} ({deltaStr})",
+				new Rect(padX + 6f, curY + 3f, innerWidth - 12f, 19f),
+				cachedDpsTooltip.PanelMainDpsLine,
 				headerLabelStyle!
 			);
 			GUI.Label(
-				new Rect(padX + 6f, curY + 20f, innerWidth - 12f, 18f),
-				$"{solverMode} ({timeStr}){talentInfo}",
+				new Rect(padX + 6f, curY + 21f, innerWidth - 12f, 18f),
+				cachedDpsTooltip.PanelSubDpsLine,
 				subHeaderStyle!
 			);
-			curY += 45f;
+			curY += 47f;
 
 			bool isSwapLocked = compatibilityReport != null && compatibilityReport.ShouldLockAutoSwap;
-			string f5Text = isSwapLocked ? "[F5] 자동 정렬 잠김 (API 변경)" : "[F5] 자동 정렬 실행";
-			if (GUI.Button(new Rect(padX, curY, innerWidth, 27f), f5Text, buttonStyle!)) {
+			string runBtnText = isSwapLocked ? "자동 정렬 잠김 (API 변경)" : "자동 정렬 실행";
+			if (GUI.Button(new Rect(padX, curY, innerWidth, 27f), runBtnText, buttonStyle!)) {
 				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
 			}
 			curY += 31f;
 
 			float halfW = (innerWidth - 4f) * 0.5f;
-			string f6Label = isOverlayEnabled ? "[F6] 가이드: 켜짐" : "[F6] 가이드: 꺼짐";
-			GUIStyle f6Style = isOverlayEnabled ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(padX, curY, halfW, 25f), f6Label, f6Style)) {
+			string guideLabel = isOverlayEnabled ? "가이드: 켜짐" : "가이드: 꺼짐";
+			GUIStyle guideStyle = isOverlayEnabled ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(padX, curY, halfW, 25f), guideLabel, guideStyle)) {
 				isOverlayEnabled = !isOverlayEnabled;
+				SetStatusBanner(
+					isOverlayEnabled
+						? "오버레이 가이드가 켜졌습니다."
+						: "오버레이 가이드가 숨겨졌습니다."
+				);
 			}
 
-			string f7Label = isConfigPanelOpen ? "[F7] 설정 닫기" : "[F7] 빌드 설정";
-			GUIStyle f7Style = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 25f), f7Label, f7Style)) {
+			string configLabel = isConfigPanelOpen ? "설정 닫기" : "빌드 설정";
+			GUIStyle configStyle = isConfigPanelOpen ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 25f), configLabel, configStyle)) {
 				isConfigPanelOpen = !isConfigPanelOpen;
+				SetStatusBanner(
+					isConfigPanelOpen
+						? "빌드 맞춤 설정 창을 열었습니다."
+						: "설정 창을 닫았습니다."
+				);
 			}
 			curY += 29f;
 
 			int pinCount = pinnedSlotIndices.Count;
-			string pinLabel = isPinModeEnabled ? $"Pin: ON ({pinCount})" : $"Pin: OFF ({pinCount})";
+			string pinLabel = isPinModeEnabled
+				? $"슬롯 고정(Pin): ON ({pinCount}개 고정됨)"
+				: $"슬롯 고정(Pin): OFF ({pinCount}개 고정됨)";
 			GUIStyle currentPinStyle = isPinModeEnabled ? activePinButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(padX, curY, halfW, 25f), pinLabel, currentPinStyle)) {
+			if (GUI.Button(new Rect(padX, curY, innerWidth, 25f), pinLabel, currentPinStyle)) {
 				isPinModeEnabled = !isPinModeEnabled;
 				SetStatusBanner(
 					isPinModeEnabled
 						? "Pin ON: 슬롯 우클릭으로 위치 고정"
 						: "Pin OFF: 아티팩트 우클릭으로 우선순위 변경"
-				);
-			}
-
-			string speedLabel = executeInSingleFrame ? "속도: 즉시(1F)" : "속도: 순차";
-			GUIStyle speedStyle = executeInSingleFrame ? selectedButtonStyle! : buttonStyle!;
-			if (GUI.Button(new Rect(padX + halfW + 4f, curY, halfW, 25f), speedLabel, speedStyle)) {
-				executeInSingleFrame = !executeInSingleFrame;
-				SetStatusBanner(
-					executeInSingleFrame
-						? "고속 모드: 단일 프레임 일괄 스왑·회전"
-						: "순차 모드: 프레임별 실행 및 실시간 검증"
 				);
 			}
 			curY += 29f;
@@ -681,19 +657,14 @@ namespace SephiriaOptimizer.UI {
 
 		private void DrawCollapsedPanelHeader(Rect panelRect, bool hasAttentionAlert) {
 			float padX = panelRect.x + 8f;
-			Rect dragRect = new Rect(padX, panelRect.y + 4f, panelRect.width - 70f, 24f);
+			Rect titleRect = new Rect(padX, panelRect.y + 4f, panelRect.width - 42f, 24f);
 			string alertMark = hasAttentionAlert ? " ●" : string.Empty;
-			GUI.Label(dragRect, $"Optimizer v{installedModVersion}{alertMark}", headerLabelStyle!);
+			GUI.Label(titleRect, $"Optimizer v{installedModVersion}{alertMark}", headerLabelStyle!);
 
-			if (GUI.Button(new Rect(panelRect.xMax - 58f, panelRect.y + 5f, 25f, 22f), "⇄", compactButtonStyle!)) {
-				CycleDockMode();
-			}
 			if (GUI.Button(new Rect(panelRect.xMax - 30f, panelRect.y + 5f, 23f, 22f), "+", compactButtonStyle!)) {
 				isPanelCollapsed = false;
 				SaveLayoutPreferences();
-				return;
 			}
-			HandlePanelDragEvents(dragRect, panelRect);
 		}
 
 		private float DrawVersionCompatibilityStrip(
@@ -840,7 +811,7 @@ namespace SephiriaOptimizer.UI {
 		}
 
 		private float CalculateExpandedPanelHeight(bool showVersionStrip, bool showUpdateStrip) {
-			float totalHeight = 232f;
+			float totalHeight = 234f;
 			if (showVersionStrip) {
 				totalHeight += 47f;
 			}
@@ -888,98 +859,44 @@ namespace SephiriaOptimizer.UI {
 			float panelWidth,
 			float panelHeight
 		) {
-			if (dockMode == PanelDockMode.Custom) {
-				return ClampRectToScreen(
-					new Rect(customPanelPosition.x, customPanelPosition.y, panelWidth, panelHeight)
-				);
-			}
-
-			CollectProtectedGameUiRects(statusPanel, inventory, out bool hasLeftFacilityOpen);
+			CollectProtectedGameUiRects(statusPanel, inventory);
 
 			Rect centralColumnBounds = BuildCentralColumnBounds(statusPanel, inventory);
 			float topAlignY = centralColumnBounds.width > 1f
 				? Mathf.Max(ScreenEdgeMargin, centralColumnBounds.yMin)
 				: ScreenEdgeMargin;
 
-			float leftOfSetX = centralColumnBounds.xMin - panelWidth - 12f;
-			for (int i = 0; i < sidePanelObstacleRects.Count; i++) {
-				Rect sideObs = sidePanelObstacleRects[i];
-				if (sideObs.center.x < centralColumnBounds.center.x) {
-					leftOfSetX = Mathf.Min(leftOfSetX, sideObs.xMin - panelWidth - 10f);
-				}
-			}
-
+			float rightAnchorX = Screen.width - panelWidth - ScreenEdgeMargin;
 			float rightOfCentralX = centralColumnBounds.width > 1f
-				? centralColumnBounds.xMax + 12f
-				: Screen.width - panelWidth - ScreenEdgeMargin;
+				? Mathf.Max(centralColumnBounds.xMax + 12f, rightAnchorX)
+				: rightAnchorX;
 
-			Rect candImmediateLeft = ClampRectToScreen(new Rect(leftOfSetX, topAlignY, panelWidth, panelHeight));
-			Rect candTopLeft = ClampRectToScreen(
-				new Rect(ScreenEdgeMargin, ScreenEdgeMargin, panelWidth, panelHeight)
-			);
-			Rect candBottomLeft = ClampRectToScreen(
-				new Rect(
-					ScreenEdgeMargin,
-					Screen.height - panelHeight - ScreenEdgeMargin,
-					panelWidth,
-					panelHeight
-				)
+			Rect candTopRight = ClampRectToScreen(
+				new Rect(rightAnchorX, ScreenEdgeMargin, panelWidth, panelHeight)
 			);
 			Rect candImmediateRight = ClampRectToScreen(
 				new Rect(rightOfCentralX, topAlignY, panelWidth, panelHeight)
 			);
-			Rect candTopRight = ClampRectToScreen(
-				new Rect(
-					Screen.width - panelWidth - ScreenEdgeMargin,
-					ScreenEdgeMargin,
-					panelWidth,
-					panelHeight
-				)
-			);
 			Rect candBottomRight = ClampRectToScreen(
 				new Rect(
-					Screen.width - panelWidth - ScreenEdgeMargin,
+					rightAnchorX,
 					Screen.height - panelHeight - ScreenEdgeMargin,
 					panelWidth,
 					panelHeight
 				)
 			);
 
-			Rect[] orderedCandidates;
-			if (dockMode == PanelDockMode.Left) {
-				orderedCandidates = new[] {
-					candImmediateLeft,
-					candTopLeft,
-					candBottomLeft,
-					candTopRight,
-					candImmediateRight,
-					candBottomRight
-				};
-			} else if (dockMode == PanelDockMode.Right || hasLeftFacilityOpen) {
-				orderedCandidates = new[] {
-					candTopRight,
-					candImmediateRight,
-					candBottomRight,
-					candTopLeft,
-					candImmediateLeft,
-					candBottomLeft
-				};
-			} else {
-				orderedCandidates = new[] {
-					candTopLeft,
-					candImmediateLeft,
-					candTopRight,
-					candImmediateRight,
-					candBottomLeft,
-					candBottomRight
-				};
-			}
+			Rect[] rightCandidates = new[] {
+				candTopRight,
+				candImmediateRight,
+				candBottomRight
+			};
 
-			Rect bestRect = orderedCandidates[0];
+			Rect bestRect = rightCandidates[0];
 			float bestPenalty = float.MaxValue;
-			for (int i = 0; i < orderedCandidates.Length; i++) {
-				Rect candidate = orderedCandidates[i];
-				float penalty = EvaluateCandidateOverlapPenalty(candidate, hasLeftFacilityOpen) + (i * 2f);
+			for (int i = 0; i < rightCandidates.Length; i++) {
+				Rect candidate = rightCandidates[i];
+				float penalty = EvaluateCandidateOverlapPenalty(candidate) + (i * 2f);
 				if (penalty < bestPenalty) {
 					bestPenalty = penalty;
 					bestRect = candidate;
@@ -990,8 +907,7 @@ namespace SephiriaOptimizer.UI {
 
 		private void CollectProtectedGameUiRects(
 			UI_CharacterStatusPanel statusPanel,
-			GridInventory inventory,
-			out bool hasLeftFacilityOpen
+			GridInventory inventory
 		) {
 			potionObstacleRects.Clear();
 			inventoryObstacleRects.Clear();
@@ -1018,8 +934,6 @@ namespace SephiriaOptimizer.UI {
 
 			TryAddActiveRect(statusPanel.setEffectPanel, sidePanelObstacleRects);
 			TryAddActiveRect(statusPanel.skillPanel, sidePanelObstacleRects);
-
-			hasLeftFacilityOpen = IsAnyLeftFacilityPanelOpen();
 		}
 
 		private Rect BuildCentralColumnBounds(UI_CharacterStatusPanel statusPanel, GridInventory inventory) {
@@ -1078,7 +992,7 @@ namespace SephiriaOptimizer.UI {
 			}
 		}
 
-		private float EvaluateCandidateOverlapPenalty(Rect candidate, bool hasLeftFacilityOpen) {
+		private float EvaluateCandidateOverlapPenalty(Rect candidate) {
 			float penalty = 0f;
 
 			for (int i = 0; i < potionObstacleRects.Count; i++) {
@@ -1089,11 +1003,6 @@ namespace SephiriaOptimizer.UI {
 			}
 			for (int i = 0; i < sidePanelObstacleRects.Count; i++) {
 				penalty += ComputeOverlapArea(candidate, ExpandRect(sidePanelObstacleRects[i], 4f)) * 75f;
-			}
-
-			if (hasLeftFacilityOpen) {
-				Rect leftFacilityZone = new Rect(0f, 0f, Screen.width * 0.44f, Screen.height);
-				penalty += ComputeOverlapArea(candidate, leftFacilityZone) * 280f;
 			}
 			return penalty;
 		}
@@ -1106,29 +1015,6 @@ namespace SephiriaOptimizer.UI {
 			if (screenRect.width > 4f && screenRect.height > 4f) {
 				targetList.Add(screenRect);
 			}
-		}
-
-		private static bool IsAnyLeftFacilityPanelOpen() {
-			if (UIManager.Instance == null) {
-				return false;
-			}
-			UI_ShopPanel shop = UIManager.Instance.GetElement<UI_ShopPanel>();
-			if (shop != null && shop.IsOpened) {
-				return true;
-			}
-			UI_SephiriteRewardPanel reward = UIManager.Instance.GetElement<UI_SephiriteRewardPanel>();
-			if (reward != null && reward.IsOpened) {
-				return true;
-			}
-			UI_MysticPotPanel pot = UIManager.Instance.GetElement<UI_MysticPotPanel>();
-			if (pot != null && pot.IsOpened) {
-				return true;
-			}
-			UI_TabletMixPanel mix = UIManager.Instance.GetElement<UI_TabletMixPanel>();
-			if (mix != null && mix.IsOpened) {
-				return true;
-			}
-			return false;
 		}
 
 		private static Rect ExpandRect(Rect rect, float padding) {
@@ -1160,71 +1046,11 @@ namespace SephiriaOptimizer.UI {
 			return new Rect(clampedX, clampedY, rect.width, rect.height);
 		}
 
-		private void HandlePanelDragEvents(Rect dragHandleRect, Rect fullPanelRect) {
-			Event? currentEvent = Event.current;
-			if (currentEvent == null) {
-				return;
-			}
-
-			if (currentEvent.type == EventType.MouseDown
-				&& currentEvent.button == 0
-				&& dragHandleRect.Contains(currentEvent.mousePosition)) {
-				isDraggingPanel = true;
-				dragPointerOffset = currentEvent.mousePosition - fullPanelRect.position;
-				customPanelPosition = fullPanelRect.position;
-				dockMode = PanelDockMode.Custom;
-				currentEvent.Use();
-			} else if (isDraggingPanel && currentEvent.type == EventType.MouseDrag) {
-				Vector2 targetPos = currentEvent.mousePosition - dragPointerOffset;
-				Rect clamped = ClampRectToScreen(
-					new Rect(targetPos.x, targetPos.y, fullPanelRect.width, fullPanelRect.height)
-				);
-				customPanelPosition = clamped.position;
-				currentEvent.Use();
-			} else if (isDraggingPanel && currentEvent.type == EventType.MouseUp) {
-				isDraggingPanel = false;
-				SaveLayoutPreferences();
-				currentEvent.Use();
-			}
-		}
-
-		private void CycleDockMode() {
-			dockMode = dockMode switch {
-				PanelDockMode.Auto => PanelDockMode.Left,
-				PanelDockMode.Left => PanelDockMode.Right,
-				PanelDockMode.Right => PanelDockMode.Auto,
-				_ => PanelDockMode.Auto
-			};
-			SaveLayoutPreferences();
-			SetStatusBanner($"패널 위치 모드 변경 → [{GetDockShortLabel(dockMode)}] (제목줄 드래그로 자유 이동 가능)");
-		}
-
-		private static string GetDockShortLabel(PanelDockMode mode) {
-			return mode switch {
-				PanelDockMode.Auto => "자동",
-				PanelDockMode.Left => "좌측",
-				PanelDockMode.Right => "우측",
-				PanelDockMode.Custom => "고정",
-				_ => "자동"
-			};
-		}
-
 		private void LoadLayoutPreferences() {
-			int savedMode = PlayerPrefs.GetInt(PrefKeyDockMode, (int)PanelDockMode.Auto);
-			if (savedMode >= (int)PanelDockMode.Auto && savedMode <= (int)PanelDockMode.Custom) {
-				dockMode = (PanelDockMode)savedMode;
-			}
-			customPanelPosition = new Vector2(
-				PlayerPrefs.GetFloat(PrefKeyCustomX, ScreenEdgeMargin),
-				PlayerPrefs.GetFloat(PrefKeyCustomY, ScreenEdgeMargin)
-			);
 			isPanelCollapsed = PlayerPrefs.GetInt(PrefKeyCollapsed, 0) == 1;
 		}
 
 		private void SaveLayoutPreferences() {
-			PlayerPrefs.SetInt(PrefKeyDockMode, (int)dockMode);
-			PlayerPrefs.SetFloat(PrefKeyCustomX, customPanelPosition.x);
-			PlayerPrefs.SetFloat(PrefKeyCustomY, customPanelPosition.y);
 			PlayerPrefs.SetInt(PrefKeyCollapsed, isPanelCollapsed ? 1 : 0);
 			PlayerPrefs.Save();
 		}
@@ -1412,23 +1238,6 @@ namespace SephiriaOptimizer.UI {
 			float height
 		) {
 			Rect central = BuildCentralColumnBounds(statusPanel, inventory);
-			bool sideIsOnLeft = lastRenderedSidePanelRect.center.x <= Screen.width * 0.5f;
-
-			if (sideIsOnLeft) {
-				float belowSideY = lastRenderedSidePanelRect.yMax + 8f;
-				if (belowSideY + height <= Screen.height - ScreenEdgeMargin
-					&& ScreenEdgeMargin + width <= central.xMin - 6f) {
-					return ClampRectToScreen(new Rect(ScreenEdgeMargin, belowSideY, width, height));
-				}
-				float rightOfCentralX = central.xMax + 12f;
-				if (rightOfCentralX + width <= Screen.width - ScreenEdgeMargin) {
-					return ClampRectToScreen(new Rect(rightOfCentralX, ScreenEdgeMargin, width, height));
-				}
-				return ClampRectToScreen(
-					new Rect(lastRenderedSidePanelRect.xMax + 10f, ScreenEdgeMargin, width, height)
-				);
-			}
-
 			if (ScreenEdgeMargin + width <= central.xMin - 6f) {
 				return ClampRectToScreen(new Rect(ScreenEdgeMargin, ScreenEdgeMargin, width, height));
 			}
@@ -1824,6 +1633,158 @@ namespace SephiriaOptimizer.UI {
 			statusBannerText = message;
 		}
 
+		private void RefreshCachedDpsTooltip() {
+			string talentBadge = BuildTalentSummaryBadge(latestSnapshot);
+			if (latestResult != null) {
+				cachedDpsTooltip = DpsEstimator.BuildTooltipCache(
+					latestResult.CurrentBreakdown,
+					latestResult.OptimizedBreakdown,
+					latestResult.UsedExactBranchAndBound,
+					latestResult.ElapsedMilliseconds,
+					talentBadge
+				);
+			} else if (latestSnapshot != null) {
+				cachedDpsTooltip = DpsEstimator.BuildTooltipCache(
+					latestSnapshot.CurrentBreakdown,
+					null,
+					false,
+					0.0,
+					talentBadge
+				);
+			} else {
+				cachedDpsTooltip = DpsTooltipCache.CreateIdle(talentBadge);
+			}
+		}
+
+		private void DrawDpsBreakdownTooltip() {
+			if (!cachedDpsTooltip.IsPopulated) {
+				RefreshCachedDpsTooltip();
+			}
+
+			(float clampedX, float clampedY) = DpsEstimator.ComputeClampedTooltipPosition(
+				lastRenderedDpsBoxRect.xMin,
+				lastRenderedDpsBoxRect.yMin,
+				BreakdownTooltipWidth,
+				BreakdownTooltipHeight,
+				Screen.width,
+				Screen.height,
+				ScreenEdgeMargin
+			);
+
+			Rect tooltipRect = new Rect(
+				Mathf.Clamp(clampedX, ScreenEdgeMargin, Mathf.Max(ScreenEdgeMargin, Screen.width - BreakdownTooltipWidth - ScreenEdgeMargin)),
+				Mathf.Clamp(clampedY, ScreenEdgeMargin, Mathf.Max(ScreenEdgeMargin, Screen.height - BreakdownTooltipHeight - ScreenEdgeMargin)),
+				BreakdownTooltipWidth,
+				BreakdownTooltipHeight
+			);
+
+			DrawColoredBox(tooltipRect, new Color(0.04f, 0.06f, 0.11f, 0.98f));
+			DrawRectBorder(tooltipRect, new Color(0.38f, 0.72f, 1.0f, 0.95f), 1.5f);
+
+			float padX = tooltipRect.x + 12f;
+			float innerW = tooltipRect.width - 24f;
+			float curY = tooltipRect.y + 8f;
+
+			GUI.Label(
+				new Rect(padX, curY, innerW, 20f),
+				cachedDpsTooltip.TooltipTitle,
+				tooltipTitleStyle!
+			);
+			curY += 22f;
+			DrawHorizontalDivider(padX, curY, innerW, new Color(0.32f, 0.52f, 0.78f, 0.75f));
+			curY += 5f;
+
+			GUI.Label(
+				new Rect(padX, curY, innerW, 18f),
+				cachedDpsTooltip.BaseDpsHeader,
+				tooltipSectionHeaderStyle!
+			);
+			curY += 18f;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 19f),
+				cachedDpsTooltip.BaseDpsValueLine,
+				tooltipValueStyle!
+			);
+			curY += 18f;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 17f),
+				cachedDpsTooltip.BaseDpsDescLine,
+				tooltipDescStyle!
+			);
+			curY += 20f;
+			DrawHorizontalDivider(padX, curY, innerW, new Color(0.24f, 0.34f, 0.48f, 0.65f));
+			curY += 5f;
+
+			if (cachedDpsTooltip.HasGoldenNeedleWarning) {
+				Rect needleWarnBox = new Rect(padX - 4f, curY - 2f, innerW + 8f, 56f);
+				DrawColoredBox(needleWarnBox, new Color(0.36f, 0.22f, 0.05f, 0.42f));
+				DrawRectBorder(needleWarnBox, new Color(0.95f, 0.68f, 0.18f, 0.78f), 1f);
+			}
+
+			GUI.Label(
+				new Rect(padX, curY, innerW, 18f),
+				cachedDpsTooltip.GoldenNeedleHeader,
+				tooltipSectionHeaderStyle!
+			);
+			curY += 18f;
+			GUIStyle needleValStyle = cachedDpsTooltip.HasGoldenNeedleWarning
+				? tooltipWarningStyle!
+				: tooltipValueStyle!;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 19f),
+				cachedDpsTooltip.GoldenNeedleValueLine,
+				needleValStyle
+			);
+			curY += 18f;
+			GUIStyle needleDescStyle = cachedDpsTooltip.HasGoldenNeedleWarning
+				? tooltipWarningStyle!
+				: tooltipDescStyle!;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 17f),
+				cachedDpsTooltip.GoldenNeedleStatusLine,
+				needleDescStyle
+			);
+			curY += 20f;
+			DrawHorizontalDivider(padX, curY, innerW, new Color(0.24f, 0.34f, 0.48f, 0.65f));
+			curY += 5f;
+
+			GUI.Label(
+				new Rect(padX, curY, innerW, 18f),
+				cachedDpsTooltip.HarmonyHeader,
+				tooltipSectionHeaderStyle!
+			);
+			curY += 18f;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 19f),
+				cachedDpsTooltip.HarmonyValueLine,
+				tooltipValueStyle!
+			);
+			curY += 18f;
+			GUI.Label(
+				new Rect(padX + 6f, curY, innerW - 6f, 17f),
+				cachedDpsTooltip.HarmonyAddedDpsLine,
+				tooltipDescStyle!
+			);
+			curY += 21f;
+			DrawHorizontalDivider(padX, curY, innerW, new Color(0.38f, 0.72f, 1.0f, 0.85f));
+			curY += 6f;
+
+			Rect summaryBox = new Rect(padX - 4f, curY, innerW + 8f, 44f);
+			DrawColoredBox(summaryBox, new Color(0.09f, 0.16f, 0.26f, 0.94f));
+			DrawRectBorder(summaryBox, new Color(0.32f, 0.78f, 0.56f, 0.85f), 1f);
+
+			GUI.Label(
+				new Rect(padX + 4f, curY + 3f, innerW - 8f, 20f),
+				cachedDpsTooltip.TotalSummaryLine,
+				tooltipTotalStyle!
+			);
+			GUI.Label(
+				new Rect(padX + 4f, curY + 23f, innerW - 8f, 18f),
+				cachedDpsTooltip.ShareSummaryLine,
+				subHeaderStyle!
+			);
+		}
+
 		private void EnsureGuiStyles() {
 			if (headerLabelStyle != null) {
 				return;
@@ -1892,6 +1853,39 @@ namespace SephiriaOptimizer.UI {
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(1f, 0.85f, 0.1f, 1f) }
 			};
+			tooltipTitleStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 12,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.58f, 0.92f, 1f, 1f) }
+			};
+			tooltipSectionHeaderStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.88f, 0.92f, 0.98f, 1f) }
+			};
+			tooltipValueStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.98f, 0.99f, 1f, 1f) }
+			};
+			tooltipDescStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 10,
+				normal = { textColor = new Color(0.72f, 0.80f, 0.90f, 1f) }
+			};
+			tooltipWarningStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 11,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(1f, 0.75f, 0.22f, 1f) }
+			};
+			tooltipTotalStyle = new GUIStyle(GUI.skin.label) {
+				fontSize = 12,
+				fontStyle = FontStyle.Bold,
+				normal = { textColor = new Color(0.38f, 1f, 0.64f, 1f) }
+			};
+		}
+
+		private static void DrawHorizontalDivider(float x, float y, float width, Color color) {
+			DrawColoredBox(new Rect(x, y, width, 1f), color);
 		}
 
 		private static void DrawColoredBox(Rect rect, Color color) {

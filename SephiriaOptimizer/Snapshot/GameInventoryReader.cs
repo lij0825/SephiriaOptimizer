@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using SephiriaOptimizer.Models;
 
 namespace SephiriaOptimizer.Snapshot {
@@ -55,6 +56,7 @@ namespace SephiriaOptimizer.Snapshot {
 			);
 
 			TalentRuleSnapshot talentRules = CaptureTalentRules(avatar, inventory);
+			PlayerCombatBaseline combatBaseline = ExtractCombatBaseline(avatar, talentRules);
 
 			Dictionary<string, int> categoryKeyToId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 			List<string> orderedCategoryKeys = new List<string>(InventorySnapshot.MaxSupportedCategories);
@@ -232,6 +234,23 @@ namespace SephiriaOptimizer.Snapshot {
 					}
 
 					int weight = ComputeArtifactWeight(entity, charm, customEntityWeights);
+					ExtractCharmCombatTables(
+						charm,
+						isAttackable,
+						hasDependency,
+						isNearLevelDamage,
+						isElementalByRow,
+						maxLevel,
+						rarityTier,
+						weight,
+						priorityTier,
+						combatBaseline.AttacksPerSecond,
+						out float[]? attackDamageByLevel,
+						out float baseProcsPerSecond,
+						out float[]? statBonusPercentByLevel,
+						out float[]? finalDamagePercentByLevel
+					);
+
 					string symmetryKey = $"C:{entity.id}:{baseLevel}:{maxLevel}:"
 						+ $"{(int)constraintType}:{(int)priorityTier}:{staticCatMask}";
 					if (settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID) {
@@ -287,7 +306,11 @@ namespace SephiriaOptimizer.Snapshot {
 						isWoodenBox,
 						isFireIce,
 						isNearLevelDamage,
-						crystalRates
+						crystalRates,
+						attackDamageByLevel,
+						baseProcsPerSecond,
+						statBonusPercentByLevel,
+						finalDamagePercentByLevel
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet? tablet = ResolveSlotTablet(
@@ -437,12 +460,221 @@ namespace SephiriaOptimizer.Snapshot {
 				mysticSlot1,
 				mysticTier1Threshold,
 				mysticTier2Threshold,
-				extraMysticTier2Slots
+				extraMysticTier2Slots,
+				combatBaseline
 			);
 		}
 
 		public static ulong[] BuildMooreNeighborMasks(int width, int height, int unlockedSlots) {
 			return InventorySnapshot.ComputeMooreNeighborMasks(width, height, unlockedSlots);
+		}
+
+		private static PlayerCombatBaseline ExtractCombatBaseline(
+			PlayerAvatar? avatar,
+			TalentRuleSnapshot talentRules
+		) {
+			if (avatar == null) {
+				return PlayerCombatBaseline.Default;
+			}
+
+			float baseAttackDamage = 48f + Math.Max(0, talentRules.PhysicalDamageStat);
+			float attacksPerSecond = 2.0f;
+			float critChancePercent = 10f;
+			float critDamageMultiplier = 1.5f;
+
+			int attackSpeedStat = avatar.GetCustomStatUnsafe("ATTACKSPEED");
+			if (attackSpeedStat != 0) {
+				attacksPerSecond = Math.Clamp(2.0f * (1f + (attackSpeedStat * 0.01f)), 0.5f, 12f);
+			}
+
+			int critChanceStat = avatar.GetCustomStatUnsafe("CRITICAL");
+			if (critChanceStat > 0) {
+				critChancePercent = Math.Clamp(critChanceStat, 0f, 100f);
+			}
+
+			int critDmgStat = avatar.GetCustomStatUnsafe("CRITICALDAMAGE");
+			if (critDmgStat > 0) {
+				critDamageMultiplier = Math.Clamp(1.5f + (critDmgStat * 0.01f), 1.0f, 8.0f);
+			}
+
+			int maxElem = Math.Max(
+				Math.Max(talentRules.FireDamageStat, talentRules.IceDamageStat),
+				Math.Max(talentRules.LightningDamageStat, talentRules.PhysicalDamageStat)
+			);
+			float elementalBonusPercent = Math.Max(0, maxElem);
+
+			return new PlayerCombatBaseline(
+				baseAttackDamage,
+				attacksPerSecond,
+				critChancePercent,
+				critDamageMultiplier,
+				elementalBonusPercent
+			);
+		}
+
+		private static void ExtractCharmCombatTables(
+			Charm_Basic? charm,
+			bool isAttackable,
+			bool hasDependency,
+			bool isNearLevelDamage,
+			bool isElementalByRow,
+			int maxLevel,
+			int rarityTier,
+			int weight,
+			ArtifactPriorityTier priorityTier,
+			float playerAttacksPerSecond,
+			out float[]? attackDamageByLevel,
+			out float baseProcsPerSecond,
+			out float[]? statBonusPercentByLevel,
+			out float[]? finalDamagePercentByLevel
+		) {
+			attackDamageByLevel = null;
+			baseProcsPerSecond = 1f;
+			statBonusPercentByLevel = null;
+			finalDamagePercentByLevel = null;
+
+			if (charm == null || priorityTier == ArtifactPriorityTier.Sacrifice) {
+				return;
+			}
+
+			int levelCount = Math.Max(1, maxLevel + 1);
+			Type charmType = charm.GetType();
+			FieldInfo[] fields = charmType.GetFields(
+				BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+			);
+
+			float detectedCooldown = 0f;
+			List<float[]> damageArrays = new List<float[]>(2);
+			List<float[]> statArrays = new List<float[]>(2);
+
+			for (int i = 0; i < fields.Length; i++) {
+				FieldInfo field = fields[i];
+				string fieldName = field.Name;
+				Type fieldType = field.FieldType;
+
+				if ((fieldType == typeof(float) || fieldType == typeof(int))
+					&& (fieldName.IndexOf("cooldown", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("interval", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0)) {
+					object? rawVal = field.GetValue(charm);
+					float val = rawVal is float fv ? fv : (rawVal is int iv ? iv : 0f);
+					if (val >= 0.1f && val <= 30f && detectedCooldown <= 0f) {
+						detectedCooldown = val;
+					}
+					continue;
+				}
+
+				if (fieldType == typeof(int[]) || fieldType == typeof(float[])) {
+					if (fieldName.IndexOf("dependency", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("allDamageBonusByLevel", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("addElementalStatByLevel", StringComparison.OrdinalIgnoreCase) >= 0) {
+						continue;
+					}
+
+					float[]? converted = ConvertNumericArrayToFloat(field.GetValue(charm));
+					if (converted == null || converted.Length == 0) {
+						continue;
+					}
+
+					if (isAttackable
+						&& (fieldName.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0
+							|| fieldName.IndexOf("dmg", StringComparison.OrdinalIgnoreCase) >= 0
+							|| fieldName.IndexOf("power", StringComparison.OrdinalIgnoreCase) >= 0
+							|| fieldName.IndexOf("attack", StringComparison.OrdinalIgnoreCase) >= 0)) {
+						damageArrays.Add(NormalizeTableToLength(converted, levelCount));
+					} else if (fieldName.IndexOf("stat", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("bonus", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("percent", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("speed", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("crit", StringComparison.OrdinalIgnoreCase) >= 0
+						|| fieldName.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0) {
+						statArrays.Add(NormalizeTableToLength(converted, levelCount));
+					}
+				}
+			}
+
+			if (isAttackable) {
+				if (detectedCooldown > 0.08f) {
+					baseProcsPerSecond = Math.Clamp(1f / detectedCooldown, 0.25f, 6f);
+				} else {
+					baseProcsPerSecond = Math.Clamp(playerAttacksPerSecond * 0.65f, 0.8f, 4f);
+				}
+
+				if (damageArrays.Count > 0) {
+					float[] merged = new float[levelCount];
+					for (int a = 0; a < damageArrays.Count; a++) {
+						float[] arr = damageArrays[a];
+						for (int lv = 0; lv < levelCount; lv++) {
+							merged[lv] += Math.Max(0f, arr[lv]);
+						}
+					}
+					EnsureMonotonicPositiveTable(merged, rarityTier, weight, priorityTier, isAttackTable: true);
+					attackDamageByLevel = merged;
+				}
+			} else if (!hasDependency && !isNearLevelDamage && !isElementalByRow && statArrays.Count > 0) {
+				float[] merged = new float[levelCount];
+				for (int a = 0; a < statArrays.Count; a++) {
+					float[] arr = statArrays[a];
+					for (int lv = 0; lv < levelCount; lv++) {
+						merged[lv] += Math.Abs(arr[lv]);
+					}
+				}
+				EnsureMonotonicPositiveTable(merged, rarityTier, weight, priorityTier, isAttackTable: false);
+				statBonusPercentByLevel = merged;
+			}
+		}
+
+		private static float[]? ConvertNumericArrayToFloat(object? rawArray) {
+			if (rawArray is float[] floatArr && floatArr.Length > 0) {
+				float[] copy = new float[floatArr.Length];
+				Array.Copy(floatArr, copy, floatArr.Length);
+				return copy;
+			}
+			if (rawArray is int[] intArr && intArr.Length > 0) {
+				float[] copy = new float[intArr.Length];
+				for (int i = 0; i < intArr.Length; i++) {
+					copy[i] = intArr[i];
+				}
+				return copy;
+			}
+			return null;
+		}
+
+		private static float[] NormalizeTableToLength(float[] source, int targetLength) {
+			float[] result = new float[targetLength];
+			for (int i = 0; i < targetLength; i++) {
+				int srcIdx = Math.Min(i, source.Length - 1);
+				result[i] = source[srcIdx];
+			}
+			return result;
+		}
+
+		private static void EnsureMonotonicPositiveTable(
+			float[] table,
+			int rarityTier,
+			int weight,
+			ArtifactPriorityTier priorityTier,
+			bool isAttackTable
+		) {
+			if (table.Length == 0) {
+				return;
+			}
+			float minStep = isAttackTable ? 8f : 1.5f;
+			float minBase = isAttackTable
+				? (24f + (Math.Clamp(rarityTier, 0, 5) * 10f) + (Math.Min(weight, 25) * 2f))
+				: (3f + (Math.Clamp(rarityTier, 0, 5) * 1.5f));
+			if (priorityTier == ArtifactPriorityTier.Core) {
+				minBase *= 1.35f;
+				minStep *= 1.35f;
+			}
+			if (table[0] < minBase) {
+				table[0] = minBase;
+			}
+			for (int i = 1; i < table.Length; i++) {
+				if (table[i] < table[i - 1] + minStep) {
+					table[i] = table[i - 1] + minStep;
+				}
+			}
 		}
 
 		private readonly struct RawQueryMetadata {
@@ -1149,6 +1381,11 @@ namespace SephiriaOptimizer.Snapshot {
 					}
 				}
 
+				float[] breakpointBonuses = new float[breakpoints.Length];
+				for (int b = 0; b < breakpoints.Length; b++) {
+					breakpointBonuses[b] = Math.Max(4f, breakpoints[b] * 2.5f);
+				}
+
 				int staticCount = staticCategoryCounts[i];
 				bool isUserTarget = hasExplicitTargets
 					? settings.TargetComboCategories.Contains(key)
@@ -1160,7 +1397,8 @@ namespace SephiriaOptimizer.Snapshot {
 					displayName,
 					staticCount,
 					breakpoints,
-					isUserTarget
+					isUserTarget,
+					breakpointBonuses
 				);
 			}
 
@@ -1197,6 +1435,9 @@ namespace SephiriaOptimizer.Snapshot {
 				return ArtifactPriorityTier.Low;
 			}
 			if (entity.rarity >= EItemRarity.Legend) {
+				return ArtifactPriorityTier.High;
+			}
+			if (charm != null && (charm is IAttackableCharm || charm.isUniqueEffect)) {
 				return ArtifactPriorityTier.High;
 			}
 			return ArtifactPriorityTier.Normal;

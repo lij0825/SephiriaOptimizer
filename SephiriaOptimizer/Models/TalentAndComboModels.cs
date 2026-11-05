@@ -2,12 +2,52 @@ using System;
 using System.Collections.Generic;
 
 namespace SephiriaOptimizer.Models {
+	public readonly struct PlayerCombatBaseline {
+		public static readonly PlayerCombatBaseline Default = new PlayerCombatBaseline(
+			50f,
+			2.0f,
+			10f,
+			1.5f,
+			0f
+		);
+
+		public float BaseAttackDamage { get; }
+		public float AttacksPerSecond { get; }
+		public float CritChancePercent { get; }
+		public float CritDamageMultiplier { get; }
+		public float ElementalDamageBonusPercent { get; }
+		public float BaseWeaponDps { get; }
+
+		public PlayerCombatBaseline(
+			float baseAttackDamage,
+			float attacksPerSecond,
+			float critChancePercent,
+			float critDamageMultiplier,
+			float elementalDamageBonusPercent
+		) {
+			BaseAttackDamage = baseAttackDamage > 1f ? baseAttackDamage : 50f;
+			AttacksPerSecond = attacksPerSecond > 0.1f ? attacksPerSecond : 2.0f;
+			CritChancePercent = Math.Clamp(critChancePercent, 0f, 100f);
+			CritDamageMultiplier = Math.Max(1.0f, critDamageMultiplier);
+			ElementalDamageBonusPercent = Math.Max(0f, elementalDamageBonusPercent);
+
+			double critFactor = 1.0 + ((CritChancePercent * 0.01) * (CritDamageMultiplier - 1.0));
+			double elemFactor = 1.0 + (ElementalDamageBonusPercent * 0.01);
+			BaseWeaponDps = (float)(BaseAttackDamage * AttacksPerSecond * critFactor * elemFactor);
+		}
+
+		public double ComputeBaseWeaponRawDps() {
+			return BaseWeaponDps > 1f ? BaseWeaponDps : 105.0;
+		}
+	}
+
 	public sealed class ComboCategoryInfo {
 		public int CategoryId { get; }
 		public string CategoryKey { get; }
 		public string DisplayName { get; }
 		public int StaticCount { get; }
 		public int[] Breakpoints { get; }
+		public float[] BreakpointStatBonuses { get; }
 		public int HighestBreakpoint { get; }
 		public bool IsUserTarget { get; }
 
@@ -17,13 +57,15 @@ namespace SephiriaOptimizer.Models {
 			string displayName,
 			int staticCount,
 			int[] breakpoints,
-			bool isUserTarget
+			bool isUserTarget,
+			float[]? breakpointStatBonuses = null
 		) {
 			CategoryId = categoryId;
 			CategoryKey = categoryKey ?? string.Empty;
 			DisplayName = string.IsNullOrEmpty(displayName) ? CategoryKey : displayName;
 			StaticCount = Math.Max(0, staticCount);
 			Breakpoints = breakpoints ?? Array.Empty<int>();
+			BreakpointStatBonuses = breakpointStatBonuses ?? Array.Empty<float>();
 			int maxBp = 0;
 			for (int i = 0; i < Breakpoints.Length; i++) {
 				if (Breakpoints[i] > maxBp) {
@@ -32,6 +74,32 @@ namespace SephiriaOptimizer.Models {
 			}
 			HighestBreakpoint = maxBp;
 			IsUserTarget = isUserTarget;
+		}
+
+		public double EvaluateStatBonusPercent(int totalCount, int unlimitedComboStat = 0) {
+			if (totalCount <= 0) {
+				return 0.0;
+			}
+
+			double totalBonus = 0.0;
+			int bpLen = Breakpoints.Length;
+			for (int b = 0; b < bpLen; b++) {
+				if (totalCount >= Breakpoints[b]) {
+					if (b < BreakpointStatBonuses.Length && BreakpointStatBonuses[b] > 0f) {
+						totalBonus += BreakpointStatBonuses[b];
+					} else {
+						double tierBase = IsUserTarget ? 14.0 : 8.0;
+						totalBonus += tierBase + (b * 4.0);
+					}
+				}
+			}
+
+			if (unlimitedComboStat > 0 && HighestBreakpoint > 0 && totalCount > HighestBreakpoint) {
+				int surplus = totalCount - HighestBreakpoint;
+				totalBonus += surplus * Math.Clamp(unlimitedComboStat, 1, 4) * 3.5;
+			}
+
+			return totalBonus;
 		}
 	}
 

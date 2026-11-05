@@ -23,11 +23,13 @@ namespace SephiriaOptimizer.Solver {
 	}
 
 	public static class ObjectiveEvaluator {
-		public const int DeactivationBasePenalty = 8000;
-		public const int NegativeLevelExtraPenalty = 500;
-		public const int TabletOnBuffedSlotPenalty = 6000;
-		public const int UnmetTabletConditionPenalty = 5000;
-		public const int WastedPositiveOutOfBoundsPenalty = 4000;
+		public const int DpsScaleFactor = 20;
+
+		public const int DeactivationBasePenalty = 16000;
+		public const int NegativeLevelExtraPenalty = 600;
+		public const int TabletOnBuffedSlotPenalty = 9000;
+		public const int UnmetTabletConditionPenalty = 8000;
+		public const int WastedPositiveOutOfBoundsPenalty = 5000;
 
 		public const int GoldenNeedleLinkBaseBonus = 2000;
 		public const int UnlinkedGoldenNeedlePenalty = 4500;
@@ -67,8 +69,27 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations
 		) {
+			return EvaluateWithDps(snapshot, slotToItemIndex, itemRotations, out _);
+		}
+
+		public static int CalculateEstimatedDummyDps(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<int> itemRotations
+		) {
+			EvaluateWithDps(snapshot, slotToItemIndex, itemRotations, out int estimatedDps);
+			return estimatedDps;
+		}
+
+		public static int EvaluateWithDps(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<int> itemRotations,
+			out int estimatedDps
+		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			if (unlockedSlots <= 0) {
+				estimatedDps = 0;
 				return 0;
 			}
 
@@ -342,6 +363,7 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			int totalScore = tabletPlacementScore;
+			int activeNonSacrificeArtifactCount = 0;
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
@@ -412,6 +434,7 @@ namespace SephiriaOptimizer.Solver {
 					continue;
 				}
 
+				activeNonSacrificeArtifactCount++;
 				double artifactWeight = GetNormalizedWeight(item);
 				int levelScore = item.MaxLevel > 0 ? (effectiveLevel * EffectiveLevelScoreMultiplier) : 0;
 				int maxBonus = (item.MaxLevel > 0 && effectiveLevel == item.MaxLevel) ? MaxLevelReachedBonus : 0;
@@ -558,7 +581,168 @@ namespace SephiriaOptimizer.Solver {
 				totalScore += EvaluateArrangementPatterns(snapshot, slotToItemIndex);
 			}
 
+			estimatedDps = ComputeEstimatedDummyDpsFromState(
+				snapshot,
+				slotToItemIndex,
+				isActiveBuf,
+				effectiveLevelBuf,
+				needleRootBuf,
+				chalcedonyCatBuf,
+				dynamicComboBonusCounts,
+				out int baseWeaponOnlyDps
+			);
+
+			if (activeNonSacrificeArtifactCount > 0) {
+				int artifactInducedDps = Math.Max(0, estimatedDps - baseWeaponOnlyDps);
+				totalScore += artifactInducedDps * DpsScaleFactor;
+			}
+
 			return totalScore;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static int ComputeEstimatedDummyDpsFromState(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<byte> isActiveBuf,
+			ReadOnlySpan<int> effectiveLevelBuf,
+			ReadOnlySpan<int> needleRootBuf,
+			ReadOnlySpan<int> chalcedonyCatBuf,
+			ReadOnlySpan<int> dynamicComboBonusCounts,
+			out int baseWeaponOnlyDps
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+			double baseWeaponRawDps = snapshot.CombatBaseline.ComputeBaseWeaponRawDps();
+			baseWeaponOnlyDps = (int)Math.Round(baseWeaponRawDps);
+
+			Span<double> needleMultiplierBySlot = stackalloc double[InventorySnapshot.MaxSupportedSlots];
+			for (int s = 0; s < unlockedSlots; s++) {
+				needleMultiplierBySlot[s] = 1.0;
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (isActiveBuf[s] == 0) {
+					continue;
+				}
+				int itemIdx = slotToItemIndex[s];
+				if (itemIdx < 0) {
+					continue;
+				}
+				SlotItemSnapshot needleItem = items[itemIdx];
+				if (needleItem.Kind != SlotItemKind.Artifact || !needleItem.HasDependencyTarget) {
+					continue;
+				}
+				int rootSlot = needleRootBuf[s];
+				if (rootSlot >= 0 && rootSlot < unlockedSlots && isActiveBuf[rootSlot] != 0) {
+					int rootItemIdx = slotToItemIndex[rootSlot];
+					if (rootItemIdx >= 0) {
+						SlotItemSnapshot rootItem = items[rootItemIdx];
+						int needleLv = effectiveLevelBuf[s];
+						int bonusPct = needleItem.GetNeedleBonusPercent(needleLv, rootItem.RarityTier);
+						double prefScale = snapshot.PreferredNeedleTargetInstanceId == rootItem.InstanceId
+							? 1.08
+							: 1.0;
+						needleMultiplierBySlot[rootSlot] *= (1.0 + (bonusPct * 0.01)) * prefScale;
+					}
+				}
+			}
+
+			double charmAttackRawDps = 0.0;
+			double statBonusPercentSum = 0.0;
+			double finalDamageMultiplier = 1.0;
+			double totalHarmonyAmpPercent = 0.0;
+			ulong[] mooreNeighborMasks = snapshot.MooreNeighborMasks;
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (isActiveBuf[s] == 0) {
+					continue;
+				}
+				int itemIdx = slotToItemIndex[s];
+				if (itemIdx < 0) {
+					continue;
+				}
+				SlotItemSnapshot item = items[itemIdx];
+				if (item.Kind != SlotItemKind.Artifact || item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+					continue;
+				}
+
+				int effLv = effectiveLevelBuf[s];
+				if (item.IsAttackableCharm) {
+					double rawAttackDps = item.GetAttackRawDpsAtLevel(effLv);
+					charmAttackRawDps += rawAttackDps * needleMultiplierBySlot[s];
+				}
+
+				float statPct = item.GetStatBonusPercentAtLevel(effLv);
+				if (statPct > 0f) {
+					statBonusPercentSum += statPct;
+				}
+
+				float finalPct = item.GetFinalDamagePercentAtLevel(effLv);
+				if (finalPct > 0f) {
+					finalDamageMultiplier *= 1.0 + (finalPct * 0.01);
+				}
+
+				if (item.IsElementalByRowCharm) {
+					int assignedCatId = chalcedonyCatBuf[s];
+					if (assignedCatId >= 0) {
+						int elemBonus = item.GetRowElementalBonus(effLv);
+						bool matchesPref = snapshot.PreferredChalcedonyCategoryId < 0
+							|| assignedCatId == snapshot.PreferredChalcedonyCategoryId;
+						statBonusPercentSum += matchesPref ? (elemBonus * 2.5) : (elemBonus * 0.5);
+					}
+				}
+
+				if (item.IsCrystalOfHarmony) {
+					ulong neighborMask = mooreNeighborMasks[s];
+					int sumNeighborLevels = 0;
+					while (neighborMask != 0UL) {
+						int nSlot = BitOperations.TrailingZeroCount(neighborMask);
+						neighborMask &= neighborMask - 1UL;
+						if (isActiveBuf[nSlot] != 0) {
+							int nItemIdx = slotToItemIndex[nSlot];
+							if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
+								sumNeighborLevels += effectiveLevelBuf[nSlot];
+							}
+						}
+					}
+					float crystalRate = item.GetCrystalRatePerLevel(effLv);
+					totalHarmonyAmpPercent += sumNeighborLevels * crystalRate;
+				}
+			}
+
+			ComboCategoryInfo[] categories = snapshot.ComboCategories;
+			if (categories.Length > 0) {
+				for (int i = 0; i < categories.Length; i++) {
+					ComboCategoryInfo info = categories[i];
+					int catId = info.CategoryId;
+					int dynAdded = (catId >= 0 && catId < InventorySnapshot.MaxSupportedCategories)
+						? dynamicComboBonusCounts[catId]
+						: 0;
+					int totalCount = info.StaticCount + dynAdded;
+					double breakpointPct = info.EvaluateStatBonusPercent(totalCount);
+					if (info.IsUserTarget) {
+						breakpointPct *= 1.35;
+					}
+					statBonusPercentSum += breakpointPct;
+					if (dynAdded > 0) {
+						statBonusPercentSum += dynAdded * (info.IsUserTarget ? 2.5 : 1.0);
+					}
+				}
+			} else {
+				for (int c = 0; c < InventorySnapshot.MaxSupportedCategories; c++) {
+					if (dynamicComboBonusCounts[c] > 0) {
+						statBonusPercentSum += dynamicComboBonusCounts[c] * 1.5;
+					}
+				}
+			}
+
+			double baseAndCharmRawDps = baseWeaponRawDps + charmAttackRawDps;
+			double statMultiplier = (1.0 + (statBonusPercentSum * 0.01)) * finalDamageMultiplier;
+			double harmonyAmpMultiplier = 1.0 + (totalHarmonyAmpPercent * 0.01);
+			double totalEstimatedDps = baseAndCharmRawDps * statMultiplier * harmonyAmpMultiplier;
+
+			return Math.Max(0, (int)Math.Round(totalEstimatedDps));
 		}
 
 		public static SlotEvaluationDetail[] EvaluateDetailed(
