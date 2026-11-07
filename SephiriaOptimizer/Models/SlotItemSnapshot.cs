@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 
 namespace SephiriaOptimizer.Models {
 	public sealed class SlotItemSnapshot {
@@ -50,6 +51,10 @@ namespace SephiriaOptimizer.Models {
 		public float BaseProcsPerSecond { get; }
 		public float[] StatBonusPercentByLevel { get; }
 		public float[] FinalDamagePercentByLevel { get; }
+		public CombatStatDelta[] StatDeltaByLevel { get; }
+		public bool HasExplicitStatDeltas { get; }
+		public byte CharmScalingElementKind { get; }
+		public float[] CharmElementalPercentByLevel { get; }
 
 		public SlotItemSnapshot(
 			int itemIndex,
@@ -99,7 +104,10 @@ namespace SephiriaOptimizer.Models {
 			float[]? attackDamageByLevel = null,
 			float baseProcsPerSecond = 1f,
 			float[]? statBonusPercentByLevel = null,
-			float[]? finalDamagePercentByLevel = null
+			float[]? finalDamagePercentByLevel = null,
+			CombatStatDelta[]? statDeltaByLevel = null,
+			byte charmScalingElementKind = 0,
+			float[]? charmElementalPercentByLevel = null
 		) {
 			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
@@ -167,6 +175,10 @@ namespace SephiriaOptimizer.Models {
 				priorityTier
 			);
 			FinalDamagePercentByLevel = finalDamagePercentByLevel ?? Array.Empty<float>();
+			HasExplicitStatDeltas = statDeltaByLevel != null;
+			StatDeltaByLevel = statDeltaByLevel ?? BuildDefaultStatDeltaTable(StatBonusPercentByLevel);
+			CharmScalingElementKind = charmScalingElementKind;
+			CharmElementalPercentByLevel = charmElementalPercentByLevel ?? Array.Empty<float>();
 		}
 
 		public TabletPlacementRule GetPlacementRule(int slotIndex, int rotation) {
@@ -205,15 +217,28 @@ namespace SephiriaOptimizer.Models {
 			return rate > 0f ? rate : (effectiveLevel > 0 ? 2f : 1f);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public float GetAttackRawDpsAtLevel(int effectiveLevel) {
-			if (AttackDamageByLevel.Length == 0) {
-				return 0f;
-			}
-			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
-			int idx = Math.Clamp(clampedLevel, 0, AttackDamageByLevel.Length - 1);
-			return AttackDamageByLevel[idx] * BaseProcsPerSecond;
+			return (float)GetAttackRawDpsAtLevelWithElement(effectiveLevel, 20.0);
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public double GetAttackRawDpsAtLevelWithElement(int effectiveLevel, double resolvedElementStat) {
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			double baseFlat = 0.0;
+			if (AttackDamageByLevel.Length > 0) {
+				int idx = Math.Clamp(clampedLevel, 0, AttackDamageByLevel.Length - 1);
+				baseFlat = AttackDamageByLevel[idx];
+			}
+			if (CharmElementalPercentByLevel.Length > 0) {
+				int pctIdx = Math.Clamp(clampedLevel, 0, CharmElementalPercentByLevel.Length - 1);
+				double elemPart = resolvedElementStat * (CharmElementalPercentByLevel[pctIdx] * 0.01);
+				return Math.Max(0.0, baseFlat + elemPart) * BaseProcsPerSecond;
+			}
+			return Math.Max(0.0, baseFlat) * BaseProcsPerSecond;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public float GetStatBonusPercentAtLevel(int effectiveLevel) {
 			if (StatBonusPercentByLevel.Length == 0) {
 				return 0f;
@@ -223,6 +248,17 @@ namespace SephiriaOptimizer.Models {
 			return StatBonusPercentByLevel[idx];
 		}
 
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public CombatStatDelta GetStatDeltaAtLevel(int effectiveLevel) {
+			if (StatDeltaByLevel.Length == 0) {
+				return CombatStatDelta.Zero;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, StatDeltaByLevel.Length - 1);
+			return StatDeltaByLevel[idx];
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public float GetFinalDamagePercentAtLevel(int effectiveLevel) {
 			if (FinalDamagePercentByLevel.Length == 0) {
 				return 0f;
@@ -230,6 +266,17 @@ namespace SephiriaOptimizer.Models {
 			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
 			int idx = Math.Clamp(clampedLevel, 0, FinalDamagePercentByLevel.Length - 1);
 			return FinalDamagePercentByLevel[idx];
+		}
+
+		private static CombatStatDelta[] BuildDefaultStatDeltaTable(float[] statBonusPercentByLevel) {
+			if (statBonusPercentByLevel.Length == 0) {
+				return Array.Empty<CombatStatDelta>();
+			}
+			CombatStatDelta[] table = new CombatStatDelta[statBonusPercentByLevel.Length];
+			for (int i = 0; i < statBonusPercentByLevel.Length; i++) {
+				table[i] = new CombatStatDelta(allDamageBonus: statBonusPercentByLevel[i]);
+			}
+			return table;
 		}
 
 		private static float[] BuildDefaultAttackDamageTable(
@@ -243,15 +290,8 @@ namespace SephiriaOptimizer.Models {
 			if (kind != SlotItemKind.Artifact || !isAttackableCharm || priorityTier == ArtifactPriorityTier.Sacrifice) {
 				return Array.Empty<float>();
 			}
-			float tierScale = priorityTier switch {
-				ArtifactPriorityTier.Core => 1.6f,
-				ArtifactPriorityTier.High => 1.25f,
-				ArtifactPriorityTier.Normal => 1.0f,
-				ArtifactPriorityTier.Low => 0.65f,
-				_ => 0.25f
-			};
-			float baseDmg = (35f + (Math.Clamp(rarityTier, 0, 5) * 14f) + (Math.Min(customWeight, 30) * 2.5f)) * tierScale;
-			float perLevelDmg = (18f + (Math.Clamp(rarityTier, 0, 5) * 6f) + (Math.Min(customWeight, 30) * 1.5f)) * tierScale;
+			float baseDmg = 30f + (Math.Clamp(rarityTier, 0, 5) * 12f) + (Math.Min(customWeight, 30) * 1.5f);
+			float perLevelDmg = 15f + (Math.Clamp(rarityTier, 0, 5) * 5f) + (Math.Min(customWeight, 30) * 1.0f);
 			float[] table = new float[maxLevel + 1];
 			for (int lv = 0; lv <= maxLevel; lv++) {
 				table[lv] = baseDmg + (lv * perLevelDmg);
@@ -278,15 +318,8 @@ namespace SephiriaOptimizer.Models {
 				|| priorityTier == ArtifactPriorityTier.Sacrifice) {
 				return Array.Empty<float>();
 			}
-			float tierScale = priorityTier switch {
-				ArtifactPriorityTier.Core => 1.5f,
-				ArtifactPriorityTier.High => 1.2f,
-				ArtifactPriorityTier.Normal => 1.0f,
-				ArtifactPriorityTier.Low => 0.6f,
-				_ => 0.2f
-			};
-			float basePct = (4f + (Math.Clamp(rarityTier, 0, 5) * 2f) + (Math.Min(customWeight, 30) * 0.5f)) * tierScale;
-			float perLevelPct = (3.5f + (Math.Clamp(rarityTier, 0, 5) * 1.2f) + (Math.Min(customWeight, 30) * 0.4f)) * tierScale;
+			float basePct = 3f + (Math.Clamp(rarityTier, 0, 5) * 1.5f) + (Math.Min(customWeight, 30) * 0.25f);
+			float perLevelPct = 2.5f + (Math.Clamp(rarityTier, 0, 5) * 1.0f) + (Math.Min(customWeight, 30) * 0.2f);
 			float[] table = new float[maxLevel + 1];
 			for (int lv = 0; lv <= maxLevel; lv++) {
 				table[lv] = basePct + (lv * perLevelPct);

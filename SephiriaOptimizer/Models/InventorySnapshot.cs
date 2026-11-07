@@ -1,10 +1,13 @@
 using System;
+using System.Runtime.CompilerServices;
 using SephiriaOptimizer.Solver;
 
 namespace SephiriaOptimizer.Models {
 	public sealed class InventorySnapshot {
 		public const int MaxSupportedSlots = 64;
 		public const int MaxSupportedCategories = 32;
+
+		private readonly byte[] categoryElementalKinds;
 
 		public int Width { get; }
 		public int Height { get; }
@@ -98,6 +101,14 @@ namespace SephiriaOptimizer.Models {
 			PreferredChalcedonyCategoryId = preferredChalcedonyCategoryId;
 			CombatBaseline = combatBaseline ?? PlayerCombatBaseline.Default;
 
+			categoryElementalKinds = new byte[MaxSupportedCategories];
+			for (int i = 0; i < ComboCategories.Length; i++) {
+				int catId = ComboCategories[i].CategoryId;
+				if ((uint)catId < MaxSupportedCategories) {
+					categoryElementalKinds[catId] = ComboCategories[i].CategoryElementalKind;
+				}
+			}
+
 			MysticCategoryId = FindCategoryId("MYSTIC");
 			StaticMysticTagCount = ResolveStaticMysticCount(MysticCategoryId, ComboCategories, Items);
 			MysticTier1Threshold = Math.Max(1, mysticTier1Threshold);
@@ -140,6 +151,14 @@ namespace SephiriaOptimizer.Models {
 			}
 			DependencyArtifactCount = depCount;
 			CurrentBreakdown = DpsEstimator.CalculateCurrentBreakdown(this);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public byte GetCategoryElementalKind(int categoryId) {
+			if ((uint)categoryId < MaxSupportedCategories) {
+				return categoryElementalKinds[categoryId];
+			}
+			return 0;
 		}
 
 		public static ulong[] ComputeMooreNeighborMasks(int width, int height, int unlockedSlots) {

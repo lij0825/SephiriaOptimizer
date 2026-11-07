@@ -14,6 +14,16 @@ namespace SephiriaOptimizer.Snapshot {
 			"MYSTIC"
 		};
 
+		private static readonly FieldInfo? WeaponAddonIsEnabledField = typeof(WeaponAddon).GetField(
+			"isEnabled",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
+		private static readonly FieldInfo? BurnWeaponAddedField = typeof(Charm_BurnWeaponDamage).GetField(
+			"added",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
 		public static InventorySnapshot CaptureSnapshot(
 			PlayerAvatar avatar,
 			GridInventory inventory,
@@ -56,7 +66,7 @@ namespace SephiriaOptimizer.Snapshot {
 			);
 
 			TalentRuleSnapshot talentRules = CaptureTalentRules(avatar, inventory);
-			PlayerCombatBaseline combatBaseline = ExtractCombatBaseline(avatar, talentRules);
+			PlayerCombatBaseline rawCombatBaseline = ExtractCombatBaseline(avatar, talentRules);
 
 			Dictionary<string, int> categoryKeyToId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 			List<string> orderedCategoryKeys = new List<string>(InventorySnapshot.MaxSupportedCategories);
@@ -69,13 +79,24 @@ namespace SephiriaOptimizer.Snapshot {
 			foreach (string targetKey in settings.TargetComboCategories) {
 				RegisterCategoryKey(targetKey, categoryKeyToId, orderedCategoryKeys);
 			}
+			if (inventory.bonusComboCount != null) {
+				foreach (KeyValuePair<string, int> bonusEntry in inventory.bonusComboCount) {
+					if (bonusEntry.Value > 0) {
+						RegisterCategoryKey(bonusEntry.Key, categoryKeyToId, orderedCategoryKeys);
+					}
+				}
+			}
 
+			int currentTabletCount = 0;
 			for (int slotIdx = 0; slotIdx < unlockedSlots; slotIdx++) {
 				sbyte xCoord = (sbyte)(slotIdx % width);
 				sbyte yCoord = (sbyte)(slotIdx / width);
 				NewItemOwnInstance itemInstance = inventory.FindItem(xCoord, yCoord);
 				if (itemInstance == null || itemInstance.Entity == null) {
 					continue;
+				}
+				if (itemInstance.Entity.type == EItemType.StoneTablet) {
+					currentTabletCount++;
 				}
 				if (itemInstance.Entity.categories != null) {
 					for (int c = 0; c < itemInstance.Entity.categories.Count; c++) {
@@ -235,20 +256,24 @@ namespace SephiriaOptimizer.Snapshot {
 
 					int weight = ComputeArtifactWeight(entity, charm, customEntityWeights);
 					ExtractCharmCombatTables(
+						avatar,
+						entity,
 						charm,
 						isAttackable,
 						hasDependency,
 						isNearLevelDamage,
 						isElementalByRow,
 						maxLevel,
-						rarityTier,
-						weight,
 						priorityTier,
-						combatBaseline.AttacksPerSecond,
+						rawCombatBaseline.AttacksPerSecond,
+						currentTabletCount,
 						out float[]? attackDamageByLevel,
 						out float baseProcsPerSecond,
 						out float[]? statBonusPercentByLevel,
-						out float[]? finalDamagePercentByLevel
+						out float[]? finalDamagePercentByLevel,
+						out CombatStatDelta[]? statDeltaByLevel,
+						out byte charmScalingElementKind,
+						out float[]? charmElementalPercentByLevel
 					);
 
 					string symmetryKey = $"C:{entity.id}:{baseLevel}:{maxLevel}:"
@@ -310,7 +335,10 @@ namespace SephiriaOptimizer.Snapshot {
 						attackDamageByLevel,
 						baseProcsPerSecond,
 						statBonusPercentByLevel,
-						finalDamagePercentByLevel
+						finalDamagePercentByLevel,
+						statDeltaByLevel,
+						charmScalingElementKind,
+						charmElementalPercentByLevel
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet? tablet = ResolveSlotTablet(
@@ -412,9 +440,20 @@ namespace SephiriaOptimizer.Snapshot {
 				}
 			}
 
+			if (inventory.bonusComboCount != null) {
+				foreach (KeyValuePair<string, int> bonusPair in inventory.bonusComboCount) {
+					if (bonusPair.Value > 0
+						&& categoryKeyToId.TryGetValue(bonusPair.Key, out int bonusCatId)
+						&& (uint)bonusCatId < (uint)staticCategoryCounts.Length) {
+						staticCategoryCounts[bonusCatId] += bonusPair.Value;
+					}
+				}
+			}
+
 			ComboCategoryInfo[] comboCategories = BuildComboCategoryInfos(
 				orderedCategoryKeys,
 				staticCategoryCounts,
+				talentRules.ComboBonusDamageStat,
 				settings
 			);
 
@@ -439,6 +478,17 @@ namespace SephiriaOptimizer.Snapshot {
 				out int[] extraMysticTier2Slots
 			);
 
+			SlotItemSnapshot[] capturedItems = itemSnapshots.ToArray();
+			PlayerCombatBaseline combatBaseline = DeductActiveInventoryStatBonuses(
+				rawCombatBaseline,
+				inventory,
+				capturedItems,
+				comboCategories,
+				talentRules.UnlimitedComboStat,
+				talentRules.ComboBonusDamageStat,
+				width
+			);
+
 			return new InventorySnapshot(
 				width,
 				height,
@@ -450,7 +500,7 @@ namespace SephiriaOptimizer.Snapshot {
 				pinnedSlots,
 				isFullHp,
 				inventory.globalActiveValue,
-				itemSnapshots.ToArray(),
+				capturedItems,
 				comboCategories,
 				talentRules,
 				settings.PreferredNeedleTargetInstanceId,
@@ -477,151 +527,1592 @@ namespace SephiriaOptimizer.Snapshot {
 				return PlayerCombatBaseline.Default;
 			}
 
-			float baseAttackDamage = 48f + Math.Max(0, talentRules.PhysicalDamageStat);
-			float attacksPerSecond = 2.0f;
-			float critChancePercent = 10f;
-			float critDamageMultiplier = 1.5f;
+			float basePhys = Math.Max(1f, avatar.GetCustomStat(ECustomStat.PhysicalDamage));
+			float baseFire = Math.Max(1f, avatar.GetCustomStat(ECustomStat.FireDamage));
+			float baseIce = Math.Max(1f, avatar.GetCustomStat(ECustomStat.IceDamage));
+			float baseLight = Math.Max(1f, avatar.GetCustomStat(ECustomStat.LightningDamage));
+			float baseAllDmg = avatar.GetCustomStat(ECustomStat.AllDamageBonus);
+			float baseWeaponDmg = avatar.GetCustomStat(ECustomStat.WeaponDamageBonus);
+			float baseBasicDmg = avatar.GetCustomStat(ECustomStat.BasicAttackDamageBonus);
+			float baseFinalWeaponDmg = avatar.GetCustomStat(ECustomStat.FinalWeaponDamage);
+			float baseCharmDmg = avatar.GetCustomStatUnsafe("CHARMDAMAGEBONUS");
+			float baseAttackSpeed = avatar.GetCustomStat(ECustomStat.AttackSpeed);
+			float baseCritChancePct = Math.Max(0f, avatar.GetCustomStat(ECustomStat.Critical) / 100f);
+			float baseCritDmgRate = Math.Max(0f, avatar.GetCustomStat(ECustomStat.CriticalDamageBonus) + 50f);
 
-			int attackSpeedStat = avatar.GetCustomStatUnsafe("ATTACKSPEED");
-			if (attackSpeedStat != 0) {
-				attacksPerSecond = Math.Clamp(2.0f * (1f + (attackSpeedStat * 0.01f)), 0.5f, 12f);
+			float weaponExtraCritChancePct = avatar.GetCustomStatUnsafe("WEAPONCRITICAL") / 100f;
+			float weaponExtraCritDmgRate = avatar.GetCustomStatUnsafe("WEAPONCRITICALDAMAGE");
+			float weaponCritAmpPct = Math.Max(0f, avatar.GetCustomStatUnsafe("WEAPONCRITICALDAMAGEAMPLIFY"));
+			bool hasExecution = avatar.GetCustomStat(ECustomStat.EXECUTION) > 0;
+			float mpSkillDmgPct = avatar.GetCustomStatUnsafe("MPSKILLDAMAGE");
+			int lastBasicDmgPct = avatar.GetCustomStatUnsafe("LASTBASICATTACKDAMAGE");
+
+			int fixedAsRaw = avatar.GetCustomStatUnsafe("FIXEDATTACKSPEED");
+			float fixedAsMult = fixedAsRaw > 0 ? (fixedAsRaw / 100f) : 0f;
+
+			int dashBonusPerCount = avatar.GetCustomStatUnsafe("WEAPONDAMAGEBONUSBYDASHCOUNT");
+			int dashCount = avatar.GetCustomStat(ECustomStat.DashCount);
+			float directAttackDashMult = Math.Max(0.1f, 1f + ((dashBonusPerCount * dashCount) / 100f));
+
+			float globalPostMult = 1f;
+			if (avatar.GetCustomStatUnsafe("GOLDHAND") > 0) {
+				int leafPerPct = SafeGetConstValue("GOLDHANDLEAF", 100);
+				if (leafPerPct > 0) {
+					int goldPct = avatar.Money / leafPerPct;
+					if (avatar.GetCustomStatUnsafe("GOLDHANDUNLIMIT") <= 0) {
+						int goldCap = SafeGetConstValue("GOLDHANDMAX", 50);
+						goldPct = Math.Min(goldPct, goldCap);
+					}
+					globalPostMult *= Math.Max(0.1f, 1f + (goldPct / 100f));
+				}
+			}
+			if (avatar.GetCustomStatUnsafe("DEFENSETOATTACK") > 0) {
+				int defenseStat = avatar.GetCustomStat(ECustomStat.DamageReduction);
+				float drBonus = UnitAvatar.GetDamageReduction(1f, defenseStat);
+				globalPostMult *= Math.Max(0.1f, 1f + drBonus);
 			}
 
-			int critChanceStat = avatar.GetCustomStatUnsafe("CRITICAL");
-			if (critChanceStat > 0) {
-				critChancePercent = Math.Clamp(critChanceStat, 0f, 100f);
+			WeaponElementalFormulaMode formulaMode = WeaponElementalFormulaMode.Highest;
+			byte averageElementMask = 0x0F;
+			float comboSwingMultiplier = 1.0f;
+			float avgSwingRatioForAddons = 1.0f;
+			float flatBonusDamagePerSwing = 0f;
+			float baseSwingRate = 2.0f;
+			float attackSpeedAmplify = 0f;
+			float extraAttackSpeedBonus = 0f;
+			int magazineCapacity = 0;
+			float effectiveReloadSeconds = 0f;
+			float additionalBasicAttackPercent = 0f;
+			bool usesMpBasicAttack = false;
+			bool hasElementalScaledSpread = false;
+			int spreadBaseBullets = 1;
+			int spreadStatThreshold = 20;
+			int spreadStatPerExtraBullet = 10;
+			int spreadMaxExtraBullets = 0;
+			float addOnHitPhysicalPct = 0f;
+			float addOnHitFirePct = 0f;
+			float addOnHitIcePct = 0f;
+			float addOnHitLightningPct = 0f;
+			WeaponConditionalStatMode condMode = WeaponConditionalStatMode.None;
+			WeaponConditionalStatTarget condTarget = WeaponConditionalStatTarget.None;
+			float condThreshold = 0f;
+			float condDamageAmpPercent = 0f;
+			float burnRingFirePctPerSec = 0f;
+			int critNeedleBaseCount = 0;
+			float critNeedlePhysicalRatio = 0f;
+			float nastrondDefaultDmg = 0f;
+			float nastrondIcePct = 0f;
+			float nastrondBonusMult = 1f;
+			float nastrondProcsPerSec = 0f;
+
+			WeaponControllerSimple? weaponCtrl = avatar.GetComponent<WeaponControllerSimple>();
+			WeaponSimple? weapon = weaponCtrl != null ? weaponCtrl.currentWeapon : null;
+			if (weapon != null) {
+				attackSpeedAmplify = weapon.attackSpeedAmplify;
+				if (weapon.AttackWeightPerSwing > 0.04f && weapon.AttackWeightPerSwing <= 4.0f) {
+					baseSwingRate = Math.Clamp(1.0f / weapon.AttackWeightPerSwing, 0.4f, 16.0f);
+				}
+
+				if (weapon is WeaponSimple_Crossbow crossbow) {
+					if (crossbow.fireIntervalTimer != null && crossbow.fireIntervalTimer.time > 0.02f) {
+						baseSwingRate = Math.Clamp(1.0f / crossbow.fireIntervalTimer.time, 0.4f, 20.0f);
+					}
+					if (avatar.GetCustomStatUnsafe("GRENADEATTACK") > 0) {
+						fixedAsMult = 1.0f;
+					} else {
+						if (avatar.GetCustomStatUnsafe("CROSSBOWMG") > 0) {
+							extraAttackSpeedBonus += 0.5f;
+						}
+						if (avatar.GetCustomStatUnsafe("MOVESPEEDTOATTACKSPEED") > 0) {
+							float moveBonus = avatar.moveSpeedMultiplier - 1f;
+							if (moveBonus > 0f) {
+								extraAttackSpeedBonus += moveBonus;
+							}
+						}
+						int iceDecAs = avatar.GetCustomStatUnsafe("ICEBUFF_DECREASEATTACKSPEED");
+						if (iceDecAs > 0) {
+							extraAttackSpeedBonus -= iceDecAs / 100f;
+						}
+					}
+
+					bool iceInfiniteAmmo = avatar.GetCustomStatUnsafe("ICECROSSBOWBUFF") > 0
+						&& crossbow.infiniteAmmoDuringBuff;
+					if (!iceInfiniteAmmo && crossbow.reloadTime > 0.02f) {
+						int fixedAmmo = avatar.GetCustomStatUnsafe("FIXEDAMMO");
+						int magCap = Math.Max(
+							1,
+							crossbow.defaultMagazineCapacity + avatar.GetCustomStatUnsafe("CROSSBOWAMMO")
+						);
+						int magCount = Math.Max(
+							1,
+							crossbow.defaultMagazineCount + avatar.GetCustomStatUnsafe("CROSSBOWADDITIONALMAGAZINE")
+						);
+						magazineCapacity = fixedAmmo > 0 ? fixedAmmo : (magCap * magCount);
+						float reloadSpeedFactor = 1f + (avatar.GetCustomStatUnsafe("CROSSBOWRELOADSPEED") * 0.01f);
+						if (avatar.GetCustomStatUnsafe("ICECROSSBOWBUFF") > 0
+							&& avatar.GetCustomStatUnsafe("ICECROSSBOWFROSTRELIC") > 0) {
+							reloadSpeedFactor += avatar.GetCustomStatUnsafe("CHARGINGCHARMBONUS") * 0.01f;
+						}
+						effectiveReloadSeconds = crossbow.reloadTime / Math.Max(0.2f, reloadSpeedFactor);
+					}
+				} else if (weapon is WeaponSimple_Staff staff) {
+					if (staff.fireIntervalTimer != null && staff.fireIntervalTimer.time > 0.02f) {
+						baseSwingRate = Math.Clamp(1.0f / staff.fireIntervalTimer.time, 0.4f, 20.0f);
+					}
+					if (staff.ammoCount > 0 && staff.reloadTimer != null && staff.reloadTimer.time > 0.02f) {
+						magazineCapacity = staff.ammoCount;
+						effectiveReloadSeconds = staff.reloadTimer.time;
+					}
+				}
+
+				if (weapon is WeaponSimple_GreatSword greatSword
+					&& (greatSword.useMPBasicAttack || greatSword.isTransformed)) {
+					usesMpBasicAttack = true;
+				}
+
+				ExtractWeaponSwingMetrics(
+					avatar,
+					weapon,
+					lastBasicDmgPct,
+					out formulaMode,
+					out averageElementMask,
+					out comboSwingMultiplier,
+					out avgSwingRatioForAddons,
+					out additionalBasicAttackPercent,
+					out hasElementalScaledSpread,
+					out spreadBaseBullets,
+					out spreadStatThreshold,
+					out spreadStatPerExtraBullet,
+					out spreadMaxExtraBullets
+				);
+
+				if (weapon.addons != null) {
+					for (int i = 0; i < weapon.addons.Length; i++) {
+						WeaponAddon addon = weapon.addons[i];
+						if (!IsWeaponAddonActive(weapon, addon)) {
+							continue;
+						}
+
+						if (addon is WeaponAddonCommon_AdditionalElementalDamage addElem) {
+							int totalPct = Math.Max(
+								0,
+								addElem.additionalDamagePercent
+								+ avatar.GetCustomStatUnsafe("ADDITIONALELEMENTALDAMAGEBONUS")
+							);
+							switch (addElem.statId) {
+								case ECustomStat.PhysicalDamage: {
+									addOnHitPhysicalPct += totalPct;
+									break;
+								}
+								case ECustomStat.FireDamage: {
+									addOnHitFirePct += totalPct;
+									break;
+								}
+								case ECustomStat.IceDamage: {
+									addOnHitIcePct += totalPct;
+									break;
+								}
+								case ECustomStat.LightningDamage: {
+									addOnHitLightningPct += totalPct;
+									break;
+								}
+							}
+						} else if (addon is WeaponAddonCommon_ConditionalStat condAddon) {
+							WeaponConditionalStatMode parsedMode = MapConditionalMode(condAddon.condition);
+							WeaponConditionalStatTarget parsedTarget = MapConditionalTarget(condAddon.sourceStatId);
+							if (parsedTarget != WeaponConditionalStatTarget.None
+								&& condMode == WeaponConditionalStatMode.None) {
+								condMode = parsedMode;
+								condTarget = parsedTarget;
+								condThreshold = condAddon.sourceStatValue;
+								condDamageAmpPercent = condAddon.addDamagePercent;
+							} else if (EvaluateLiveStatCondition(
+								avatar.GetCustomStatUnsafe(condAddon.sourceStatId),
+								parsedMode,
+								condAddon.sourceStatValue
+							)) {
+								globalPostMult *= Math.Max(0.1f, 1f + (condAddon.addDamagePercent / 100f));
+							}
+						} else if (addon is WeaponAddonCommon_BurnRing burnRing) {
+							float tickSec = burnRing.burnRingTickTimer != null
+								&& burnRing.burnRingTickTimer.time > 0.05f
+								? burnRing.burnRingTickTimer.time
+								: 0.5f;
+							float burnSpeedMult = Math.Max(
+								0.2f,
+								1f + (avatar.GetCustomStatUnsafe("BURNSPEED") / 100f)
+							);
+							float burnDmgMult = Math.Max(
+								0.1f,
+								1f + (avatar.GetCustomStatUnsafe("BURNDAMAGE") / 100f)
+							);
+							burnRingFirePctPerSec += (burnRing.damagePercent * 0.01f)
+								* (burnSpeedMult / tickSec)
+								* burnDmgMult;
+						} else if (addon is WeaponAddonGreatsword_FireNeedleBullet needleAddon) {
+							critNeedleBaseCount = needleAddon.needleBulletCount;
+							critNeedlePhysicalRatio = needleAddon.needleBulletDamageRatio;
+						} else if (addon is WeaponAddonKatana_Nastrond nastrond) {
+							nastrondDefaultDmg = nastrond.defaultDamage;
+							nastrondIcePct = nastrond.damagePercent;
+							nastrondBonusMult = Math.Max(
+								0.1f,
+								1f + (avatar.GetCustomStatUnsafe("FROSTRELICDAMAGE") / 100f)
+							);
+							float chargeTime = nastrond.chargingCharm != null
+								&& nastrond.chargingCharm.defaultChargeTimer > 0.1f
+								? nastrond.chargingCharm.defaultChargeTimer
+								: 2.5f;
+							float chargeSpeed = Math.Max(
+								0.25f,
+								1f + (avatar.GetCustomStatUnsafe("CHARGINGCHARMBONUS") * 0.01f)
+							);
+							nastrondProcsPerSec = Math.Clamp((chargeSpeed / chargeTime) * 0.65f, 0.1f, 4.0f);
+						} else if (addon is WeaponAddonCommon_TransformAttackBonus transBonus) {
+							if (weapon is WeaponSimple_GreatSword gsTrans && gsTrans.isTransformed) {
+								float flatAdd = SafeGetConstValue(transBonus.transformAttackBonusDamageConstKey, 0);
+								float defRatio = SafeGetConstValue(transBonus.relatedStatBonusConstKey, 0);
+								flatAdd += avatar.GetCustomStatUnsafe(transBonus.relatedStatUnsafe) * defRatio / 100f;
+								flatBonusDamagePerSwing += Math.Max(0f, flatAdd);
+							}
+						}
+					}
+				}
 			}
 
-			int critDmgStat = avatar.GetCustomStatUnsafe("CRITICALDAMAGE");
-			if (critDmgStat > 0) {
-				critDamageMultiplier = Math.Clamp(1.5f + (critDmgStat * 0.01f), 1.0f, 8.0f);
-			}
-
-			int maxElem = Math.Max(
-				Math.Max(talentRules.FireDamageStat, talentRules.IceDamageStat),
-				Math.Max(talentRules.LightningDamageStat, talentRules.PhysicalDamageStat)
+			WeaponCombatProfile weaponProfile = new WeaponCombatProfile(
+				formulaMode,
+				averageElementMask,
+				basePhys,
+				baseFire,
+				baseIce,
+				baseLight,
+				baseAllDmg,
+				baseWeaponDmg,
+				baseBasicDmg,
+				baseFinalWeaponDmg,
+				baseCharmDmg,
+				baseAttackSpeed,
+				baseCritChancePct,
+				baseCritDmgRate,
+				weaponExtraCritChancePct,
+				weaponExtraCritDmgRate,
+				weaponCritAmpPct,
+				hasExecution,
+				comboSwingMultiplier,
+				avgSwingRatioForAddons,
+				flatBonusDamagePerSwing,
+				baseSwingRate,
+				attackSpeedAmplify,
+				fixedAsMult,
+				extraAttackSpeedBonus,
+				magazineCapacity,
+				effectiveReloadSeconds,
+				additionalBasicAttackPercent,
+				usesMpBasicAttack,
+				mpSkillDmgPct,
+				directAttackDashMult,
+				globalPostMult,
+				hasElementalScaledSpread,
+				spreadBaseBullets,
+				spreadStatThreshold,
+				spreadStatPerExtraBullet,
+				spreadMaxExtraBullets,
+				addOnHitPhysicalPct,
+				addOnHitFirePct,
+				addOnHitIcePct,
+				addOnHitLightningPct,
+				condMode,
+				condTarget,
+				condThreshold,
+				condDamageAmpPercent,
+				burnRingFirePctPerSec,
+				critNeedleBaseCount,
+				critNeedlePhysicalRatio,
+				nastrondDefaultDmg,
+				nastrondIcePct,
+				nastrondBonusMult,
+				nastrondProcsPerSec
 			);
-			float elementalBonusPercent = Math.Max(0, maxElem);
+			return new PlayerCombatBaseline(in weaponProfile);
+		}
 
+		private static void ExtractWeaponSwingMetrics(
+			PlayerAvatar avatar,
+			WeaponSimple weapon,
+			int lastBasicDmgPct,
+			out WeaponElementalFormulaMode formulaMode,
+			out byte averageElementMask,
+			out float comboSwingMultiplier,
+			out float avgSwingRatioForAddons,
+			out float additionalBasicAttackPercent,
+			out bool hasElementalScaledSpread,
+			out int spreadBaseBullets,
+			out int spreadStatThreshold,
+			out int spreadStatPerExtraBullet,
+			out int spreadMaxExtraBullets
+		) {
+			formulaMode = WeaponElementalFormulaMode.Highest;
+			averageElementMask = 0x0F;
+			comboSwingMultiplier = 1.0f;
+			avgSwingRatioForAddons = 1.0f;
+			additionalBasicAttackPercent = 0f;
+			hasElementalScaledSpread = false;
+			spreadBaseBullets = 1;
+			spreadStatThreshold = 20;
+			spreadStatPerExtraBullet = 10;
+			spreadMaxExtraBullets = 0;
+
+			bool forceAllSwingsFinal = weapon is WeaponSimple_Dagger dagger && dagger.basicAttackFinal;
+			float lightningArrowProb = 0f;
+			NewWeaponFireData? lightningArrowData = null;
+			NewWeaponFireData? iceArrowOverride = null;
+			if (weapon is WeaponSimple_Crossbow crossbow) {
+				if (avatar.GetCustomStatUnsafe("ICECROSSBOWBUFF") > 0 && crossbow.iceArrow != null) {
+					iceArrowOverride = crossbow.iceArrow;
+				} else if (crossbow.lightningArrow != null) {
+					lightningArrowProb = Math.Clamp(
+						avatar.GetCustomStatUnsafe("LIGHTNINGCROSSBOW") / 100f,
+						0f,
+						1f
+					);
+					lightningArrowData = crossbow.lightningArrow;
+				}
+			}
+
+			float doubleSpearProb = 0f;
+			WeaponSimple_QuartterStaff? quarterStaff = weapon as WeaponSimple_QuartterStaff;
+			if (quarterStaff != null
+				&& quarterStaff.doubleBasicComboAttacks != null
+				&& quarterStaff.doubleBasicComboAttacks.Length > 0) {
+				float doublePct = (avatar.GetCustomStatUnsafe("STAFFMULTITHROWINGSPEARDOUBLE") / 100f)
+					* (avatar.GetCustomStat(ECustomStat.Evasion) / 100f);
+				doubleSpearProb = Math.Clamp(doublePct / 100f, 0f, 1f);
+			}
+
+			int swingCount = weapon.basicComboAttacks != null ? weapon.basicComboAttacks.Length : 0;
+			if (quarterStaff != null
+				&& quarterStaff.isNormalAttackRolling
+				&& quarterStaff.rollingFireData != null) {
+				swingCount = 1;
+			} else if (iceArrowOverride != null && swingCount <= 0) {
+				swingCount = 1;
+			}
+
+			if (swingCount <= 0) {
+				if (weapon is WeaponSimple_SwordAndShield snsEmpty && snsEmpty.isAllElementalEnabled) {
+					formulaMode = WeaponElementalFormulaMode.Highest;
+				}
+				return;
+			}
+
+			float sumSwingMult = 0f;
+			float sumAddonMult = 0f;
+			float sumAddBasicPct = 0f;
+			int validSwings = 0;
+			NewWeaponFireData? representativeFireData = null;
+
+			for (int idx = 0; idx < swingCount; idx++) {
+				NewWeaponFireData? swing = ResolvePrimaryComboSwing(
+					weapon,
+					quarterStaff,
+					iceArrowOverride,
+					idx
+				);
+				if (swing == null) {
+					continue;
+				}
+				if (representativeFireData == null) {
+					representativeFireData = swing;
+				}
+
+				bool isFinalSwing = forceAllSwingsFinal
+					|| idx == weapon.finalComboIdx
+					|| swing.forceFinalCombo;
+				EvaluateSingleFireData(
+					swing,
+					isFinalSwing,
+					lastBasicDmgPct,
+					out float primarySwingMult,
+					out float primaryAddonMult,
+					ref hasElementalScaledSpread,
+					ref spreadBaseBullets,
+					ref spreadStatThreshold,
+					ref spreadStatPerExtraBullet,
+					ref spreadMaxExtraBullets
+				);
+
+				if (lightningArrowProb > 0f && lightningArrowData != null) {
+					EvaluateSingleFireData(
+						lightningArrowData,
+						isFinalSwing,
+						lastBasicDmgPct,
+						out float lightSwingMult,
+						out float lightAddonMult,
+						ref hasElementalScaledSpread,
+						ref spreadBaseBullets,
+						ref spreadStatThreshold,
+						ref spreadStatPerExtraBullet,
+						ref spreadMaxExtraBullets
+					);
+					primarySwingMult = ((1f - lightningArrowProb) * primarySwingMult)
+						+ (lightningArrowProb * lightSwingMult);
+					primaryAddonMult = ((1f - lightningArrowProb) * primaryAddonMult)
+						+ (lightningArrowProb * lightAddonMult);
+				}
+
+				if (doubleSpearProb > 0f
+					&& quarterStaff != null
+					&& quarterStaff.doubleBasicComboAttacks != null
+					&& quarterStaff.doubleBasicComboAttacks.Length > 0) {
+					int dblIdx = Math.Clamp(idx, 0, quarterStaff.doubleBasicComboAttacks.Length - 1);
+					NewWeaponFireData? dblSwing = quarterStaff.doubleBasicComboAttacks[dblIdx];
+					if (dblSwing != null) {
+						EvaluateSingleFireData(
+							dblSwing,
+							isFinalSwing,
+							lastBasicDmgPct,
+							out float dblSwingMult,
+							out float dblAddonMult,
+							ref hasElementalScaledSpread,
+							ref spreadBaseBullets,
+							ref spreadStatThreshold,
+							ref spreadStatPerExtraBullet,
+							ref spreadMaxExtraBullets
+						);
+						primarySwingMult = ((1f - doubleSpearProb) * primarySwingMult)
+							+ (doubleSpearProb * dblSwingMult);
+						primaryAddonMult = ((1f - doubleSpearProb) * primaryAddonMult)
+							+ (doubleSpearProb * dblAddonMult);
+					}
+				}
+
+				sumSwingMult += primarySwingMult;
+				sumAddonMult += primaryAddonMult;
+				sumAddBasicPct += SafeGetAdditionalBasicAttackPercent(weapon, idx);
+				validSwings++;
+			}
+
+			if (validSwings > 0) {
+				comboSwingMultiplier = Math.Max(0.05f, sumSwingMult / validSwings);
+				avgSwingRatioForAddons = Math.Max(0.05f, sumAddonMult / validSwings);
+				additionalBasicAttackPercent = sumAddBasicPct / validSwings;
+			}
+
+			if (weapon is WeaponSimple_SwordAndShield sns && sns.isAllElementalEnabled) {
+				formulaMode = WeaponElementalFormulaMode.Highest;
+				averageElementMask = 0x0F;
+			} else if (representativeFireData != null) {
+				ParseFireDataElementalFormula(
+					representativeFireData,
+					out formulaMode,
+					out averageElementMask
+				);
+			}
+		}
+
+		private static NewWeaponFireData? ResolvePrimaryComboSwing(
+			WeaponSimple weapon,
+			WeaponSimple_QuartterStaff? quarterStaff,
+			NewWeaponFireData? iceArrowOverride,
+			int idx
+		) {
+			if (quarterStaff != null
+				&& quarterStaff.isNormalAttackRolling
+				&& quarterStaff.rollingFireData != null) {
+				return quarterStaff.rollingFireData;
+			}
+			if (iceArrowOverride != null) {
+				return iceArrowOverride;
+			}
+			if (weapon is WeaponSimple_GreatSword greatSword
+				&& greatSword.useMPBasicAttack
+				&& greatSword.mpConsumedBasicAttack != null
+				&& idx < greatSword.mpConsumedBasicAttack.Length
+				&& greatSword.mpConsumedBasicAttack[idx] != null) {
+				return greatSword.mpConsumedBasicAttack[idx];
+			}
+			if (weapon is WeaponSimple_Crossbow crossbow && crossbow.hasCompressedAmmo) {
+				try {
+					NewWeaponFireData compressed = crossbow.GetBasicAttack(idx, "COMPRESSEDAMMO");
+					if (compressed != null) {
+						return compressed;
+					}
+				} catch {
+					// Fallback to default basic attack below.
+				}
+			}
+			try {
+				NewWeaponFireData resolved = weapon.GetBasicAttack(idx, string.Empty);
+				if (resolved != null) {
+					return resolved;
+				}
+			} catch {
+				// Fallback to raw array below.
+			}
+			if (weapon.basicComboAttacks != null && idx >= 0 && idx < weapon.basicComboAttacks.Length) {
+				return weapon.basicComboAttacks[idx];
+			}
+			return null;
+		}
+
+		private static void EvaluateSingleFireData(
+			NewWeaponFireData swing,
+			bool isFinalSwing,
+			int lastBasicDmgPct,
+			out float effectiveSwingMult,
+			out float addonHitMult,
+			ref bool hasElementalScaledSpread,
+			ref int spreadBaseBullets,
+			ref int spreadStatThreshold,
+			ref int spreadStatPerExtraBullet,
+			ref int spreadMaxExtraBullets
+		) {
+			float baseDmgMult = swing.damageMultiplier > 0.02f ? swing.damageMultiplier : 1.0f;
+			float hitCount = 1.0f;
+
+			if (swing is NewWeaponFireData_MeleeAttack meleeSwing && meleeSwing.projectilePrefab != null) {
+				MeleeCollision? meleeCol = meleeSwing.projectilePrefab.GetComponent<MeleeCollision>();
+				if (meleeCol != null && meleeCol.multiHit > 1) {
+					hitCount = Math.Clamp(meleeCol.multiHit, 1, 12);
+				}
+			} else if (swing is NewWeaponFireData_BulletBurst burstSwing) {
+				hitCount = Math.Clamp(burstSwing.burstRound, 1, 16);
+			} else if (swing is NewWeaponFireData_BulletSpread spreadSwing) {
+				int totalBullets = spreadSwing.betweenAngleDegrees > 0.01f
+					? Math.Max(1, (int)Math.Ceiling(spreadSwing.spreadAngle / spreadSwing.betweenAngleDegrees))
+					: 1;
+				if (totalBullets <= 1 || spreadSwing.spreadAngle <= 50f) {
+					hitCount = totalBullets;
+				} else {
+					float coneFraction = Math.Clamp(55f / spreadSwing.spreadAngle, 1f / totalBullets, 1f);
+					hitCount = Math.Max(1f, totalBullets * coneFraction);
+				}
+				if (spreadSwing is NewWeaponFireData_BulletSpread_ElementalScaled scaledSpread) {
+					hasElementalScaledSpread = true;
+					spreadBaseBullets = Math.Max(1, totalBullets);
+					spreadStatThreshold = Math.Max(0, scaledSpread.baseStatThreshold);
+					spreadStatPerExtraBullet = Math.Max(1, scaledSpread.statPerExtraBullet);
+					spreadMaxExtraBullets = Math.Max(0, scaledSpread.maxExtraBullets);
+				}
+			}
+
+			float mpUsedFactor = swing.addDamagePerUsedMP > 0
+				? (1f + ((2f * swing.addDamagePerUsedMP) / 100f))
+				: 1f;
+			float finalComboFactor = isFinalSwing && lastBasicDmgPct != 0
+				? Math.Max(0.1f, 1f + (lastBasicDmgPct / 100f))
+				: 1f;
+
+			addonHitMult = baseDmgMult * hitCount;
+			effectiveSwingMult = addonHitMult * mpUsedFactor * finalComboFactor;
+		}
+
+		private static void ParseFireDataElementalFormula(
+			NewWeaponFireData fireData,
+			out WeaponElementalFormulaMode formulaMode,
+			out byte averageMask
+		) {
+			averageMask = 0x0F;
+			string rawFormula = fireData.relatedStatFormula != null
+				? fireData.relatedStatFormula.Trim().ToUpperInvariant()
+				: string.Empty;
+
+			if (string.IsNullOrEmpty(rawFormula)) {
+				formulaMode = fireData.damageElementalType switch {
+					EDamageElementalType.Physical => WeaponElementalFormulaMode.SinglePhysical,
+					EDamageElementalType.Fire => WeaponElementalFormulaMode.SingleFire,
+					EDamageElementalType.Ice => WeaponElementalFormulaMode.SingleIce,
+					EDamageElementalType.Lightning => WeaponElementalFormulaMode.SingleLightning,
+					_ => WeaponElementalFormulaMode.Highest
+				};
+				return;
+			}
+
+			if (rawFormula == "PHYSICALDAMAGE" || rawFormula.StartsWith("CHAOS_PHYSICAL", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.SinglePhysical;
+				return;
+			}
+			if (rawFormula == "FIREDAMAGE" || rawFormula.StartsWith("CHAOS_FIRE", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.SingleFire;
+				return;
+			}
+			if (rawFormula == "ICEDAMAGE" || rawFormula.StartsWith("CHAOS_ICE", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.SingleIce;
+				return;
+			}
+			if (rawFormula == "LIGHTNINGDAMAGE"
+				|| rawFormula.StartsWith("CHAOS_LIGHTNING", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.SingleLightning;
+				return;
+			}
+			if (rawFormula.StartsWith("HIGHEST", StringComparison.Ordinal)
+				|| rawFormula.StartsWith("CHAOS_HIGHEST", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.Highest;
+				return;
+			}
+			if (rawFormula.StartsWith("LOWEST", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.Lowest;
+				return;
+			}
+			if (rawFormula.StartsWith("AVERAGEALL", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.AverageMask;
+				averageMask = 0x0F;
+				return;
+			}
+			if (rawFormula.StartsWith("AVERAGE/", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.AverageMask;
+				byte mask = 0;
+				string listPart = rawFormula.Substring(8);
+				string[] tokens = listPart.Split(',');
+				for (int i = 0; i < tokens.Length; i++) {
+					string tok = tokens[i].Trim();
+					if (tok == "PHYSICALDAMAGE") {
+						mask |= 0x01;
+					} else if (tok == "FIREDAMAGE") {
+						mask |= 0x02;
+					} else if (tok == "ICEDAMAGE") {
+						mask |= 0x04;
+					} else if (tok == "LIGHTNINGDAMAGE") {
+						mask |= 0x08;
+					}
+				}
+				averageMask = mask != 0 ? mask : (byte)0x0F;
+				return;
+			}
+			if (rawFormula.StartsWith("ONLY_1", StringComparison.Ordinal)) {
+				formulaMode = WeaponElementalFormulaMode.OnlyOne;
+				return;
+			}
+
+			formulaMode = WeaponElementalFormulaMode.Highest;
+		}
+
+		private static bool IsWeaponAddonActive(WeaponSimple weapon, WeaponAddon? addon) {
+			if (addon == null || !addon.enabled || !addon.gameObject.activeInHierarchy) {
+				return false;
+			}
+			if (weapon.isServer && WeaponAddonIsEnabledField != null) {
+				object? val = WeaponAddonIsEnabledField.GetValue(addon);
+				if (val is bool isEn) {
+					return isEn;
+				}
+			}
+			return true;
+		}
+
+		private static int SafeGetAdditionalBasicAttackPercent(WeaponSimple weapon, int idx) {
+			try {
+				return weapon.GetAdditionalBasicAttackDamagePercent(idx);
+			} catch {
+				return 0;
+			}
+		}
+
+		private static int SafeGetConstValue(string key, int fallback) {
+			if (string.IsNullOrEmpty(key)) {
+				return fallback;
+			}
+			try {
+				int val = KeywordDatabase.GetConstValue(key);
+				return val != 0 ? val : fallback;
+			} catch {
+				return fallback;
+			}
+		}
+
+		private static WeaponConditionalStatMode MapConditionalMode(
+			WeaponAddonCommon_ConditionalStat.ECondition condition
+		) {
+			return condition switch {
+				WeaponAddonCommon_ConditionalStat.ECondition.LOWER_THAN_OR_EQUAL =>
+					WeaponConditionalStatMode.LessOrEqual,
+				WeaponAddonCommon_ConditionalStat.ECondition.GREATER_THAN_OR_EQUAL =>
+					WeaponConditionalStatMode.GreaterOrEqual,
+				WeaponAddonCommon_ConditionalStat.ECondition.EQUAL =>
+					WeaponConditionalStatMode.Equal,
+				WeaponAddonCommon_ConditionalStat.ECondition.NOT_EQUAL =>
+					WeaponConditionalStatMode.NotEqual,
+				_ => WeaponConditionalStatMode.None
+			};
+		}
+
+		private static WeaponConditionalStatTarget MapConditionalTarget(string? sourceStatId) {
+			if (string.IsNullOrEmpty(sourceStatId)) {
+				return WeaponConditionalStatTarget.None;
+			}
+			return sourceStatId.Trim().ToUpperInvariant() switch {
+				"CRITICAL" => WeaponConditionalStatTarget.CriticalRaw,
+				"PHYSICALDAMAGE" => WeaponConditionalStatTarget.PhysicalDamage,
+				"FIREDAMAGE" => WeaponConditionalStatTarget.FireDamage,
+				"ICEDAMAGE" => WeaponConditionalStatTarget.IceDamage,
+				"LIGHTNINGDAMAGE" => WeaponConditionalStatTarget.LightningDamage,
+				"ATTACKSPEED" => WeaponConditionalStatTarget.AttackSpeed,
+				"ALLDAMAGEBONUS" => WeaponConditionalStatTarget.AllDamageBonus,
+				_ => WeaponConditionalStatTarget.None
+			};
+		}
+
+		private static bool EvaluateLiveStatCondition(
+			int liveStatVal,
+			WeaponConditionalStatMode mode,
+			int threshold
+		) {
+			return mode switch {
+				WeaponConditionalStatMode.LessOrEqual => liveStatVal <= threshold,
+				WeaponConditionalStatMode.GreaterOrEqual => liveStatVal >= threshold,
+				WeaponConditionalStatMode.Equal => liveStatVal == threshold,
+				WeaponConditionalStatMode.NotEqual => liveStatVal != threshold,
+				_ => false
+			};
+		}
+
+		private static PlayerCombatBaseline DeductActiveInventoryStatBonuses(
+			PlayerCombatBaseline rawBaseline,
+			GridInventory inventory,
+			SlotItemSnapshot[] items,
+			ComboCategoryInfo[] comboCategories,
+			int unlimitedComboStat,
+			int comboBonusDamageStat,
+			int width
+		) {
+			if (rawBaseline.HasDetailedWeaponProfile) {
+				CombatStatDelta activeDelta = CombatStatDelta.Zero;
+				int safeWidth = Math.Max(1, width);
+
+				for (int i = 0; i < items.Length; i++) {
+					SlotItemSnapshot item = items[i];
+					if (item.Kind != SlotItemKind.Artifact || item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+						continue;
+					}
+					sbyte xCoord = (sbyte)(item.InitialSlotIndex % safeWidth);
+					sbyte yCoord = (sbyte)(item.InitialSlotIndex / safeWidth);
+					NewItemOwnInstance? inst = inventory.FindItem(xCoord, yCoord);
+					Charm_Basic? liveCharm = inst != null ? inst.Charm : null;
+					if (liveCharm == null && inventory.charms != null) {
+						inventory.charms.TryGetValue(new ItemPosition(xCoord, yCoord), out liveCharm);
+					}
+					if (liveCharm == null || !liveCharm.IsEffectEnabled) {
+						continue;
+					}
+
+					int effLv = Math.Clamp(liveCharm.limitedEffectEnabledLevel, 0, item.MaxLevel);
+					if (liveCharm is Charm_StatusInstance || liveCharm is Charm_CriticalChanceIncreaseWithTablets) {
+						activeDelta = activeDelta.Add(item.GetStatDeltaAtLevel(effLv));
+					} else if (liveCharm is Charm_BurnWeaponDamage && BurnWeaponAddedField != null) {
+						object? rawAdded = BurnWeaponAddedField.GetValue(liveCharm);
+						if (rawAdded is int burnAdded && burnAdded != 0) {
+							activeDelta = activeDelta.Add(new CombatStatDelta(finalWeaponDamage: burnAdded));
+						}
+					}
+
+					if (item.IsElementalByRowCharm && item.RowCategoryIds.Length > 0) {
+						int rowIdx = yCoord % item.RowCategoryIds.Length;
+						int catId = item.RowCategoryIds[rowIdx];
+						byte elemKind = (catId >= 0 && catId < comboCategories.Length)
+							? comboCategories[catId].CategoryElementalKind
+							: (byte)0;
+						activeDelta = activeDelta.AddElementalByKind(elemKind, item.GetRowElementalBonus(effLv));
+					}
+				}
+
+				int liveActiveComboTypes = 0;
+				for (int c = 0; c < comboCategories.Length; c++) {
+					ComboCategoryInfo cat = comboCategories[c];
+					int liveCount = Math.Max(cat.StaticCount, inventory.GetSetEffectCount(cat.CategoryKey));
+					activeDelta = activeDelta.Add(cat.EvaluateStatDelta(liveCount, unlimitedComboStat));
+					if (cat.Breakpoints.Length > 0 && liveCount >= cat.Breakpoints[0]) {
+						liveActiveComboTypes++;
+					}
+				}
+
+				if (comboBonusDamageStat > 0 && liveActiveComboTypes > 0) {
+					activeDelta = activeDelta.Add(
+						new CombatStatDelta(allDamageBonus: comboBonusDamageStat * liveActiveComboTypes)
+					);
+				}
+
+				WeaponCombatProfile deductedProfile = rawBaseline.WeaponProfile.WithDeductedInventoryDelta(
+					in activeDelta
+				);
+				return new PlayerCombatBaseline(in deductedProfile);
+			}
+
+			double activeInventoryStatPct = 0.0;
+			for (int i = 0; i < items.Length; i++) {
+				SlotItemSnapshot item = items[i];
+				if (item.Kind != SlotItemKind.Artifact || item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+					continue;
+				}
+				sbyte xCoord = (sbyte)(item.InitialSlotIndex % Math.Max(1, width));
+				sbyte yCoord = (sbyte)(item.InitialSlotIndex / Math.Max(1, width));
+				NewItemOwnInstance? inst = inventory.FindItem(xCoord, yCoord);
+				Charm_Basic? liveCharm = inst != null ? inst.Charm : null;
+				if (liveCharm == null && inventory.charms != null) {
+					inventory.charms.TryGetValue(new ItemPosition(xCoord, yCoord), out liveCharm);
+				}
+				if (liveCharm == null || !liveCharm.IsEffectEnabled) {
+					continue;
+				}
+				int effLv = Math.Clamp(liveCharm.limitedEffectEnabledLevel, 0, item.MaxLevel);
+				activeInventoryStatPct += item.GetStatBonusPercentAtLevel(effLv);
+				if (item.IsElementalByRowCharm) {
+					activeInventoryStatPct += item.GetRowElementalBonus(effLv);
+				}
+			}
+
+			for (int c = 0; c < comboCategories.Length; c++) {
+				ComboCategoryInfo cat = comboCategories[c];
+				activeInventoryStatPct += cat.EvaluateStatBonusPercent(cat.StaticCount, unlimitedComboStat);
+			}
+
+			float unbuffedStatPercent = (float)Math.Max(
+				0.0,
+				rawBaseline.ElementalDamageBonusPercent - activeInventoryStatPct
+			);
 			return new PlayerCombatBaseline(
-				baseAttackDamage,
-				attacksPerSecond,
-				critChancePercent,
-				critDamageMultiplier,
-				elementalBonusPercent
+				rawBaseline.BaseAttackDamage,
+				rawBaseline.AttacksPerSecond,
+				rawBaseline.CritChancePercent,
+				rawBaseline.CritDamageMultiplier,
+				unbuffedStatPercent
 			);
 		}
 
 		private static void ExtractCharmCombatTables(
+			PlayerAvatar? avatar,
+			ItemEntity entity,
 			Charm_Basic? charm,
 			bool isAttackable,
 			bool hasDependency,
 			bool isNearLevelDamage,
 			bool isElementalByRow,
 			int maxLevel,
-			int rarityTier,
-			int weight,
 			ArtifactPriorityTier priorityTier,
 			float playerAttacksPerSecond,
+			int currentTabletCount,
 			out float[]? attackDamageByLevel,
 			out float baseProcsPerSecond,
 			out float[]? statBonusPercentByLevel,
-			out float[]? finalDamagePercentByLevel
+			out float[]? finalDamagePercentByLevel,
+			out CombatStatDelta[]? statDeltaByLevel,
+			out byte charmScalingElementKind,
+			out float[]? charmElementalPercentByLevel
 		) {
 			attackDamageByLevel = null;
 			baseProcsPerSecond = 1f;
 			statBonusPercentByLevel = null;
 			finalDamagePercentByLevel = null;
+			statDeltaByLevel = null;
+			charmScalingElementKind = 0;
+			charmElementalPercentByLevel = null;
 
 			if (charm == null || priorityTier == ArtifactPriorityTier.Sacrifice) {
 				return;
 			}
 
 			int levelCount = Math.Max(1, maxLevel + 1);
+
+			if (charm is Charm_StatusInstance statusCharm
+				&& statusCharm.stats != null
+				&& statusCharm.stats.Length > 0) {
+				float[] statTable = new float[levelCount];
+				float[] finalDmgTable = new float[levelCount];
+				CombatStatDelta[] deltaTable = new CombatStatDelta[levelCount];
+				bool hasAnyStat = false;
+				bool hasAnyFinal = false;
+
+				for (int g = 0; g < statusCharm.stats.Length; g++) {
+					Charm_StatusInstance.StatusGroup group = statusCharm.stats[g];
+					if (group == null
+						|| string.IsNullOrEmpty(group.statusID)
+						|| group.valuesByLevel == null
+						|| group.valuesByLevel.Length == 0) {
+						continue;
+					}
+					for (int lv = 0; lv < levelCount; lv++) {
+						int valIdx = Math.Min(lv, group.valuesByLevel.Length - 1);
+						int rawVal = group.valuesByLevel[valIdx];
+						CombatStatDelta delta = ConvertStatusIdToStatDelta(
+							group.statusID,
+							rawVal,
+							out float pct,
+							out bool isFinalAmp
+						);
+						if (delta.HasAnyNonZero) {
+							deltaTable[lv] = deltaTable[lv].Add(in delta);
+							hasAnyStat = true;
+						}
+						if (pct > 0f) {
+							if (isFinalAmp) {
+								finalDmgTable[lv] += pct;
+								hasAnyFinal = true;
+							} else {
+								statTable[lv] += pct;
+								hasAnyStat = true;
+							}
+						}
+					}
+				}
+
+				statBonusPercentByLevel = hasAnyStat ? statTable : new float[levelCount];
+				statDeltaByLevel = deltaTable;
+				if (hasAnyFinal) {
+					finalDamagePercentByLevel = finalDmgTable;
+				}
+			}
+
 			Type charmType = charm.GetType();
 			FieldInfo[] fields = charmType.GetFields(
 				BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
 			);
 
-			float detectedCooldown = 0f;
-			List<float[]> damageArrays = new List<float[]>(2);
-			List<float[]> statArrays = new List<float[]>(2);
+			if (isAttackable) {
+				baseProcsPerSecond = ExtractEffectiveProcsPerSecond(
+					avatar,
+					charm,
+					fields,
+					levelCount,
+					playerAttacksPerSecond
+				);
+				ExtractAttackCharmDamageTable(
+					avatar,
+					entity,
+					charm,
+					fields,
+					levelCount,
+					out attackDamageByLevel,
+					out charmScalingElementKind,
+					out charmElementalPercentByLevel
+				);
+				return;
+			}
+
+			if (!hasDependency
+				&& !isNearLevelDamage
+				&& !isElementalByRow
+				&& statBonusPercentByLevel == null) {
+				ExtractReflectionStatBonusTable(
+					charm,
+					fields,
+					levelCount,
+					currentTabletCount,
+					out float[] extractedStats,
+					out CombatStatDelta[] extractedDeltas
+				);
+				statBonusPercentByLevel = extractedStats;
+				statDeltaByLevel = extractedDeltas;
+			}
+		}
+
+		private static float ExtractEffectiveProcsPerSecond(
+			PlayerAvatar? avatar,
+			Charm_Basic charm,
+			FieldInfo[] fields,
+			int levelCount,
+			float playerAttacksPerSecond
+		) {
+			ChargingCharm? chargingCharm = charm.GetComponent<ChargingCharm>();
+			if (chargingCharm != null && chargingCharm.defaultChargeTimer > 0.05f) {
+				int chargeSpeedBonus = avatar != null
+					? avatar.GetCustomStatUnsafe("CHARGINGCHARMBONUS")
+					: 0;
+				float speedMult = Math.Max(0.25f, 1f + (chargeSpeedBonus * 0.01f));
+				return Math.Clamp(speedMult / chargingCharm.defaultChargeTimer, 0.1f, 6f);
+			}
+
+			if (charm is Charm_Magic magicCharm && magicCharm.ContainedMagic != null) {
+				float magicCd = Math.Max(0.5f, magicCharm.ContainedMagic.cooldownTime);
+				int cdSpeed = avatar != null ? avatar.GetCustomStat(ECustomStat.CooldownRecoverySpeed) : 0;
+				float cdMult = Math.Max(0.25f, 1f + (cdSpeed * 0.01f));
+				return Math.Clamp(cdMult / magicCd, 0.1f, 4f);
+			}
+
+			if (charm is Charm_DashDamage) {
+				return 0.5f;
+			}
+
+			if (charm is Charm_FireBulletOnHit || charm is Charm_VenomSporePouch) {
+				return 0.15f;
+			}
+
+			float detectedIcd = 0f;
+			float detectedSearchDelay = 0f;
+			float procChancePct = 0f;
 
 			for (int i = 0; i < fields.Length; i++) {
 				FieldInfo field = fields[i];
-				string fieldName = field.Name;
-				Type fieldType = field.FieldType;
+				string name = field.Name;
+				Type fType = field.FieldType;
 
-				if ((fieldType == typeof(float) || fieldType == typeof(int))
-					&& (fieldName.IndexOf("cooldown", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("interval", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0)) {
-					object? rawVal = field.GetValue(charm);
-					float val = rawVal is float fv ? fv : (rawVal is int iv ? iv : 0f);
-					if (val >= 0.1f && val <= 30f && detectedCooldown <= 0f) {
-						detectedCooldown = val;
+				if (fType == typeof(Timer)) {
+					object? timerObj = field.GetValue(charm);
+					if (timerObj is Timer timer && timer.time > 0.02f && timer.time <= 30f) {
+						if (name.IndexOf("search", StringComparison.OrdinalIgnoreCase) >= 0) {
+							detectedSearchDelay = timer.time;
+						} else if (detectedIcd <= 0f || timer.time < detectedIcd) {
+							detectedIcd = timer.time;
+						}
 					}
 					continue;
 				}
 
-				if (fieldType == typeof(int[]) || fieldType == typeof(float[])) {
-					if (fieldName.IndexOf("dependency", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("allDamageBonusByLevel", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("addElementalStatByLevel", StringComparison.OrdinalIgnoreCase) >= 0) {
+				if (fType == typeof(float) || fType == typeof(int)) {
+					object? rawVal = field.GetValue(charm);
+					float val = rawVal is float fv ? fv : (rawVal is int iv ? iv : 0f);
+					if (val <= 0f) {
 						continue;
 					}
-
-					float[]? converted = ConvertNumericArrayToFloat(field.GetValue(charm));
-					if (converted == null || converted.Length == 0) {
-						continue;
+					if (name.IndexOf("cooldown", StringComparison.OrdinalIgnoreCase) >= 0
+						|| name.IndexOf("interval", StringComparison.OrdinalIgnoreCase) >= 0
+						|| name.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0) {
+						if (val >= 0.05f && val <= 30f && detectedIcd <= 0f) {
+							detectedIcd = val;
+						}
+					} else if (name.IndexOf("chance", StringComparison.OrdinalIgnoreCase) >= 0
+						&& val > 0f
+						&& val <= 100f
+						&& procChancePct <= 0f) {
+						procChancePct = val;
 					}
-
-					if (isAttackable
-						&& (fieldName.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0
-							|| fieldName.IndexOf("dmg", StringComparison.OrdinalIgnoreCase) >= 0
-							|| fieldName.IndexOf("power", StringComparison.OrdinalIgnoreCase) >= 0
-							|| fieldName.IndexOf("attack", StringComparison.OrdinalIgnoreCase) >= 0)) {
-						damageArrays.Add(NormalizeTableToLength(converted, levelCount));
-					} else if (fieldName.IndexOf("stat", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("bonus", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("percent", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("speed", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("crit", StringComparison.OrdinalIgnoreCase) >= 0
-						|| fieldName.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0) {
-						statArrays.Add(NormalizeTableToLength(converted, levelCount));
-					}
-				}
-			}
-
-			if (isAttackable) {
-				if (detectedCooldown > 0.08f) {
-					baseProcsPerSecond = Math.Clamp(1f / detectedCooldown, 0.25f, 6f);
-				} else {
-					baseProcsPerSecond = Math.Clamp(playerAttacksPerSecond * 0.65f, 0.8f, 4f);
+					continue;
 				}
 
-				if (damageArrays.Count > 0) {
-					float[] merged = new float[levelCount];
-					for (int a = 0; a < damageArrays.Count; a++) {
-						float[] arr = damageArrays[a];
-						for (int lv = 0; lv < levelCount; lv++) {
-							merged[lv] += Math.Max(0f, arr[lv]);
+				if ((fType == typeof(float[]) || fType == typeof(int[]))
+					&& name.IndexOf("chance", StringComparison.OrdinalIgnoreCase) >= 0) {
+					float[]? chanceArr = ConvertNumericArrayToFloat(field.GetValue(charm));
+					if (chanceArr != null && chanceArr.Length > 0) {
+						int midIdx = Math.Clamp(levelCount / 2, 0, chanceArr.Length - 1);
+						if (chanceArr[midIdx] > 0f && chanceArr[midIdx] <= 100f) {
+							procChancePct = chanceArr[midIdx];
 						}
 					}
-					EnsureMonotonicPositiveTable(merged, rarityTier, weight, priorityTier, isAttackTable: true);
-					attackDamageByLevel = merged;
 				}
-			} else if (!hasDependency && !isNearLevelDamage && !isElementalByRow && statArrays.Count > 0) {
-				float[] merged = new float[levelCount];
-				for (int a = 0; a < statArrays.Count; a++) {
-					float[] arr = statArrays[a];
-					for (int lv = 0; lv < levelCount; lv++) {
-						merged[lv] += Math.Abs(arr[lv]);
+			}
+
+			float totalTimerCycle = detectedIcd + detectedSearchDelay;
+			if (procChancePct > 0f && procChancePct < 100f) {
+				float effectiveTriggerRate = Math.Max(0.15f, playerAttacksPerSecond * (procChancePct * 0.01f));
+				float expectedCycle = totalTimerCycle + (1f / effectiveTriggerRate);
+				return Math.Clamp(1f / Math.Max(0.15f, expectedCycle), 0.1f, 6f);
+			}
+
+			if (totalTimerCycle > 0.05f) {
+				return Math.Clamp(1f / totalTimerCycle, 0.15f, 6f);
+			}
+
+			return Math.Clamp(playerAttacksPerSecond * 0.5f, 0.5f, 3.0f);
+		}
+
+		private static void ExtractAttackCharmDamageTable(
+			PlayerAvatar? avatar,
+			ItemEntity entity,
+			Charm_Basic charm,
+			FieldInfo[] fields,
+			int levelCount,
+			out float[] flatResult,
+			out byte scalingElementKind,
+			out float[]? elemPercentResult
+		) {
+			float[]? flatDamageTable = null;
+			float[]? percentDamageTable = null;
+			float[]? projectileCountTable = null;
+			float scalarBaseDamage = 0f;
+			scalingElementKind = InferCharmElementKind(avatar, entity, charm, fields);
+
+			for (int i = 0; i < fields.Length; i++) {
+				FieldInfo field = fields[i];
+				string name = field.Name;
+				Type fType = field.FieldType;
+
+				if (IsExcludedNonAttackFieldName(name)) {
+					continue;
+				}
+
+				if (fType == typeof(float) || fType == typeof(int)) {
+					if (string.Equals(name, "defaultDamage", StringComparison.OrdinalIgnoreCase)
+						|| string.Equals(name, "bulletDamage", StringComparison.OrdinalIgnoreCase)
+						|| string.Equals(name, "baseDamage", StringComparison.OrdinalIgnoreCase)
+						|| string.Equals(name, "damage", StringComparison.OrdinalIgnoreCase)) {
+						object? rawScalar = field.GetValue(charm);
+						float val = rawScalar is float fv ? fv : (rawScalar is int iv ? iv : 0f);
+						if (val > 0f && scalarBaseDamage <= 0f) {
+							scalarBaseDamage = val;
+						}
+					}
+					continue;
+				}
+
+				if (fType != typeof(int[]) && fType != typeof(float[])) {
+					continue;
+				}
+
+				float[]? arr = ConvertNumericArrayToFloat(field.GetValue(charm));
+				if (arr == null || arr.Length == 0) {
+					continue;
+				}
+
+				if (name.IndexOf("count", StringComparison.OrdinalIgnoreCase) >= 0) {
+					if (projectileCountTable == null
+						&& (name.IndexOf("fire", StringComparison.OrdinalIgnoreCase) >= 0
+							|| name.IndexOf("bullet", StringComparison.OrdinalIgnoreCase) >= 0
+							|| name.IndexOf("shot", StringComparison.OrdinalIgnoreCase) >= 0
+							|| string.Equals(name, "countByLevel", StringComparison.OrdinalIgnoreCase))) {
+						projectileCountTable = NormalizeTableToLength(arr, levelCount);
+					}
+					continue;
+				}
+
+				if (name.IndexOf("percent", StringComparison.OrdinalIgnoreCase) >= 0) {
+					if (percentDamageTable == null
+						&& (name.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0
+							|| name.IndexOf("stat", StringComparison.OrdinalIgnoreCase) >= 0)) {
+						percentDamageTable = NormalizeTableToLength(arr, levelCount);
+					}
+					continue;
+				}
+
+				if (name.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0
+					|| name.IndexOf("dmg", StringComparison.OrdinalIgnoreCase) >= 0) {
+					if (flatDamageTable == null) {
+						flatDamageTable = NormalizeTableToLength(arr, levelCount);
 					}
 				}
-				EnsureMonotonicPositiveTable(merged, rarityTier, weight, priorityTier, isAttackTable: false);
-				statBonusPercentByLevel = merged;
 			}
+
+			flatResult = new float[levelCount];
+			elemPercentResult = null;
+			bool populated = false;
+
+			if (flatDamageTable != null && percentDamageTable != null) {
+				elemPercentResult = new float[levelCount];
+				for (int lv = 0; lv < levelCount; lv++) {
+					flatResult[lv] = Math.Max(0f, flatDamageTable[lv]);
+					elemPercentResult[lv] = Math.Max(0f, percentDamageTable[lv]);
+				}
+				populated = true;
+			} else if (flatDamageTable != null) {
+				for (int lv = 0; lv < levelCount; lv++) {
+					flatResult[lv] = Math.Max(0f, flatDamageTable[lv]);
+				}
+				populated = true;
+			} else if (percentDamageTable != null) {
+				elemPercentResult = new float[levelCount];
+				for (int lv = 0; lv < levelCount; lv++) {
+					flatResult[lv] = Math.Max(0f, scalarBaseDamage);
+					elemPercentResult[lv] = Math.Max(0f, percentDamageTable[lv]);
+				}
+				populated = true;
+			} else if (scalarBaseDamage > 0f) {
+				for (int lv = 0; lv < levelCount; lv++) {
+					flatResult[lv] = scalarBaseDamage;
+				}
+				populated = true;
+			}
+
+			if (avatar != null
+				&& charm is IAttackableCharm attackableCharm
+				&& !(charm is Charm_Magic)) {
+				try {
+					float liveSingleHitDmg = attackableCharm.GetDamage(avatar);
+					if (liveSingleHitDmg > 0.5f) {
+						int curLv = Math.Clamp(charm.limitedEffectEnabledLevel, 0, levelCount - 1);
+						float liveElemStat = ReadAvatarElementalStat(avatar, scalingElementKind);
+						if (populated) {
+							float elemAtCur = elemPercentResult != null
+								? (liveElemStat * (elemPercentResult[curLv] * 0.01f))
+								: 0f;
+							float estAtCur = flatResult[curLv] + elemAtCur;
+							if (estAtCur > 0.5f) {
+								float relicScale = Math.Clamp(liveSingleHitDmg / estAtCur, 0.25f, 5.0f);
+								for (int lv = 0; lv < levelCount; lv++) {
+									flatResult[lv] *= relicScale;
+									if (elemPercentResult != null) {
+										elemPercentResult[lv] *= relicScale;
+									}
+								}
+							}
+						} else {
+							float baseScale = liveSingleHitDmg / (1f + (curLv * 0.35f));
+							for (int lv = 0; lv < levelCount; lv++) {
+								flatResult[lv] = baseScale * (1f + (lv * 0.35f));
+							}
+							populated = true;
+						}
+					}
+				} catch {
+					// Keep field-extracted tables if GetDamage requires runtime state not yet initialized.
+				}
+			}
+
+			if (populated && projectileCountTable != null) {
+				for (int lv = 0; lv < levelCount; lv++) {
+					int count = Math.Clamp((int)Math.Round(projectileCountTable[lv]), 1, 16);
+					flatResult[lv] *= count;
+					if (elemPercentResult != null) {
+						elemPercentResult[lv] *= count;
+					}
+				}
+			}
+
+			if (!populated) {
+				for (int lv = 0; lv < levelCount; lv++) {
+					flatResult[lv] = 20f + (lv * 10f);
+				}
+			}
+		}
+
+		private static byte InferCharmElementKind(
+			PlayerAvatar? avatar,
+			ItemEntity entity,
+			Charm_Basic charm,
+			FieldInfo[] fields
+		) {
+			if (charm is Charm_AirSlash) {
+				bool useFlame = avatar != null && avatar.GetCustomStatUnsafe("FROSTRELICFLAME") > 0;
+				return useFlame ? (byte)2 : (byte)3;
+			}
+
+			for (int i = 0; i < fields.Length; i++) {
+				FieldInfo field = fields[i];
+				if (field.FieldType == typeof(ECustomStat)) {
+					object? rawStat = field.GetValue(charm);
+					if (rawStat is ECustomStat customStat) {
+						switch (customStat) {
+							case ECustomStat.PhysicalDamage: {
+								return 1;
+							}
+							case ECustomStat.FireDamage: {
+								return 2;
+							}
+							case ECustomStat.IceDamage: {
+								return 3;
+							}
+							case ECustomStat.LightningDamage: {
+								return 4;
+							}
+						}
+					}
+				} else if (field.FieldType == typeof(EDamageElementalType)) {
+					object? rawElem = field.GetValue(charm);
+					if (rawElem is EDamageElementalType elemType) {
+						switch (elemType) {
+							case EDamageElementalType.Physical: {
+								return 1;
+							}
+							case EDamageElementalType.Fire: {
+								return 2;
+							}
+							case EDamageElementalType.Ice: {
+								return 3;
+							}
+							case EDamageElementalType.Lightning: {
+								return 4;
+							}
+						}
+					}
+				}
+			}
+
+			if (entity.categories != null) {
+				for (int c = 0; c < entity.categories.Count; c++) {
+					byte catElem = ComboCategoryInfo.ResolveCategoryElementalKind(entity.categories[c]);
+					if (catElem != 0) {
+						return catElem;
+					}
+				}
+			}
+			return 0;
+		}
+
+		private static float ReadAvatarElementalStat(PlayerAvatar avatar, byte elemKind) {
+			int phys = avatar.GetCustomStat(ECustomStat.PhysicalDamage);
+			int fire = avatar.GetCustomStat(ECustomStat.FireDamage);
+			int ice = avatar.GetCustomStat(ECustomStat.IceDamage);
+			int light = avatar.GetCustomStat(ECustomStat.LightningDamage);
+			return elemKind switch {
+				1 => Math.Max(1, phys),
+				2 => Math.Max(1, fire),
+				3 => Math.Max(1, ice),
+				4 => Math.Max(1, light),
+				_ => Math.Max(1, Math.Max(Math.Max(phys, fire), Math.Max(ice, light)))
+			};
+		}
+
+		private static void ExtractReflectionStatBonusTable(
+			Charm_Basic charm,
+			FieldInfo[] fields,
+			int levelCount,
+			int currentTabletCount,
+			out float[] statResult,
+			out CombatStatDelta[] deltaResult
+		) {
+			statResult = new float[levelCount];
+			deltaResult = new CombatStatDelta[levelCount];
+
+			if (charm is Charm_BurnWeaponDamage burnWeapon && burnWeapon.addDamageByStackedBurn != null) {
+				float[]? burnArr = ConvertNumericArrayToFloat(burnWeapon.addDamageByStackedBurn);
+				if (burnArr != null && burnArr.Length > 0) {
+					float[] norm = NormalizeTableToLength(burnArr, levelCount);
+					for (int lv = 0; lv < levelCount; lv++) {
+						float expectedFinalBonus = Math.Max(0f, norm[lv] * 3f);
+						statResult[lv] = expectedFinalBonus;
+						deltaResult[lv] = new CombatStatDelta(finalWeaponDamage: expectedFinalBonus);
+					}
+					return;
+				}
+			}
+
+			if (charm is Charm_CriticalChanceIncreaseWithTablets tabletCritCharm
+				&& tabletCritCharm.criticalBonusByLevel != null) {
+				float[]? critArr = ConvertNumericArrayToFloat(tabletCritCharm.criticalBonusByLevel);
+				if (critArr != null && critArr.Length > 0) {
+					float[] norm = NormalizeTableToLength(critArr, levelCount);
+					int tablets = Math.Max(0, currentTabletCount);
+					for (int lv = 0; lv < levelCount; lv++) {
+						float critPct = Math.Max(0f, (norm[lv] * tablets) / 100f);
+						statResult[lv] = critPct;
+						deltaResult[lv] = new CombatStatDelta(critChancePercent: critPct);
+					}
+					return;
+				}
+			}
+
+			for (int i = 0; i < fields.Length; i++) {
+				FieldInfo field = fields[i];
+				string name = field.Name;
+				Type fType = field.FieldType;
+				if ((fType != typeof(int[]) && fType != typeof(float[]))
+					|| IsExcludedNonAttackFieldName(name)) {
+					continue;
+				}
+				if (name.IndexOf("damage", StringComparison.OrdinalIgnoreCase) >= 0
+					|| name.IndexOf("attack", StringComparison.OrdinalIgnoreCase) >= 0
+					|| name.IndexOf("crit", StringComparison.OrdinalIgnoreCase) >= 0
+					|| name.IndexOf("speed", StringComparison.OrdinalIgnoreCase) >= 0
+					|| name.IndexOf("bonus", StringComparison.OrdinalIgnoreCase) >= 0) {
+					float[]? arr = ConvertNumericArrayToFloat(field.GetValue(charm));
+					if (arr == null || arr.Length == 0) {
+						continue;
+					}
+					float[] norm = NormalizeTableToLength(arr, levelCount);
+					bool isCritChance = name.IndexOf("crit", StringComparison.OrdinalIgnoreCase) >= 0
+						&& name.IndexOf("damage", StringComparison.OrdinalIgnoreCase) < 0;
+					bool isCritBasisPoints = isCritChance && norm[0] >= 50f;
+					for (int lv = 0; lv < levelCount; lv++) {
+						float val = Math.Max(0f, norm[lv]);
+						float scaledVal = isCritBasisPoints ? (val * 0.01f) : val;
+						statResult[lv] += scaledVal;
+						CombatStatDelta fieldDelta = MapReflectedFieldToDelta(name, scaledVal, isCritChance);
+						deltaResult[lv] = deltaResult[lv].Add(in fieldDelta);
+					}
+				}
+			}
+		}
+
+		private static CombatStatDelta MapReflectedFieldToDelta(
+			string fieldName,
+			float scaledVal,
+			bool isCritChance
+		) {
+			if (scaledVal <= 0f) {
+				return CombatStatDelta.Zero;
+			}
+			if (isCritChance) {
+				return new CombatStatDelta(critChancePercent: scaledVal);
+			}
+			if (fieldName.IndexOf("crit", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(critDamageBonus: scaledVal);
+			}
+			if (fieldName.IndexOf("speed", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(attackSpeed: scaledVal);
+			}
+			if (fieldName.IndexOf("physical", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(physicalDamage: scaledVal);
+			}
+			if (fieldName.IndexOf("fire", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("flame", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(fireDamage: scaledVal);
+			}
+			if (fieldName.IndexOf("ice", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("frost", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(iceDamage: scaledVal);
+			}
+			if (fieldName.IndexOf("lightning", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("electric", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(lightningDamage: scaledVal);
+			}
+			if (fieldName.IndexOf("finalWeapon", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(finalWeaponDamage: scaledVal);
+			}
+			if (fieldName.IndexOf("basicAttack", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(basicAttackDamageBonus: scaledVal);
+			}
+			if (fieldName.IndexOf("weapon", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(weaponDamageBonus: scaledVal);
+			}
+			if (fieldName.IndexOf("charm", StringComparison.OrdinalIgnoreCase) >= 0) {
+				return new CombatStatDelta(charmDamageBonus: scaledVal);
+			}
+			return new CombatStatDelta(allDamageBonus: scaledVal);
+		}
+
+		private static bool IsExcludedNonAttackFieldName(string fieldName) {
+			return fieldName.IndexOf("cut", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("reduce", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("cost", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("taken", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("defense", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("threshold", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("limit", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("dependency", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("allDamageBonus", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("addElementalStat", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("debuff", StringComparison.OrdinalIgnoreCase) >= 0
+				|| fieldName.IndexOf("heal", StringComparison.OrdinalIgnoreCase) >= 0;
+		}
+
+		private static CombatStatDelta ConvertStatusIdToStatDelta(
+			string statusId,
+			int rawValue,
+			out float legacyOffensivePercent,
+			out bool isFinalDamageAmp
+		) {
+			legacyOffensivePercent = 0f;
+			isFinalDamageAmp = false;
+			if (rawValue == 0 || string.IsNullOrEmpty(statusId)) {
+				return CombatStatDelta.Zero;
+			}
+
+			string id = statusId.Trim().ToUpperInvariant();
+			if (id == "FINAL_DAMAGE" || id == "ALL_DAMAGE_AMP") {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+					isFinalDamageAmp = true;
+				}
+				return new CombatStatDelta(allDamageBonus: rawValue);
+			}
+			if (id == "ALLDAMAGEBONUS" || id.IndexOf("ALL_DAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+					isFinalDamageAmp = id == "ALLDAMAGEBONUS";
+				}
+				return new CombatStatDelta(allDamageBonus: rawValue);
+			}
+			if (id == "CRITICAL"
+				|| id == "CRIT"
+				|| id == "CRITICALCHANCE"
+				|| id == "WEAPONCRITICAL") {
+				float critPct = rawValue / 100f;
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue >= 50 ? critPct : rawValue;
+				}
+				return new CombatStatDelta(critChancePercent: critPct);
+			}
+			if (id.IndexOf("PHYSICALDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(physicalDamage: rawValue);
+			}
+			if (id.IndexOf("FIREDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(fireDamage: rawValue);
+			}
+			if (id.IndexOf("ICEDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(iceDamage: rawValue);
+			}
+			if (id.IndexOf("LIGHTNINGDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(lightningDamage: rawValue);
+			}
+			if (id == "FINALWEAPONDAMAGE") {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(finalWeaponDamage: rawValue);
+			}
+			if (id.IndexOf("BASICATTACK", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(basicAttackDamageBonus: rawValue);
+			}
+			if (id.IndexOf("WEAPONDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(weaponDamageBonus: rawValue);
+			}
+			if (id.IndexOf("CHARMDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(charmDamageBonus: rawValue);
+			}
+			if (id.IndexOf("ATTACKSPEED", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(attackSpeed: rawValue);
+			}
+			if (id.IndexOf("CRITICALDAMAGE", StringComparison.Ordinal) >= 0) {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(critDamageBonus: rawValue);
+			}
+			if (id.IndexOf("MAGICDAMAGE", StringComparison.Ordinal) >= 0
+				|| id.IndexOf("SKILLDAMAGE", StringComparison.Ordinal) >= 0
+				|| id == "AP") {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(allDamageBonus: rawValue * 0.5f);
+			}
+			return CombatStatDelta.Zero;
+		}
+
+		private static CombatStatDelta ParseComboStatusArrayToStatDelta(
+			string[]? statusEntries,
+			out float legacyPercentSum
+		) {
+			legacyPercentSum = 0f;
+			if (statusEntries == null || statusEntries.Length == 0) {
+				return CombatStatDelta.Zero;
+			}
+			CombatStatDelta total = CombatStatDelta.Zero;
+			for (int i = 0; i < statusEntries.Length; i++) {
+				CombatStatDelta single = ParseSingleComboStatusToStatDelta(statusEntries[i], out float pct);
+				total = total.Add(in single);
+				legacyPercentSum += pct;
+			}
+			return total;
+		}
+
+		private static CombatStatDelta ParseSingleComboStatusToStatDelta(
+			string? statusEntry,
+			out float legacyPercent
+		) {
+			legacyPercent = 0f;
+			if (string.IsNullOrWhiteSpace(statusEntry)) {
+				return CombatStatDelta.Zero;
+			}
+			string[] parts = statusEntry.Trim().Split('/');
+			if (parts.Length < 2) {
+				return CombatStatDelta.Zero;
+			}
+			if (!int.TryParse(parts[1].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int val)) {
+				return CombatStatDelta.Zero;
+			}
+			return ConvertStatusIdToStatDelta(parts[0], val, out legacyPercent, out _);
 		}
 
 		private static float[]? ConvertNumericArrayToFloat(object? rawArray) {
@@ -647,34 +2138,6 @@ namespace SephiriaOptimizer.Snapshot {
 				result[i] = source[srcIdx];
 			}
 			return result;
-		}
-
-		private static void EnsureMonotonicPositiveTable(
-			float[] table,
-			int rarityTier,
-			int weight,
-			ArtifactPriorityTier priorityTier,
-			bool isAttackTable
-		) {
-			if (table.Length == 0) {
-				return;
-			}
-			float minStep = isAttackTable ? 8f : 1.5f;
-			float minBase = isAttackTable
-				? (24f + (Math.Clamp(rarityTier, 0, 5) * 10f) + (Math.Min(weight, 25) * 2f))
-				: (3f + (Math.Clamp(rarityTier, 0, 5) * 1.5f));
-			if (priorityTier == ArtifactPriorityTier.Core) {
-				minBase *= 1.35f;
-				minStep *= 1.35f;
-			}
-			if (table[0] < minBase) {
-				table[0] = minBase;
-			}
-			for (int i = 1; i < table.Length; i++) {
-				if (table[i] < table[i - 1] + minStep) {
-					table[i] = table[i - 1] + minStep;
-				}
-			}
 		}
 
 		private readonly struct RawQueryMetadata {
@@ -1343,15 +2806,19 @@ namespace SephiriaOptimizer.Snapshot {
 		private static ComboCategoryInfo[] BuildComboCategoryInfos(
 			List<string> orderedCategoryKeys,
 			int[] staticCategoryCounts,
+			int comboBonusDamageStat,
 			OptimizerUserSettings settings
 		) {
 			ComboCategoryInfo[] result = new ComboCategoryInfo[orderedCategoryKeys.Count];
 			bool hasExplicitTargets = settings.TargetComboCategories.Count > 0;
+			float talentBonusPerCategory = Math.Max(0, comboBonusDamageStat);
 
 			for (int i = 0; i < orderedCategoryKeys.Count; i++) {
 				string key = orderedCategoryKeys[i];
 				string displayName = key;
 				int[] breakpoints = new[] { 2, 4, 6, 8 };
+				float[]? extractedBonuses = null;
+				CombatStatDelta[]? extractedDeltas = null;
 
 				ItemCategoryEntity catEntity = ItemDatabase.FindItemCategory(key);
 				if (catEntity != null) {
@@ -1359,32 +2826,58 @@ namespace SephiriaOptimizer.Snapshot {
 						displayName = catEntity.Name;
 					}
 					if (catEntity.setStatus != null && catEntity.setStatus.Length > 0) {
-						breakpoints = new int[catEntity.setStatus.Length];
-						for (int b = 0; b < catEntity.setStatus.Length; b++) {
+						int len = catEntity.setStatus.Length;
+						breakpoints = new int[len];
+						extractedBonuses = new float[len];
+						extractedDeltas = new CombatStatDelta[len];
+						for (int b = 0; b < len; b++) {
 							breakpoints[b] = catEntity.setStatus[b].itemCount;
+							extractedDeltas[b] = ParseSingleComboStatusToStatDelta(
+								catEntity.setStatus[b].status,
+								out float parsedPct
+							);
+							extractedBonuses[b] = parsedPct;
 						}
-						Array.Sort(breakpoints);
+						SortComboBreakpoints(breakpoints, extractedBonuses, extractedDeltas);
 					} else if (catEntity.comboEffectPrefab != null
 						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffect_Mystic>(out var mysticPrefab)) {
 						int firstTier = mysticPrefab.first > 0 ? mysticPrefab.first : 2;
 						int secondTier = mysticPrefab.second > firstTier ? mysticPrefab.second : 4;
 						breakpoints = new[] { firstTier, secondTier };
+						extractedBonuses = new float[2];
+						extractedDeltas = new CombatStatDelta[2];
 					} else if (catEntity.comboEffectPrefab != null
 						&& catEntity.comboEffectPrefab.TryGetComponent<ComboEffectBase>(out var comboPrefab)
 						&& comboPrefab.addStatByCombo != null
 						&& comboPrefab.addStatByCombo.Length > 0) {
-						breakpoints = new int[comboPrefab.addStatByCombo.Length];
-						for (int b = 0; b < comboPrefab.addStatByCombo.Length; b++) {
+						int len = comboPrefab.addStatByCombo.Length;
+						breakpoints = new int[len];
+						extractedBonuses = new float[len];
+						extractedDeltas = new CombatStatDelta[len];
+						for (int b = 0; b < len; b++) {
 							breakpoints[b] = comboPrefab.addStatByCombo[b].comboCount;
+							extractedDeltas[b] = ParseComboStatusArrayToStatDelta(
+								comboPrefab.addStatByCombo[b].status,
+								out float parsedPct
+							);
+							extractedBonuses[b] = parsedPct;
 						}
-						Array.Sort(breakpoints);
+						SortComboBreakpoints(breakpoints, extractedBonuses, extractedDeltas);
 					}
 				}
 
-				float[] breakpointBonuses = new float[breakpoints.Length];
-				for (int b = 0; b < breakpoints.Length; b++) {
-					breakpointBonuses[b] = Math.Max(4f, breakpoints[b] * 2.5f);
+				if (talentBonusPerCategory > 0f && breakpoints.Length > 0) {
+					if (extractedBonuses != null && extractedBonuses.Length > 0) {
+						extractedBonuses[0] += talentBonusPerCategory;
+					}
+					if (extractedDeltas != null && extractedDeltas.Length > 0) {
+						extractedDeltas[0] = extractedDeltas[0].Add(
+							new CombatStatDelta(allDamageBonus: talentBonusPerCategory)
+						);
+					}
 				}
+
+				float[] breakpointBonuses = extractedBonuses ?? new float[breakpoints.Length];
 
 				int staticCount = staticCategoryCounts[i];
 				bool isUserTarget = hasExplicitTargets
@@ -1398,11 +2891,34 @@ namespace SephiriaOptimizer.Snapshot {
 					staticCount,
 					breakpoints,
 					isUserTarget,
-					breakpointBonuses
+					breakpointBonuses,
+					extractedDeltas
 				);
 			}
 
 			return result;
+		}
+
+		private static void SortComboBreakpoints(
+			int[] breakpoints,
+			float[] bonuses,
+			CombatStatDelta[] deltas
+		) {
+			for (int i = 1; i < breakpoints.Length; i++) {
+				int keyBp = breakpoints[i];
+				float keyBonus = bonuses[i];
+				CombatStatDelta keyDelta = deltas[i];
+				int j = i - 1;
+				while (j >= 0 && breakpoints[j] > keyBp) {
+					breakpoints[j + 1] = breakpoints[j];
+					bonuses[j + 1] = bonuses[j];
+					deltas[j + 1] = deltas[j];
+					j--;
+				}
+				breakpoints[j + 1] = keyBp;
+				bonuses[j + 1] = keyBonus;
+				deltas[j + 1] = keyDelta;
+			}
 		}
 
 		private static void RegisterCategoryKey(

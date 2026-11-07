@@ -424,10 +424,10 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			Span<double> needleMultiplierBySlot = stackalloc double[InventorySnapshot.MaxSupportedSlots];
+			Span<int> needleBonusPctSumBySlot = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> isLinkedNeedleRootSlot = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			for (int s = 0; s < unlockedSlots; s++) {
-				needleMultiplierBySlot[s] = 1.0;
+				needleBonusPctSumBySlot[s] = 0;
 				isLinkedNeedleRootSlot[s] = 0;
 			}
 
@@ -459,18 +459,189 @@ namespace SephiriaOptimizer.Solver {
 							&& rootItem.PriorityTier != ArtifactPriorityTier.Sacrifice) {
 							int needleLv = effectiveLevelBuf[s];
 							int bonusPct = needleItem.GetNeedleBonusPercent(needleLv, rootItem.RarityTier);
-							double prefScale = snapshot.PreferredNeedleTargetInstanceId == rootItem.InstanceId
-								? 1.08
-								: 1.0;
-							double slotFactor = (1.0 + (bonusPct * 0.01)) * prefScale;
-							needleMultiplierBySlot[rootSlot] *= slotFactor;
+							needleBonusPctSumBySlot[rootSlot] += bonusPct;
 							isLinkedNeedleRootSlot[rootSlot] = 1;
 							hasActiveGoldenNeedle = true;
-							activeNeedlePercentSum += (slotFactor - 1.0) * 100.0;
+							activeNeedlePercentSum += bonusPct;
 							activeNeedleCount++;
 						}
 					}
 				}
+			}
+
+			bool hasActiveHarmonyCrystal = false;
+			int harmonyNeighborLevelSum = 0;
+			double totalHarmonyAmpPercent = 0.0;
+			ulong[] mooreNeighborMasks = snapshot.MooreNeighborMasks;
+			ComboCategoryInfo[] categories = snapshot.ComboCategories;
+			int unlimitedComboStat = snapshot.TalentRules.UnlimitedComboStat;
+
+			if (snapshot.CombatBaseline.HasDetailedWeaponProfile) {
+				CombatStatDelta totalDelta = CombatStatDelta.Zero;
+				double customFinalDamageMultiplier = 1.0;
+
+				for (int s = 0; s < unlockedSlots; s++) {
+					if (isActiveBuf[s] == 0) {
+						continue;
+					}
+					int itemIdx = slotToItemIndex[s];
+					if (itemIdx < 0) {
+						continue;
+					}
+					SlotItemSnapshot item = items[itemIdx];
+					if (item.Kind != SlotItemKind.Artifact || item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+						continue;
+					}
+
+					int effLv = effectiveLevelBuf[s];
+					CombatStatDelta itemDelta = item.GetStatDeltaAtLevel(effLv);
+					if (itemDelta.HasAnyNonZero) {
+						totalDelta = totalDelta.Add(in itemDelta);
+					}
+					if (!item.HasExplicitStatDeltas) {
+						float finalPct = item.GetFinalDamagePercentAtLevel(effLv);
+						if (finalPct > 0f) {
+							customFinalDamageMultiplier *= 1.0 + (finalPct * 0.01);
+						}
+					}
+
+					if (item.IsElementalByRowCharm) {
+						int assignedCatId = chalcedonyCatBuf[s];
+						if (assignedCatId >= 0) {
+							byte elemKind = snapshot.GetCategoryElementalKind(assignedCatId);
+							totalDelta = totalDelta.AddElementalByKind(elemKind, item.GetRowElementalBonus(effLv));
+						}
+					}
+
+					if (item.IsCrystalOfHarmony) {
+						hasActiveHarmonyCrystal = true;
+						ulong neighborMask = mooreNeighborMasks[s];
+						int sumNeighborLevels = 0;
+						while (neighborMask != 0UL) {
+							int nSlot = BitOperations.TrailingZeroCount(neighborMask);
+							neighborMask &= neighborMask - 1UL;
+							if (isActiveBuf[nSlot] != 0) {
+								int nItemIdx = slotToItemIndex[nSlot];
+								if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
+									sumNeighborLevels += effectiveLevelBuf[nSlot];
+								}
+							}
+						}
+						harmonyNeighborLevelSum += sumNeighborLevels;
+						float crystalRate = item.GetCrystalRatePerLevel(effLv);
+						totalHarmonyAmpPercent += Math.Floor(sumNeighborLevels * (double)crystalRate);
+					}
+				}
+
+				int activeComboTypes = 0;
+				for (int i = 0; i < categories.Length; i++) {
+					ComboCategoryInfo info = categories[i];
+					int catId = info.CategoryId;
+					int dynAdded = (catId >= 0 && catId < InventorySnapshot.MaxSupportedCategories)
+						? dynamicComboBonusCounts[catId]
+						: 0;
+					int totalCount = info.StaticCount + dynAdded;
+					CombatStatDelta comboDelta = info.EvaluateStatDelta(totalCount, unlimitedComboStat);
+					if (comboDelta.HasAnyNonZero) {
+						totalDelta = totalDelta.Add(in comboDelta);
+					}
+					if (info.Breakpoints.Length > 0 && totalCount >= info.Breakpoints[0]) {
+						activeComboTypes++;
+					}
+				}
+
+				int comboBonusDmgStat = snapshot.TalentRules.ComboBonusDamageStat;
+				if (comboBonusDmgStat > 0 && activeComboTypes > 0) {
+					totalDelta = totalDelta.Add(
+						new CombatStatDelta(allDamageBonus: comboBonusDmgStat * activeComboTypes)
+					);
+				}
+
+				WeaponCombatEvaluation weaponEval = snapshot.CombatBaseline.WeaponProfile.Evaluate(
+					in totalDelta,
+					customFinalDamageMultiplier
+				);
+
+				double unamplifiedCharmRawDps = 0.0;
+				double unamplifiedCharmAfterBonusDps = 0.0;
+				double amplifiedCharmAfterBonusDps = 0.0;
+				double detailedLinkedRootUnampRawDps = 0.0;
+				double detailedLinkedRootNeedleRawGain = 0.0;
+
+				for (int s = 0; s < unlockedSlots; s++) {
+					if (isActiveBuf[s] == 0) {
+						continue;
+					}
+					int itemIdx = slotToItemIndex[s];
+					if (itemIdx < 0) {
+						continue;
+					}
+					SlotItemSnapshot item = items[itemIdx];
+					if (item.Kind != SlotItemKind.Artifact
+						|| item.PriorityTier == ArtifactPriorityTier.Sacrifice
+						|| !item.IsAttackableCharm) {
+						continue;
+					}
+
+					int effLv = effectiveLevelBuf[s];
+					double elemStat = weaponEval.ResolveElementalStat(item.CharmScalingElementKind);
+					double rawCharmDps = item.GetAttackRawDpsAtLevelWithElement(effLv, elemStat);
+					int needlePct = needleBonusPctSumBySlot[s];
+					double unampFactor = Math.Max(0.1, 1.0 + (weaponEval.LiveCharmDamageBonusPercent * 0.01));
+					double ampFactor = Math.Max(
+						0.1,
+						1.0 + ((weaponEval.LiveCharmDamageBonusPercent + needlePct) * 0.01)
+					);
+
+					unamplifiedCharmRawDps += rawCharmDps;
+					unamplifiedCharmAfterBonusDps += rawCharmDps * unampFactor;
+					amplifiedCharmAfterBonusDps += rawCharmDps * ampFactor;
+					if (isLinkedNeedleRootSlot[s] != 0) {
+						detailedLinkedRootUnampRawDps += rawCharmDps;
+						detailedLinkedRootNeedleRawGain += rawCharmDps * (needlePct * 0.01);
+					}
+				}
+
+				double detailedBaseRawDps = weaponEval.WeaponAndAddonRawDps + unamplifiedCharmRawDps;
+				double detailedBaseEffectiveDps = weaponEval.WeaponAndAddonEffectiveDps
+					+ (unamplifiedCharmAfterBonusDps * weaponEval.CharmPostMultiplier);
+				double detailedGeneralMult = detailedBaseRawDps > 1e-6
+					? (detailedBaseEffectiveDps / detailedBaseRawDps)
+					: weaponEval.CharmPostMultiplier;
+
+				double detailedNeedleAmpPct = 0.0;
+				if (hasActiveGoldenNeedle) {
+					if (detailedLinkedRootUnampRawDps > 1e-6) {
+						detailedNeedleAmpPct = (detailedLinkedRootNeedleRawGain * 100.0)
+							/ detailedLinkedRootUnampRawDps;
+					} else if (activeNeedleCount > 0) {
+						detailedNeedleAmpPct = activeNeedlePercentSum / activeNeedleCount;
+					}
+				}
+
+				double detailedNeedleAddedDps = Math.Max(
+					0.0,
+					(amplifiedCharmAfterBonusDps - unamplifiedCharmAfterBonusDps) * weaponEval.CharmPostMultiplier
+				);
+				double detailedDpsWithNeedle = detailedBaseEffectiveDps + detailedNeedleAddedDps;
+				double detailedHarmonyAddedDps = detailedDpsWithNeedle * (totalHarmonyAmpPercent * 0.01);
+				double detailedTotalDps = detailedDpsWithNeedle + detailedHarmonyAddedDps;
+
+				return new DpsBreakdown(
+					detailedBaseRawDps,
+					detailedGeneralMult,
+					detailedBaseEffectiveDps,
+					hasActiveGoldenNeedle,
+					detailedNeedleAmpPct,
+					detailedNeedleAddedDps,
+					hasActiveHarmonyCrystal,
+					harmonyNeighborLevelSum,
+					totalHarmonyAmpPercent,
+					detailedHarmonyAddedDps,
+					detailedTotalDps,
+					hasOwnedGoldenNeedle,
+					hasOwnedHarmonyCrystal
+				);
 			}
 
 			double baseWeaponRawDps = snapshot.CombatBaseline.ComputeBaseWeaponRawDps();
@@ -478,12 +649,8 @@ namespace SephiriaOptimizer.Solver {
 			double amplifiedCharmAttackRawDps = 0.0;
 			double linkedRootUnamplifiedRawDps = 0.0;
 			double linkedRootAmplifiedRawDps = 0.0;
-			double statBonusPercentSum = 0.0;
+			double statBonusPercentSum = snapshot.CombatBaseline.ElementalDamageBonusPercent;
 			double finalDamageMultiplier = 1.0;
-			bool hasActiveHarmonyCrystal = false;
-			int harmonyNeighborLevelSum = 0;
-			double totalHarmonyAmpPercent = 0.0;
-			ulong[] mooreNeighborMasks = snapshot.MooreNeighborMasks;
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				if (isActiveBuf[s] == 0) {
@@ -501,7 +668,8 @@ namespace SephiriaOptimizer.Solver {
 				int effLv = effectiveLevelBuf[s];
 				if (item.IsAttackableCharm) {
 					double rawAttackDps = item.GetAttackRawDpsAtLevel(effLv);
-					double amplifiedAttackDps = rawAttackDps * needleMultiplierBySlot[s];
+					double needleMult = 1.0 + (needleBonusPctSumBySlot[s] * 0.01);
+					double amplifiedAttackDps = rawAttackDps * needleMult;
 					unamplifiedCharmAttackRawDps += rawAttackDps;
 					amplifiedCharmAttackRawDps += amplifiedAttackDps;
 					if (isLinkedNeedleRootSlot[s] != 0) {
@@ -524,9 +692,7 @@ namespace SephiriaOptimizer.Solver {
 					int assignedCatId = chalcedonyCatBuf[s];
 					if (assignedCatId >= 0) {
 						int elemBonus = item.GetRowElementalBonus(effLv);
-						bool matchesPref = snapshot.PreferredChalcedonyCategoryId < 0
-							|| assignedCatId == snapshot.PreferredChalcedonyCategoryId;
-						statBonusPercentSum += matchesPref ? (elemBonus * 2.5) : (elemBonus * 0.5);
+						statBonusPercentSum += elemBonus;
 					}
 				}
 
@@ -546,38 +712,24 @@ namespace SephiriaOptimizer.Solver {
 					}
 					harmonyNeighborLevelSum += sumNeighborLevels;
 					float crystalRate = item.GetCrystalRatePerLevel(effLv);
-					totalHarmonyAmpPercent += sumNeighborLevels * crystalRate;
+					totalHarmonyAmpPercent += Math.Floor(sumNeighborLevels * (double)crystalRate);
 				}
 			}
 
-			ComboCategoryInfo[] categories = snapshot.ComboCategories;
-			if (categories.Length > 0) {
-				for (int i = 0; i < categories.Length; i++) {
-					ComboCategoryInfo info = categories[i];
-					int catId = info.CategoryId;
-					int dynAdded = (catId >= 0 && catId < InventorySnapshot.MaxSupportedCategories)
-						? dynamicComboBonusCounts[catId]
-						: 0;
-					int totalCount = info.StaticCount + dynAdded;
-					double breakpointPct = info.EvaluateStatBonusPercent(totalCount);
-					if (info.IsUserTarget) {
-						breakpointPct *= 1.35;
-					}
-					statBonusPercentSum += breakpointPct;
-					if (dynAdded > 0) {
-						statBonusPercentSum += dynAdded * (info.IsUserTarget ? 2.5 : 1.0);
-					}
-				}
-			} else {
-				for (int c = 0; c < InventorySnapshot.MaxSupportedCategories; c++) {
-					if (dynamicComboBonusCounts[c] > 0) {
-						statBonusPercentSum += dynamicComboBonusCounts[c] * 1.5;
-					}
-				}
+			for (int i = 0; i < categories.Length; i++) {
+				ComboCategoryInfo info = categories[i];
+				int catId = info.CategoryId;
+				int dynAdded = (catId >= 0 && catId < InventorySnapshot.MaxSupportedCategories)
+					? dynamicComboBonusCounts[catId]
+					: 0;
+				int totalCount = info.StaticCount + dynAdded;
+				statBonusPercentSum += info.EvaluateStatBonusPercent(totalCount, unlimitedComboStat);
 			}
 
+			double bucketBStatMultiplier = 1.0 + (statBonusPercentSum * 0.01);
+			double bucketCCritMultiplier = snapshot.CombatBaseline.ComputeCritExpectedMultiplier();
 			double weaponAndCharmBaseDps = baseWeaponRawDps + unamplifiedCharmAttackRawDps;
-			double generalStatMultiplier = (1.0 + (statBonusPercentSum * 0.01)) * finalDamageMultiplier;
+			double generalStatMultiplier = bucketBStatMultiplier * bucketCCritMultiplier * finalDamageMultiplier;
 			double baseEffectiveDps = weaponAndCharmBaseDps * generalStatMultiplier;
 
 			double goldenNeedleAmpPercent = 0.0;
@@ -674,7 +826,8 @@ namespace SephiriaOptimizer.Solver {
 			string basePctSign = baseGainPct >= 0.0 ? "+" : string.Empty;
 
 			string baseValueLine = hasOpt
-				? $"{curBaseInt:N0} DPS → {optBaseInt:N0} DPS ({baseDeltaSign}{baseDeltaInt:N0} / {basePctSign}{baseGainPct:F1}%)"
+				? $"{curBaseInt:N0} DPS → {optBaseInt:N0} DPS "
+					+ $"({baseDeltaSign}{baseDeltaInt:N0} / {basePctSign}{baseGainPct:F1}%)"
 				: $"{curBaseInt:N0} DPS (일반 배율 ×{current.GeneralStatMultiplier:F2})";
 			string baseDescLine =
 				$"무기+공격 아티팩트 원시 딜 {Math.Round(current.WeaponAndCharmBaseDps):N0} → "
@@ -710,11 +863,13 @@ namespace SephiriaOptimizer.Solver {
 			int harmonyDeltaInt = optHarmonyDpsInt - curHarmonyDpsInt;
 			string harmonyDeltaSign = harmonyDeltaInt >= 0 ? "+" : string.Empty;
 			string harmonyAddedLine = hasOpt
-				? $"실질 추가 딜: +{curHarmonyDpsInt:N0} DPS → +{optHarmonyDpsInt:N0} DPS ({harmonyDeltaSign}{harmonyDeltaInt:N0} DPS)"
+				? $"실질 추가 딜: +{curHarmonyDpsInt:N0} DPS → +{optHarmonyDpsInt:N0} DPS "
+					+ $"({harmonyDeltaSign}{harmonyDeltaInt:N0} DPS)"
 				: $"실질 추가 딜: +{curHarmonyDpsInt:N0} DPS";
 
 			string totalSummaryLine = hasOpt
-				? $"총합 {curTotalInt:N0} DPS → {optTotalInt:N0} DPS ({deltaSign}{totalDeltaInt:N0} DPS / {pctSign}{totalGainPct:F1}% 상승)"
+				? $"총합 {curTotalInt:N0} DPS → {optTotalInt:N0} DPS "
+					+ $"({deltaSign}{totalDeltaInt:N0} DPS / {pctSign}{totalGainPct:F1}% 상승)"
 				: $"총합 {curTotalInt:N0} DPS (현재 배치 기준)";
 
 			DpsBreakdown refBreakdown = hasOpt ? opt : current;
