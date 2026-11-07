@@ -3014,6 +3014,967 @@ namespace SephiriaOptimizer.Tests {
 			Assert.Equal(694f, bottomOverflowY);
 		}
 
+		[Fact(DisplayName = "4-버킷 DPS 파이프라인이 가상 가중치 왜곡 없이 인게임 합연산·치명타·조화의수정 내림 공식을 정확히 계산한다")]
+		public void CalculateBreakdown_SeparatesFourBucketsWithoutSyntheticInflationAndFloorsHarmonyBonus() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot attackCharm = new SlotItemSnapshot(
+				0,
+				2101,
+				2101,
+				"화염 투창",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				1u,
+				attackDamageByLevel: new[] { 40f, 80f, 120f, 160f },
+				baseProcsPerSecond: 1.5f
+			);
+
+			SlotItemSnapshot goldenNeedle = new SlotItemSnapshot(
+				1,
+				2102,
+				2102,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				1,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 10, 25, 40, 60 }
+			);
+
+			SlotItemSnapshot chalcedonyKey = new SlotItemSnapshot(
+				2,
+				2103,
+				2103,
+				"캘세더니 열쇠",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				1,
+				3,
+				2,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				true,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				rowCategoryIds: new[] { 0, 1 },
+				rowElementalBonusByLevel: new[] { 2, 4, 6, 8 }
+			);
+
+			SlotItemSnapshot crystalOfHarmony = new SlotItemSnapshot(
+				3,
+				2104,
+				2104,
+				"조화의 수정",
+				SlotItemKind.Artifact,
+				4,
+				0,
+				false,
+				1,
+				2,
+				3,
+				9,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				4,
+				ArtifactPriorityTier.High,
+				isCrystalOfHarmony: true,
+				crystalDamageBonusByLevel: new[] { 1.0f, 1.5f, 2.0f }
+			);
+
+			PlayerCombatBaseline baseline = new PlayerCombatBaseline(40f, 2.5f, 20f, 2.0f, 10f);
+			ComboCategoryInfo[] combos = new[] {
+				new ComboCategoryInfo(0, "EMBER", "잉걸불", 1, new[] { 2, 4 }, true, new[] { 6f, 12f })
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { attackCharm, goldenNeedle, chalcedonyKey, crystalOfHarmony },
+				combos,
+				TalentRuleSnapshot.Default,
+				2101,
+				0,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				baseline
+			);
+
+			DpsBreakdown breakdown = DpsEstimator.CalculateCurrentBreakdown(snapshot);
+			int evalDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				snapshot.InitialSlotToItemIndex,
+				snapshot.InitialItemRotations
+			);
+
+			double expectedWeaponRaw = 40.0 * 2.5;
+			double expectedCharmRaw = 80.0 * 1.5;
+			double expectedBucketAUnamp = expectedWeaponRaw + expectedCharmRaw;
+			double expectedNeedleGainRaw = expectedCharmRaw * 0.25;
+			double expectedBucketB = 1.0 + ((10.0 + 4.0 + 6.0) * 0.01);
+			double expectedBucketC = 1.0 + (0.20 * (2.0 - 1.0));
+			double expectedGeneralMult = expectedBucketB * expectedBucketC;
+			double expectedHarmonyPct = Math.Floor(3 * 1.5);
+			double expectedTotalDps = (expectedBucketAUnamp + expectedNeedleGainRaw)
+				* expectedGeneralMult
+				* (1.0 + (expectedHarmonyPct * 0.01));
+
+			Assert.Equal(expectedBucketAUnamp, breakdown.WeaponAndCharmBaseDps, 4);
+			Assert.Equal(expectedGeneralMult, breakdown.GeneralStatMultiplier, 4);
+			Assert.Equal(25.0, breakdown.GoldenNeedleAmpPercent, 4);
+			Assert.Equal(3, breakdown.HarmonyNeighborLevelSum);
+			Assert.Equal(4.0, breakdown.HarmonyAmpPercent, 4);
+			Assert.Equal(expectedTotalDps, breakdown.TotalEstimatedDps, 4);
+			Assert.Equal((int)Math.Round(expectedTotalDps), evalDps);
+		}
+
+		[Fact(DisplayName = "배치 가이드 평가기가 빈 슬롯과 이동 완료된 슬롯 및 대칭 동일 슬롯에서 잔류 가이드를 즉시 차단한다")]
+		public void EvaluateSlotGuides_BlocksEmptySlotsAndHidesCompletedOrMovedSlotsImmediately() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot artA1 = CreateArtifact(0, 2201, 0, 1, 3, 5, ArtifactConstraintType.None, 10);
+			SlotItemSnapshot artA2 = CreateArtifact(1, 2202, 1, 1, 3, 5, ArtifactConstraintType.None, 10);
+			TabletPlacementRule[] dummyRules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				1
+			);
+			SlotItemSnapshot rotTablet = CreateTablet(2, 2203, 2, 0, true, dummyRules, 20);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { artA1, artA2, rotTablet }
+			);
+
+			int[] targetSlotToItem = new[] { 1, 0, -1, 2, -1, -1 };
+			int[] targetItemToSlot = new[] { 1, 0, 3 };
+			int[] targetRotations = new[] { 0, 0, 1 };
+
+			int[] liveSlotToItemInitial = new[] { 0, 1, 2, -1, -1, -1 };
+			int[] liveRotationsInitial = new[] { 0, 0, 0, 0, 0, 0 };
+			SlotGuideOverlayState[] states = new SlotGuideOverlayState[unlockedSlots];
+
+			CycleDecomposition.EvaluateSlotGuides(
+				snapshot,
+				liveSlotToItemInitial,
+				liveRotationsInitial,
+				targetSlotToItem,
+				targetItemToSlot,
+				targetRotations,
+				states
+			);
+
+			Assert.True(states[0].HasCurrentItem);
+			Assert.True(states[0].IsCompleted);
+			Assert.False(states[0].ShowMoveGuide);
+
+			Assert.True(states[1].HasCurrentItem);
+			Assert.True(states[1].IsCompleted);
+			Assert.False(states[1].ShowMoveGuide);
+
+			Assert.True(states[2].HasCurrentItem);
+			Assert.True(states[2].ShowMoveGuide);
+			Assert.Equal(3, states[2].TargetDestinationSlot);
+			Assert.False(states[2].ShowExpectedStatusBadge);
+
+			for (int emptySlot = 3; emptySlot < unlockedSlots; emptySlot++) {
+				Assert.False(states[emptySlot].HasCurrentItem);
+				Assert.False(states[emptySlot].ShowMoveGuide);
+				Assert.False(states[emptySlot].ShowRotateGuide);
+				Assert.False(states[emptySlot].ShowPriorityBadge);
+				Assert.False(states[emptySlot].ShowExpectedStatusBadge);
+			}
+
+			int[] liveAfterManualMove = new[] { 0, 1, -1, 2, -1, -1 };
+			int[] liveRotAfterMove = new[] { 0, 0, 0, 0, 0, 0 };
+			CycleDecomposition.EvaluateSlotGuides(
+				snapshot,
+				liveAfterManualMove,
+				liveRotAfterMove,
+				targetSlotToItem,
+				targetItemToSlot,
+				targetRotations,
+				states
+			);
+
+			Assert.False(states[2].HasCurrentItem);
+			Assert.False(states[2].ShowMoveGuide);
+			Assert.True(states[3].HasCurrentItem);
+			Assert.False(states[3].ShowMoveGuide);
+			Assert.True(states[3].ShowRotateGuide);
+			Assert.Equal(90, states[3].RotationDeltaDegrees);
+
+			int[] liveRotAfterClick = new[] { 0, 0, 0, 1, 0, 0 };
+			CycleDecomposition.EvaluateSlotGuides(
+				snapshot,
+				liveAfterManualMove,
+				liveRotAfterClick,
+				targetSlotToItem,
+				targetItemToSlot,
+				targetRotations,
+				states
+			);
+
+			Assert.True(states[3].HasCurrentItem);
+			Assert.True(states[3].IsCompleted);
+			Assert.False(states[3].ShowMoveGuide);
+			Assert.False(states[3].ShowRotateGuide);
+		}
+
+		[Fact(DisplayName = "무기 원소 공식과 온히트 속성 추가 피해 강화에 따라 캘세더니 열쇠 최적 행과 예상 DPS가 무기 속성에 맞춰 산출된다")]
+		public void Solve_SelectsElementalRowAndComputesDpsAccordingToWeaponFormulaAndOnHitAddon() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot chalcedonyKey = new SlotItemSnapshot(
+				0,
+				2301,
+				2301,
+				"캘세더니 열쇠",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				2,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				true,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				rowCategoryIds: new[] { 0, 1 },
+				rowElementalBonusByLevel: new[] { 4, 8, 12, 16 }
+			);
+
+			SlotItemSnapshot iceScalingCharm = new SlotItemSnapshot(
+				1,
+				2302,
+				2302,
+				"빙하 고드름",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				1,
+				3,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "GLACIER" },
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Core,
+				1u << 1,
+				attackDamageByLevel: new[] { 15f, 20f, 25f, 30f },
+				baseProcsPerSecond: 1.5f,
+				charmScalingElementKind: 3,
+				charmElementalPercentByLevel: new[] { 80f, 100f, 120f, 140f }
+			);
+
+			ComboCategoryInfo[] combos = new[] {
+				new ComboCategoryInfo(
+					0,
+					"EMBER",
+					"잉걸불",
+					0,
+					new[] { 2 },
+					false,
+					new[] { 10f },
+					new[] { new CombatStatDelta(fireDamage: 10f) }
+				),
+				new ComboCategoryInfo(
+					1,
+					"GLACIER",
+					"빙하",
+					1,
+					new[] { 2 },
+					false,
+					new[] { 10f },
+					new[] { new CombatStatDelta(iceDamage: 10f) }
+				)
+			};
+
+			WeaponCombatProfile fireWeaponProfile = new WeaponCombatProfile(
+				WeaponElementalFormulaMode.SingleFire,
+				0x02,
+				20f,
+				28f,
+				20f,
+				20f,
+				0f,
+				20f,
+				10f,
+				0f,
+				0f,
+				0f,
+				10f,
+				50f,
+				0f,
+				0f,
+				0f,
+				false,
+				1.6f,
+				1.6f,
+				0f,
+				2.5f,
+				0f,
+				0f,
+				0f,
+				0,
+				0f,
+				0f,
+				false,
+				0f,
+				1.0f,
+				1.0f,
+				false,
+				1,
+				20,
+				10,
+				0,
+				0f,
+				60f,
+				0f,
+				0f,
+				WeaponConditionalStatMode.None,
+				WeaponConditionalStatTarget.None,
+				0,
+				0f,
+				0.5f,
+				0,
+				0f,
+				0f,
+				0f,
+				1.0f,
+				0f
+			);
+
+			WeaponCombatProfile iceWeaponProfile = new WeaponCombatProfile(
+				WeaponElementalFormulaMode.SingleIce,
+				0x04,
+				20f,
+				20f,
+				28f,
+				20f,
+				0f,
+				20f,
+				10f,
+				0f,
+				0f,
+				0f,
+				10f,
+				50f,
+				0f,
+				0f,
+				0f,
+				false,
+				1.6f,
+				1.6f,
+				0f,
+				2.5f,
+				0f,
+				0f,
+				0f,
+				0,
+				0f,
+				0f,
+				false,
+				0f,
+				1.0f,
+				1.0f,
+				false,
+				1,
+				20,
+				10,
+				0,
+				0f,
+				0f,
+				60f,
+				0f,
+				WeaponConditionalStatMode.None,
+				WeaponConditionalStatTarget.None,
+				0,
+				0f,
+				0f,
+				0,
+				0f,
+				12f,
+				90f,
+				1.0f,
+				0.5f
+			);
+
+			InventorySnapshot fireSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { chalcedonyKey, iceScalingCharm },
+				combos,
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(in fireWeaponProfile)
+			);
+
+			InventorySnapshot iceSnapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { chalcedonyKey, iceScalingCharm },
+				combos,
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(in iceWeaponProfile)
+			);
+
+			int[] keyTopRowLayout = new[] { 0, 1, -1, -1, -1, -1 };
+			int[] keyBottomRowLayout = new[] { -1, 1, -1, 0, -1, -1 };
+			int[] zeroRots = new[] { 0, 0 };
+
+			DpsBreakdown fireTopDps = DpsEstimator.CalculateBreakdown(fireSnapshot, keyTopRowLayout, zeroRots);
+			DpsBreakdown fireBottomDps = DpsEstimator.CalculateBreakdown(fireSnapshot, keyBottomRowLayout, zeroRots);
+			Assert.True(fireTopDps.TotalEstimatedDps > fireBottomDps.TotalEstimatedDps);
+
+			DpsBreakdown iceTopDps = DpsEstimator.CalculateBreakdown(iceSnapshot, keyTopRowLayout, zeroRots);
+			DpsBreakdown iceBottomDps = DpsEstimator.CalculateBreakdown(iceSnapshot, keyBottomRowLayout, zeroRots);
+			Assert.True(iceBottomDps.TotalEstimatedDps > iceTopDps.TotalEstimatedDps);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult fireResult = solver.Solve(fireSnapshot, 200);
+			OptimizationResult iceResult = solver.Solve(iceSnapshot, 200);
+
+			Assert.Equal(0, fireResult.BestItemToSlotIndex[0] / width);
+			Assert.Equal(1, iceResult.BestItemToSlotIndex[0] / width);
+			Assert.Equal(fireResult.BestEstimatedDps, (int)Math.Round(fireResult.OptimizedBreakdown.TotalEstimatedDps));
+			Assert.Equal(iceResult.BestEstimatedDps, (int)Math.Round(iceResult.OptimizedBreakdown.TotalEstimatedDps));
+		}
+
+		[Fact(DisplayName = "석궁 탄창·재장전 사이클과 공격속도 증폭 및 4원소 비례 산탄·무기 전용 치명타 처형 공식을 오차 없이 계산한다")]
+		public void CalculateBreakdown_ModelsCrossbowReloadAttackSpeedAmpScaledSpreadAndExecutionCrit() {
+			int width = 2;
+			int height = 1;
+			int unlockedSlots = 2;
+
+			SlotItemSnapshot lightningHasteArtifact = new SlotItemSnapshot(
+				0,
+				2401,
+				2401,
+				"뇌전 가속 부적",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				1,
+				2,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Normal,
+				statBonusPercentByLevel: new[] { 0f, 35f },
+				statDeltaByLevel: new[] {
+					CombatStatDelta.Zero,
+					new CombatStatDelta(lightningDamage: 15f, attackSpeed: 20f)
+				}
+			);
+
+			WeaponCombatProfile crossbowProfile = new WeaponCombatProfile(
+				WeaponElementalFormulaMode.Highest,
+				0x0F,
+				30f,
+				25f,
+				20f,
+				20f,
+				10f,
+				20f,
+				10f,
+				0f,
+				0f,
+				20f,
+				80f,
+				50f,
+				40f,
+				30f,
+				25f,
+				true,
+				1.5f,
+				1.5f,
+				0f,
+				2.0f,
+				0.5f,
+				0f,
+				0.2f,
+				6,
+				1.0f,
+				0f,
+				false,
+				0f,
+				1.0f,
+				1.0f,
+				true,
+				3,
+				20,
+				10,
+				5,
+				0f,
+				0f,
+				0f,
+				0f,
+				WeaponConditionalStatMode.None,
+				WeaponConditionalStatTarget.None,
+				0,
+				0f,
+				0f,
+				0,
+				0f,
+				0f,
+				0f,
+				1.0f,
+				0f
+			);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { lightningHasteArtifact },
+				Array.Empty<ComboCategoryInfo>(),
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(in crossbowProfile)
+			);
+
+			DpsBreakdown breakdown = DpsEstimator.CalculateCurrentBreakdown(snapshot);
+			int evalDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				snapshot.InitialSlotToItemIndex,
+				snapshot.InitialItemRotations
+			);
+
+			double expectedSwingDamage = 35.0 * 1.5 * 2.0 * (1.20 * 1.10);
+			double expectedSustainedRate = 2.25;
+			double expectedRawDps = expectedSwingDamage * expectedSustainedRate;
+			double expectedExecCritMult = 2.20;
+			double expectedAllDmgMult = 1.10;
+			double expectedTotalDps = expectedRawDps * expectedAllDmgMult * expectedExecCritMult;
+
+			Assert.Equal(expectedRawDps, breakdown.WeaponAndCharmBaseDps, 4);
+			Assert.Equal(expectedTotalDps, breakdown.TotalEstimatedDps, 4);
+			Assert.Equal((int)Math.Round(expectedTotalDps), evalDps);
+		}
+
+		[Fact(DisplayName = "무기 강화 조건부 스탯 증폭 임계치 달성 여부와 다중 북향의 금빛침 합연산 증폭 및 유물 세트 보너스를 정확히 반영한다")]
+		public void CalculateBreakdown_EvaluatesConditionalWeaponAddonThresholdAndAdditiveMultipleGoldenNeedles() {
+			int width = 3;
+			int height = 2;
+			int unlockedSlots = 6;
+
+			SlotItemSnapshot attackRoot = new SlotItemSnapshot(
+				0,
+				2501,
+				2501,
+				"물리 칼날 부적",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				1,
+				1,
+				1,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				attackDamageByLevel: new[] { 100f, 100f },
+				baseProcsPerSecond: 1.0f
+			);
+
+			SlotItemSnapshot needleLeft = new SlotItemSnapshot(
+				1,
+				2502,
+				2502,
+				"좌측 금빛침",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				1,
+				1,
+				2,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				1,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 30, 30 }
+			);
+
+			SlotItemSnapshot needleBottom = new SlotItemSnapshot(
+				2,
+				2503,
+				2503,
+				"하단 금빛침",
+				SlotItemKind.Artifact,
+				4,
+				0,
+				false,
+				1,
+				1,
+				2,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				needleDamageBonusByLevel: new[] { 50, 50 }
+			);
+
+			SlotItemSnapshot critThresholdArtifact = new SlotItemSnapshot(
+				3,
+				2504,
+				2504,
+				"예리한 송곳",
+				SlotItemKind.Artifact,
+				2,
+				0,
+				false,
+				1,
+				1,
+				2,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				false,
+				0,
+				0,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				4,
+				ArtifactPriorityTier.Normal,
+				statBonusPercentByLevel: new[] { 0f, 15f },
+				statDeltaByLevel: new[] {
+					CombatStatDelta.Zero,
+					new CombatStatDelta(critChancePercent: 15f)
+				}
+			);
+
+			WeaponCombatProfile conditionalProfile = new WeaponCombatProfile(
+				WeaponElementalFormulaMode.SinglePhysical,
+				0x01,
+				20f,
+				20f,
+				20f,
+				20f,
+				0f,
+				0f,
+				0f,
+				0f,
+				20f,
+				0f,
+				20f,
+				50f,
+				0f,
+				0f,
+				0f,
+				false,
+				1.0f,
+				1.0f,
+				0f,
+				2.0f,
+				0f,
+				0f,
+				0f,
+				0,
+				0f,
+				0f,
+				false,
+				0f,
+				1.0f,
+				1.0f,
+				false,
+				1,
+				20,
+				10,
+				0,
+				0f,
+				0f,
+				0f,
+				0f,
+				WeaponConditionalStatMode.GreaterOrEqual,
+				WeaponConditionalStatTarget.CriticalRaw,
+				3000,
+				40f,
+				0f,
+				0,
+				0f,
+				0f,
+				0f,
+				1.0f,
+				0f
+			);
+
+			ComboCategoryInfo[] combos = new[] {
+				new ComboCategoryInfo(
+					0,
+					"EMBER",
+					"잉걸불",
+					2,
+					new[] { 2 },
+					false,
+					new[] { 0f },
+					new[] { CombatStatDelta.Zero }
+				)
+			};
+			TalentRuleSnapshot talentWithComboBonus = new TalentRuleSnapshot(
+				0,
+				0,
+				0,
+				10,
+				0,
+				false,
+				false,
+				0,
+				0,
+				0,
+				0,
+				Array.Empty<ArrangementPattern>()
+			);
+
+			int[] baseDisable = new[] { 0, 0, 1, 0, 0, 0 };
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				baseDisable,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { attackRoot, needleLeft, needleBottom, critThresholdArtifact },
+				combos,
+				talentWithComboBonus,
+				2501,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(in conditionalProfile)
+			);
+
+			int[] belowThresholdLayout = new[] { 1, 0, 3, -1, 2, -1 };
+			int[] aboveThresholdLayout = new[] { 1, 0, -1, -1, 2, 3 };
+			int[] zeroRots = new[] { 0, 0, 0, 0 };
+
+			DpsBreakdown belowBreakdown = DpsEstimator.CalculateBreakdown(snapshot, belowThresholdLayout, zeroRots);
+			DpsBreakdown aboveBreakdown = DpsEstimator.CalculateBreakdown(snapshot, aboveThresholdLayout, zeroRots);
+			int belowEvalDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(snapshot, belowThresholdLayout, zeroRots);
+			int aboveEvalDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(snapshot, aboveThresholdLayout, zeroRots);
+
+			Assert.Equal(80.0, belowBreakdown.GoldenNeedleAmpPercent, 4);
+			Assert.Equal(290.4, belowBreakdown.TotalEstimatedDps, 4);
+			Assert.Equal(290, belowEvalDps);
+
+			Assert.Equal(80.0, aboveBreakdown.GoldenNeedleAmpPercent, 4);
+			Assert.Equal(434.28, aboveBreakdown.TotalEstimatedDps, 4);
+			Assert.Equal(434, aboveEvalDps);
+		}
+
 
 		private static int CountBits(ulong mask) {
 			int count = 0;

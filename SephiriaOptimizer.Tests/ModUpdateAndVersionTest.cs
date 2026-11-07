@@ -251,6 +251,39 @@ namespace SephiriaOptimizer.Tests {
 			}
 		}
 
+		[Fact(DisplayName = "모드 버전 상수와 어셈블리 버전 및 metadata.json 배포 메타데이터가 항상 동일하게 동기화되어 있다")]
+		public void ModVersionConstants_MatchesAssemblyVersionAndSourceMetadataJson() {
+			Version? asmVersion = typeof(ModVersionConstants).Assembly.GetName().Version;
+			Assert.NotNull(asmVersion);
+			string actualThreePart = $"{asmVersion!.Major}.{asmVersion.Minor}.{asmVersion.Build}";
+			Assert.Equal(ModVersionConstants.CurrentModVersion, actualThreePart);
+
+			string? repoRoot = TryFindRepositoryRoot();
+			Assert.NotNull(repoRoot);
+
+			string sourceMetaDir = Path.Combine(repoRoot!, "SephiriaOptimizer");
+			bool readSourceOk = VersionCompatibilityChecker.TryReadInstalledMetadata(
+				sourceMetaDir,
+				out string sourceModVer,
+				out string sourceTargetGameVer
+			);
+
+			Assert.True(readSourceOk);
+			Assert.Equal(ModVersionConstants.CurrentModVersion, sourceModVer);
+			Assert.Equal(ModVersionConstants.DefaultTargetGameVersion, sourceTargetGameVer);
+		}
+
+		private static string? TryFindRepositoryRoot() {
+			string? currentDir = AppDomain.CurrentDomain.BaseDirectory;
+			while (!string.IsNullOrEmpty(currentDir)) {
+				if (File.Exists(Path.Combine(currentDir, "SephiriaOptimizer.sln"))) {
+					return currentDir;
+				}
+				currentDir = Directory.GetParent(currentDir)?.FullName;
+			}
+			return null;
+		}
+
 		private static byte[] CreateSyntheticValidPeDll(byte fillPattern, int totalLength) {
 			byte[] buffer = new byte[totalLength];
 			for (int i = 0; i < buffer.Length; i++) {
