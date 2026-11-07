@@ -26,13 +26,37 @@ function ConvertFrom-UnicodeEscape {
 	return [System.Text.RegularExpressions.Regex]::Unescape($Text)
 }
 
+function Resolve-ModVersionLabel {
+	$fallbackVer = '2.2.0'
+	$baseDir = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
+	$metaCandidates = @(
+		(Join-Path $baseDir 'metadata.json'),
+		(Join-Path $baseDir '..\SephiriaOptimizer\metadata.json')
+	)
+	foreach ($cand in $metaCandidates) {
+		if ([System.IO.File]::Exists($cand)) {
+			try {
+				$rawJson = [System.IO.File]::ReadAllText($cand, [System.Text.Encoding]::UTF8)
+				$m = [System.Text.RegularExpressions.Regex]::Match($rawJson, '"modVersion"\s*:\s*"([^"]+)"')
+				if ($m.Success -and -not [string]::IsNullOrWhiteSpace($m.Groups[1].Value)) {
+					return $m.Groups[1].Value.Trim()
+				}
+			} catch {
+			}
+		}
+	}
+	return $fallbackVer
+}
+
+$DetectedModVer = Resolve-ModVersionLabel
+
 $Msg = @{
 	BannerInstall = ConvertFrom-UnicodeEscape (
-		'[Sephiria Optimizer v2.1] ' +
+		"[Sephiria Optimizer v$DetectedModVer] " +
 		'\uC138\uD53C\uB9AC\uC544 \uCD5C\uC801\uD654 \uBAA8\uB4DC \uD1B5\uD569 \uC790\uB3D9 \uC124\uCE58\uAE30'
 	)
 	BannerUninstall = ConvertFrom-UnicodeEscape (
-		'[Sephiria Optimizer v2.1] ' +
+		"[Sephiria Optimizer v$DetectedModVer] " +
 		'\uC138\uD53C\uB9AC\uC544 \uCD5C\uC801\uD654 \uBAA8\uB4DC \uD1B5\uD569 \uC790\uB3D9 \uC81C\uAC70\uAE30'
 	)
 	ErrZipTemp = ConvertFrom-UnicodeEscape (
@@ -103,7 +127,7 @@ $Msg = @{
 		'\uB2E4\uC2DC \uC2E4\uD589\uD574 \uC8FC\uC138\uC694.\n\uB300\uC0C1 \uACBD\uB85C: '
 	)
 	DoneInstall = ConvertFrom-UnicodeEscape (
-		'\uC138\uD53C\uB9AC\uC544 \uCD5C\uC801\uD654 \uBAA8\uB4DC(SephiriaOptimizer v2.1.0) ' +
+		"\uC138\uD53C\uB9AC\uC544 \uCD5C\uC801\uD654 \uBAA8\uB4DC(SephiriaOptimizer v$DetectedModVer) " +
 		'\uC124\uCE58\uAC00 \uC644\uB8CC\uB418\uC5C8\uC2B5\uB2C8\uB2E4!\n\n' +
 		'\uC124\uCE58 \uACBD\uB85C: {0}\n\n' +
 		'\uAC8C\uC784 \uC2E4\uD589 \uD6C4 \uC778\uBCA4\uD1A0\uB9AC(I \uB610\uB294 Tab)\uB97C \uC5F4\uBA74 ' +
