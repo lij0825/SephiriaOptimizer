@@ -54,6 +54,7 @@ namespace SephiriaOptimizer.UI {
 		private readonly Dictionary<int, int> customEntityWeights = new Dictionary<int, int>();
 		private readonly OptimizerUserSettings userSettings = new OptimizerUserSettings();
 		private readonly Vector3[] worldCornersBuffer = new Vector3[4];
+		private readonly Rect[] slotScreenRectsBuffer = new Rect[InventorySnapshot.MaxSupportedSlots];
 		private readonly List<Rect> potionObstacleRects = new List<Rect>(8);
 		private readonly List<Rect> inventoryObstacleRects = new List<Rect>(6);
 		private readonly List<Rect> sidePanelObstacleRects = new List<Rect>(6);
@@ -63,6 +64,8 @@ namespace SephiriaOptimizer.UI {
 		private InventorySnapshot? latestSnapshot;
 		private OptimizationResult? latestResult;
 		private GameCompatibilityReport? compatibilityReport;
+		private PlayerAvatar? cachedWeaponCtrlAvatar;
+		private WeaponControllerSimple? cachedWeaponCtrl;
 
 		private Task<OptimizationResult>? activeSolveTask;
 		private InventorySnapshot? pendingTaskSnapshot;
@@ -173,7 +176,9 @@ namespace SephiriaOptimizer.UI {
 				if (activeSolveTask != null && activeSolveTask.IsCompleted) {
 					activeSolveTask = null;
 				}
-				selectedSlotIndex = -1;
+				if (latestResult != null || latestSnapshot != null || selectedSlotIndex >= 0) {
+					ClearGuides();
+				}
 				return;
 			}
 
@@ -184,20 +189,34 @@ namespace SephiriaOptimizer.UI {
 			PlayerAvatar avatar = statusPanel.PlayerAvatar;
 			GridInventory? inventory = avatar != null ? avatar.Inventory : null;
 			if (avatar == null || inventory == null) {
+				ClearGuides();
 				return;
 			}
 
 			int currentStateHash = 0;
+			int occupiedCount = 0;
 			try {
-				currentStateHash = ComputeInventoryStateHash(inventory);
+				currentStateHash = ComputeInventoryStateHash(avatar, inventory, out occupiedCount);
 			} catch (Exception hashEx) {
 				Debug.LogError($"[SephiriaOptimizer] State hash failed: {hashEx.Message}");
 				SetStatusBanner($"인벤토리 스캔 오류 ({hashEx.GetType().Name}) — 게임 버전을 확인하세요");
 				return;
 			}
-			if (currentStateHash != lastObservedStateHash && !isAutoSwapRunning && activeSolveTask == null) {
+
+			if (occupiedCount <= 0) {
+				if (latestResult != null || latestSnapshot != null) {
+					ClearGuides();
+				}
 				lastObservedStateHash = currentStateHash;
-				StartBackgroundSolve(avatar, inventory);
+				return;
+			}
+
+			if (currentStateHash != lastObservedStateHash && !isAutoSwapRunning) {
+				InvalidateStaleGuidesOnInventoryChange(inventory);
+				if (activeSolveTask == null) {
+					lastObservedStateHash = currentStateHash;
+					StartBackgroundSolve(avatar, inventory);
+				}
 			}
 		}
 
@@ -217,7 +236,7 @@ namespace SephiriaOptimizer.UI {
 
 			bool shouldDrawSlotOverlay = isOverlayEnabled && latestSnapshot != null && latestResult != null;
 			if (shouldDrawSlotOverlay) {
-				DrawSlotOverlays(statusPanel, latestSnapshot!, latestResult!);
+				DrawSlotOverlays(statusPanel, inventory, latestSnapshot!, latestResult!);
 			}
 
 			DrawSideControlPanel(statusPanel, avatar, inventory);
@@ -228,6 +247,49 @@ namespace SephiriaOptimizer.UI {
 
 			if (isDpsBoxHovered && !isPanelCollapsed) {
 				DrawDpsBreakdownTooltip();
+			}
+		}
+
+		public void ClearGuides() {
+			latestResult = null;
+			latestSnapshot = null;
+			pendingTaskSnapshot = null;
+			selectedSlotIndex = -1;
+			isDpsBoxHovered = false;
+			lastObservedStateHash = 0;
+			cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
+		}
+
+		private void InvalidateStaleGuidesOnInventoryChange(GridInventory inventory) {
+			if (latestSnapshot == null || latestResult == null) {
+				return;
+			}
+			int unlocked = Math.Clamp(
+				(int)inventory.CurrentInventoryStorage,
+				0,
+				InventorySnapshot.MaxSupportedSlots
+			);
+			if (unlocked != latestSnapshot.UnlockedSlots) {
+				ClearGuides();
+				return;
+			}
+
+			int width = Math.Max(1, (int)inventory.Width);
+			int liveValidItemCount = 0;
+			for (int s = 0; s < unlocked; s++) {
+				sbyte gx = (sbyte)(s % width);
+				sbyte gy = (sbyte)(s / width);
+				NewItemOwnInstance? inst = inventory.FindItem(gx, gy);
+				if (inst != null && inst.Entity != null) {
+					liveValidItemCount++;
+				} else if (selectedSlotIndex == s) {
+					selectedSlotIndex = -1;
+				}
+			}
+
+			if (liveValidItemCount != latestSnapshot.Items.Length) {
+				latestResult = null;
+				selectedSlotIndex = -1;
 			}
 		}
 
@@ -845,6 +907,7 @@ namespace SephiriaOptimizer.UI {
 
 		private void ResetUserCustomizations() {
 			pinnedSlotIndices.Clear();
+			customEntityWeights.Clear();
 			userSettings.InstancePriorities.Clear();
 			userSettings.PreferredChalcedonyCategory = string.Empty;
 			userSettings.TargetComboCategories.Clear();
@@ -1274,12 +1337,21 @@ namespace SephiriaOptimizer.UI {
 
 		private void DrawSlotOverlays(
 			UI_CharacterStatusPanel statusPanel,
+			GridInventory inventory,
 			InventorySnapshot snapshot,
 			OptimizationResult result
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
-			Rect[] slotScreenRects = new Rect[unlockedSlots];
-			bool[] hasValidRect = new bool[unlockedSlots];
+			if (unlockedSlots <= 0) {
+				return;
+			}
+
+			Rect[] slotScreenRects = slotScreenRectsBuffer;
+			Span<byte> hasValidRect = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			Span<int> liveSlotToItem = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> liveSlotRotations = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<SlotGuideOverlayState> guideStates =
+				stackalloc SlotGuideOverlayState[InventorySnapshot.MaxSupportedSlots];
 
 			Vector2 mouseGuiPos = Event.current != null ? Event.current.mousePosition : Vector2.zero;
 			bool mouseOverSidePanel = lastRenderedSidePanelRect.width > 1f
@@ -1287,17 +1359,44 @@ namespace SephiriaOptimizer.UI {
 			int hoveredSlot = -1;
 
 			for (int s = 0; s < unlockedSlots; s++) {
+				hasValidRect[s] = 0;
 				SlotCoord coord = snapshot.Slots[s];
+				ResolveLiveSlotItem(
+					inventory,
+					snapshot,
+					coord,
+					out int resolvedItemIdx,
+					out int resolvedRotation
+				);
+				liveSlotToItem[s] = resolvedItemIdx;
+				liveSlotRotations[s] = resolvedRotation;
+
 				UI_NewInventoryIcon icon = statusPanel.GetItemIcon(new ItemPosition(coord.X, coord.Y));
 				if (icon == null || icon.rectTransform == null) {
 					continue;
 				}
 				Rect rect = GetScreenGuiRect(icon.rectTransform);
 				slotScreenRects[s] = rect;
-				hasValidRect[s] = rect.width > 4f && rect.height > 4f;
-				if (!mouseOverSidePanel && hasValidRect[s] && rect.Contains(mouseGuiPos)) {
+				bool validRect = rect.width > 4f && rect.height > 4f;
+				hasValidRect[s] = validRect ? (byte)1 : (byte)0;
+				if (!mouseOverSidePanel && validRect && rect.Contains(mouseGuiPos)) {
 					hoveredSlot = s;
 				}
+			}
+
+			CycleDecomposition.EvaluateSlotGuides(
+				snapshot,
+				liveSlotToItem.Slice(0, unlockedSlots),
+				liveSlotRotations.Slice(0, unlockedSlots),
+				result.BestSlotToItemIndex,
+				result.BestItemToSlotIndex,
+				result.BestItemRotations,
+				guideStates.Slice(0, unlockedSlots)
+			);
+
+			if (selectedSlotIndex >= 0
+				&& (selectedSlotIndex >= unlockedSlots || !guideStates[selectedSlotIndex].HasCurrentItem)) {
+				selectedSlotIndex = -1;
 			}
 
 			if (Event.current != null && Event.current.type == EventType.MouseDown && hoveredSlot >= 0) {
@@ -1309,7 +1408,7 @@ namespace SephiriaOptimizer.UI {
 						lastObservedStateHash = 0;
 						Event.current.Use();
 					} else {
-						int clickedItemIdx = snapshot.InitialSlotToItemIndex[hoveredSlot];
+						int clickedItemIdx = liveSlotToItem[hoveredSlot];
 						if (clickedItemIdx >= 0 && snapshot.Items[clickedItemIdx].Kind == SlotItemKind.Artifact) {
 							SlotItemSnapshot clickedArt = snapshot.Items[clickedItemIdx];
 							userSettings.CyclePriority(clickedArt.InstanceId);
@@ -1322,14 +1421,18 @@ namespace SephiriaOptimizer.UI {
 						}
 					}
 				} else if (Event.current.button == 0) {
-					selectedSlotIndex = selectedSlotIndex == hoveredSlot ? -1 : hoveredSlot;
+					if (guideStates[hoveredSlot].HasCurrentItem) {
+						selectedSlotIndex = selectedSlotIndex == hoveredSlot ? -1 : hoveredSlot;
+					} else {
+						selectedSlotIndex = -1;
+					}
 				}
 			}
 
 			int activeHighlightSlot = hoveredSlot >= 0 ? hoveredSlot : selectedSlotIndex;
 
 			for (int s = 0; s < unlockedSlots; s++) {
-				if (!hasValidRect[s]) {
+				if (hasValidRect[s] == 0) {
 					continue;
 				}
 				Rect rect = slotScreenRects[s];
@@ -1339,39 +1442,34 @@ namespace SephiriaOptimizer.UI {
 					GUI.Label(new Rect(rect.x + 2f, rect.y + 2f, 38f, 16f), "PIN", pinTagStyle!);
 				}
 
-				int currentItemIdx = snapshot.InitialSlotToItemIndex[s];
-				if (currentItemIdx >= 0 && currentItemIdx < result.BestItemToSlotIndex.Length) {
-					int targetSlot = result.BestItemToSlotIndex[currentItemIdx];
-					SlotItemSnapshot currentItem = snapshot.Items[currentItemIdx];
-
-					bool showPriority = currentItem.Kind == SlotItemKind.Artifact
-						&& currentItem.PriorityTier != ArtifactPriorityTier.Normal;
-					if (showPriority) {
-						DrawPriorityBadge(rect, currentItem.PriorityTier);
-					}
-
-					if (targetSlot >= 0 && targetSlot != s && targetSlot < unlockedSlots) {
-						SlotCoord targetCoord = snapshot.Slots[targetSlot];
-						string moveText = $"→[{targetCoord.X},{targetCoord.Y}]";
-						Rect moveBadgeRect = new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, 18f);
-						DrawColoredBox(moveBadgeRect, new Color(0.05f, 0.18f, 0.36f, 0.88f));
-						GUI.Label(moveBadgeRect, moveText, coordBadgeStyle!);
-					} else if (currentItem.Kind == SlotItemKind.StoneTablet && currentItem.IsRotatable) {
-						int curRot = snapshot.InitialItemRotations[currentItemIdx] & 3;
-						int bestRot = result.BestItemRotations[currentItemIdx] & 3;
-						int rotDiff = (bestRot - curRot + 4) & 3;
-						if (rotDiff > 0) {
-							string rotText = $"↻ +{rotDiff * 90}°";
-							Rect rotBadgeRect = new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, 18f);
-							DrawColoredBox(rotBadgeRect, new Color(0.35f, 0.15f, 0.45f, 0.88f));
-							GUI.Label(rotBadgeRect, rotText, coordBadgeStyle!);
-						}
-					}
+				SlotGuideOverlayState guide = guideStates[s];
+				if (!guide.HasCurrentItem) {
+					continue;
 				}
 
-				if (s < result.BestSlotDetails.Length) {
+				int currentItemIdx = liveSlotToItem[s];
+				SlotItemSnapshot currentItem = snapshot.Items[currentItemIdx];
+
+				if (guide.ShowPriorityBadge) {
+					DrawPriorityBadge(rect, currentItem.PriorityTier);
+				}
+
+				if (guide.ShowMoveGuide) {
+					SlotCoord targetCoord = snapshot.Slots[guide.TargetDestinationSlot];
+					string moveText = $"→[{targetCoord.X},{targetCoord.Y}]";
+					Rect moveBadgeRect = new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, 18f);
+					DrawColoredBox(moveBadgeRect, new Color(0.05f, 0.18f, 0.36f, 0.88f));
+					GUI.Label(moveBadgeRect, moveText, coordBadgeStyle!);
+				} else if (guide.ShowRotateGuide) {
+					string rotText = $"↻ +{guide.RotationDeltaDegrees}°";
+					Rect rotBadgeRect = new Rect(rect.x + 2f, rect.y + 2f, rect.width - 4f, 18f);
+					DrawColoredBox(rotBadgeRect, new Color(0.35f, 0.15f, 0.45f, 0.88f));
+					GUI.Label(rotBadgeRect, rotText, coordBadgeStyle!);
+				}
+
+				if (guide.ShowExpectedStatusBadge && s < result.BestSlotDetails.Length) {
 					SlotEvaluationDetail detail = result.BestSlotDetails[s];
-					if (detail.ItemIndex >= 0) {
+					if (detail.ItemIndex >= 0 && detail.ItemIndex < snapshot.Items.Length) {
 						SlotItemSnapshot placedItem = snapshot.Items[detail.ItemIndex];
 						if (placedItem.Kind == SlotItemKind.Artifact) {
 							DrawExpectedLevelBadge(rect, detail, placedItem);
@@ -1386,23 +1484,60 @@ namespace SephiriaOptimizer.UI {
 				}
 			}
 
-			if (activeHighlightSlot >= 0 && activeHighlightSlot < unlockedSlots && hasValidRect[activeHighlightSlot]) {
-				int itemIdx = snapshot.InitialSlotToItemIndex[activeHighlightSlot];
-				if (itemIdx >= 0 && itemIdx < result.BestItemToSlotIndex.Length) {
-					int dstSlot = result.BestItemToSlotIndex[itemIdx];
-					bool isValidDestination = dstSlot >= 0
-						&& dstSlot < unlockedSlots
-						&& dstSlot != activeHighlightSlot
-						&& hasValidRect[dstSlot];
-					if (isValidDestination) {
-						Rect srcRect = slotScreenRects[activeHighlightSlot];
-						Rect dstRect = slotScreenRects[dstSlot];
-						DrawRectBorder(srcRect, new Color(0.2f, 0.95f, 1f, 1f), 2.5f);
-						DrawRectBorder(dstRect, new Color(0.2f, 1f, 0.4f, 1f), 2.5f);
-						DrawConnectionLine(srcRect.center, dstRect.center, new Color(0.2f, 0.95f, 1f, 0.95f), 3f);
-					}
+			if (activeHighlightSlot >= 0
+				&& activeHighlightSlot < unlockedSlots
+				&& hasValidRect[activeHighlightSlot] != 0
+				&& guideStates[activeHighlightSlot].HasCurrentItem
+				&& guideStates[activeHighlightSlot].ShowMoveGuide) {
+				int dstSlot = guideStates[activeHighlightSlot].TargetDestinationSlot;
+				if (dstSlot >= 0
+					&& dstSlot < unlockedSlots
+					&& dstSlot != activeHighlightSlot
+					&& hasValidRect[dstSlot] != 0) {
+					Rect srcRect = slotScreenRects[activeHighlightSlot];
+					Rect dstRect = slotScreenRects[dstSlot];
+					DrawRectBorder(srcRect, new Color(0.2f, 0.95f, 1f, 1f), 2.5f);
+					DrawRectBorder(dstRect, new Color(0.2f, 1f, 0.4f, 1f), 2.5f);
+					DrawConnectionLine(srcRect.center, dstRect.center, new Color(0.2f, 0.95f, 1f, 0.95f), 3f);
 				}
 			}
+		}
+
+		private static void ResolveLiveSlotItem(
+			GridInventory inventory,
+			InventorySnapshot snapshot,
+			SlotCoord coord,
+			out int resolvedItemIdx,
+			out int resolvedRotation
+		) {
+			resolvedItemIdx = -1;
+			resolvedRotation = 0;
+
+			NewItemOwnInstance? liveItem = inventory.FindItem(coord.X, coord.Y);
+			if (liveItem == null || liveItem.Entity == null) {
+				return;
+			}
+
+			int liveInstanceId = liveItem.InstanceID;
+			SlotItemSnapshot[] items = snapshot.Items;
+			for (int i = 0; i < items.Length; i++) {
+				if (items[i].InstanceId == liveInstanceId) {
+					resolvedItemIdx = i;
+					break;
+				}
+			}
+
+			if (resolvedItemIdx < 0) {
+				return;
+			}
+
+			StoneTablet? liveTablet = liveItem.StoneTablet;
+			if (liveTablet == null && inventory.stoneTablets != null) {
+				inventory.stoneTablets.TryGetValue(new ItemPosition(coord.X, coord.Y), out liveTablet);
+			}
+			resolvedRotation = liveTablet != null
+				? (liveTablet.rotation & 3)
+				: (items[resolvedItemIdx].InitialRotation & 3);
 		}
 
 		private void DrawPriorityBadge(Rect slotRect, ArtifactPriorityTier tier) {
@@ -1588,7 +1723,12 @@ namespace SephiriaOptimizer.UI {
 			return panel;
 		}
 
-		private int ComputeInventoryStateHash(GridInventory inventory) {
+		private int ComputeInventoryStateHash(
+			PlayerAvatar avatar,
+			GridInventory inventory,
+			out int occupiedSlotCount
+		) {
+			occupiedSlotCount = 0;
 			int hash = 17;
 			int width = Math.Max(1, (int)inventory.Width);
 			int unlocked = Math.Clamp((int)inventory.CurrentInventoryStorage, 0, InventorySnapshot.MaxSupportedSlots);
@@ -1614,6 +1754,9 @@ namespace SephiriaOptimizer.UI {
 				sbyte gridX = (sbyte)(s % width);
 				sbyte gridY = (sbyte)(s / width);
 				NewItemOwnInstance item = inventory.FindItem(gridX, gridY);
+				if (item != null && item.Entity != null) {
+					occupiedSlotCount++;
+				}
 				int instanceId = item != null ? item.InstanceID : -1;
 				StoneTablet? tablet = item != null ? item.StoneTablet : null;
 				if (tablet == null && item != null && inventory.stoneTablets != null) {
@@ -1623,6 +1766,32 @@ namespace SephiriaOptimizer.UI {
 				hash = (hash * 31) + instanceId;
 				hash = (hash * 31) + rot;
 			}
+
+			if (cachedWeaponCtrlAvatar != avatar) {
+				cachedWeaponCtrlAvatar = avatar;
+				cachedWeaponCtrl = avatar.GetComponent<WeaponControllerSimple>();
+			}
+			WeaponSimple? curWeapon = cachedWeaponCtrl != null ? cachedWeaponCtrl.currentWeapon : null;
+			hash = (hash * 31) + (curWeapon != null ? curWeapon.GetInstanceID() : 0);
+			if (curWeapon != null && curWeapon.addons != null) {
+				int activeAddons = 0;
+				for (int i = 0; i < curWeapon.addons.Length; i++) {
+					WeaponAddon addon = curWeapon.addons[i];
+					if (addon != null && addon.enabled && addon.gameObject.activeInHierarchy) {
+						activeAddons++;
+					}
+				}
+				hash = (hash * 31) + activeAddons;
+			}
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.PhysicalDamage);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.FireDamage);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.IceDamage);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.LightningDamage);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.AllDamageBonus);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.WeaponDamageBonus);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.AttackSpeed);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.Critical);
+			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.CriticalDamageBonus);
 
 			hash = (hash * 31) + pinnedSlotIndices.Count;
 			hash = (hash * 31) + userSettings.ComputeSettingsHash();
@@ -1671,9 +1840,11 @@ namespace SephiriaOptimizer.UI {
 				ScreenEdgeMargin
 			);
 
+			float maxTooltipX = Mathf.Max(ScreenEdgeMargin, Screen.width - BreakdownTooltipWidth - ScreenEdgeMargin);
+			float maxTooltipY = Mathf.Max(ScreenEdgeMargin, Screen.height - BreakdownTooltipHeight - ScreenEdgeMargin);
 			Rect tooltipRect = new Rect(
-				Mathf.Clamp(clampedX, ScreenEdgeMargin, Mathf.Max(ScreenEdgeMargin, Screen.width - BreakdownTooltipWidth - ScreenEdgeMargin)),
-				Mathf.Clamp(clampedY, ScreenEdgeMargin, Mathf.Max(ScreenEdgeMargin, Screen.height - BreakdownTooltipHeight - ScreenEdgeMargin)),
+				Mathf.Clamp(clampedX, ScreenEdgeMargin, maxTooltipX),
+				Mathf.Clamp(clampedY, ScreenEdgeMargin, maxTooltipY),
 				BreakdownTooltipWidth,
 				BreakdownTooltipHeight
 			);

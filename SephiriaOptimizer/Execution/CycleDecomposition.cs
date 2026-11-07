@@ -55,7 +55,188 @@ namespace SephiriaOptimizer.Execution {
 		}
 	}
 
+	public readonly struct SlotGuideOverlayState {
+		public bool HasCurrentItem { get; }
+		public bool IsCompleted { get; }
+		public bool ShowMoveGuide { get; }
+		public int TargetDestinationSlot { get; }
+		public bool ShowRotateGuide { get; }
+		public int RotationDeltaDegrees { get; }
+		public bool ShowPriorityBadge { get; }
+		public bool ShowExpectedStatusBadge { get; }
+
+		public SlotGuideOverlayState(
+			bool hasCurrentItem,
+			bool isCompleted,
+			bool showMoveGuide,
+			int targetDestinationSlot,
+			bool showRotateGuide,
+			int rotationDeltaDegrees,
+			bool showPriorityBadge,
+			bool showExpectedStatusBadge
+		) {
+			HasCurrentItem = hasCurrentItem;
+			IsCompleted = isCompleted;
+			ShowMoveGuide = showMoveGuide;
+			TargetDestinationSlot = showMoveGuide ? targetDestinationSlot : -1;
+			ShowRotateGuide = showRotateGuide;
+			RotationDeltaDegrees = showRotateGuide ? rotationDeltaDegrees : 0;
+			ShowPriorityBadge = showPriorityBadge;
+			ShowExpectedStatusBadge = showExpectedStatusBadge;
+		}
+
+		public static SlotGuideOverlayState Empty => new SlotGuideOverlayState(
+			false,
+			true,
+			false,
+			-1,
+			false,
+			0,
+			false,
+			false
+		);
+	}
+
 	public static class CycleDecomposition {
+		public static void EvaluateSlotGuides(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> liveSlotToItem,
+			ReadOnlySpan<int> liveSlotRotations,
+			ReadOnlySpan<int> targetSlotToItem,
+			ReadOnlySpan<int> targetItemToSlot,
+			ReadOnlySpan<int> targetItemRotations,
+			Span<SlotGuideOverlayState> outputStates
+		) {
+			if (snapshot == null) {
+				outputStates.Clear();
+				return;
+			}
+
+			int unlockedSlots = Math.Min(snapshot.UnlockedSlots, outputStates.Length);
+			SlotItemSnapshot[] items = snapshot.Items;
+			int itemCount = items.Length;
+
+			Span<byte> targetSlotSatisfied = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			for (int s = 0; s < unlockedSlots; s++) {
+				outputStates[s] = SlotGuideOverlayState.Empty;
+				targetSlotSatisfied[s] = 0;
+
+				int curIdx = s < liveSlotToItem.Length ? liveSlotToItem[s] : -1;
+				int dstIdx = s < targetSlotToItem.Length ? targetSlotToItem[s] : -1;
+				if (curIdx >= 0 && curIdx < itemCount && dstIdx >= 0 && dstIdx < itemCount) {
+					SlotItemSnapshot curItem = items[curIdx];
+					SlotItemSnapshot dstItem = items[dstIdx];
+					if (IsValidGuideItemKind(curItem.Kind)
+						&& curItem.SymmetryGroupId == dstItem.SymmetryGroupId) {
+						targetSlotSatisfied[s] = 1;
+					}
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				int curIdx = s < liveSlotToItem.Length ? liveSlotToItem[s] : -1;
+				if (curIdx < 0 || curIdx >= itemCount) {
+					outputStates[s] = SlotGuideOverlayState.Empty;
+					continue;
+				}
+
+				SlotItemSnapshot curItem = items[curIdx];
+				if (!IsValidGuideItemKind(curItem.Kind)) {
+					outputStates[s] = SlotGuideOverlayState.Empty;
+					continue;
+				}
+
+				bool showPriority = curItem.Kind == SlotItemKind.Artifact
+					&& curItem.PriorityTier != ArtifactPriorityTier.Normal;
+
+				int dstIdxAtSlot = s < targetSlotToItem.Length ? targetSlotToItem[s] : -1;
+				bool hasValidTargetAtSlot = dstIdxAtSlot >= 0
+					&& dstIdxAtSlot < itemCount
+					&& IsValidGuideItemKind(items[dstIdxAtSlot].Kind);
+
+				if (hasValidTargetAtSlot && curItem.SymmetryGroupId == items[dstIdxAtSlot].SymmetryGroupId) {
+					int rotDeltaDeg = 0;
+					bool needsRotate = false;
+					if (curItem.Kind == SlotItemKind.StoneTablet && curItem.IsRotatable) {
+						int curRot = (s < liveSlotRotations.Length
+							? liveSlotRotations[s]
+							: curItem.InitialRotation) & 3;
+						int dstRot = (dstIdxAtSlot < targetItemRotations.Length
+							? targetItemRotations[dstIdxAtSlot]
+							: 0) & 3;
+						int rotDiff = (dstRot - curRot + 4) & 3;
+						if (rotDiff > 0) {
+							needsRotate = true;
+							rotDeltaDeg = rotDiff * 90;
+						}
+					}
+
+					outputStates[s] = new SlotGuideOverlayState(
+						true,
+						!needsRotate,
+						false,
+						-1,
+						needsRotate,
+						rotDeltaDeg,
+						showPriority,
+						true
+					);
+					continue;
+				}
+
+				int destinationSlot = -1;
+				if (curIdx < targetItemToSlot.Length) {
+					int directDst = targetItemToSlot[curIdx];
+					if (directDst >= 0
+						&& directDst < unlockedSlots
+						&& directDst != s
+						&& targetSlotSatisfied[directDst] == 0) {
+						int directTargetItemIdx = directDst < targetSlotToItem.Length
+							? targetSlotToItem[directDst]
+							: -1;
+						if (directTargetItemIdx >= 0
+							&& directTargetItemIdx < itemCount
+							&& IsValidGuideItemKind(items[directTargetItemIdx].Kind)) {
+							destinationSlot = directDst;
+							targetSlotSatisfied[directDst] = 1;
+						}
+					}
+				}
+
+				if (destinationSlot < 0) {
+					for (int candSlot = 0; candSlot < unlockedSlots; candSlot++) {
+						if (candSlot == s || targetSlotSatisfied[candSlot] != 0) {
+							continue;
+						}
+						int candItemIdx = candSlot < targetSlotToItem.Length ? targetSlotToItem[candSlot] : -1;
+						if (candItemIdx >= 0
+							&& candItemIdx < itemCount
+							&& IsValidGuideItemKind(items[candItemIdx].Kind)
+							&& items[candItemIdx].SymmetryGroupId == curItem.SymmetryGroupId) {
+							destinationSlot = candSlot;
+							targetSlotSatisfied[candSlot] = 1;
+							break;
+						}
+					}
+				}
+
+				bool showMove = destinationSlot >= 0 && destinationSlot < unlockedSlots && destinationSlot != s;
+				outputStates[s] = new SlotGuideOverlayState(
+					true,
+					!showMove,
+					showMove,
+					destinationSlot,
+					false,
+					0,
+					showPriority,
+					hasValidTargetAtSlot
+				);
+			}
+		}
+
+		public static bool IsValidGuideItemKind(SlotItemKind kind) {
+			return kind == SlotItemKind.Artifact || kind == SlotItemKind.StoneTablet;
+		}
 		public static ExecutionPlan BuildExecutionPlan(
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> currentSlotToItem,
