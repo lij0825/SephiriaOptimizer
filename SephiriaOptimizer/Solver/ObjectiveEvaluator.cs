@@ -63,6 +63,9 @@ namespace SephiriaOptimizer.Solver {
 		public const int EngravingOutOfBoundsBonus = 45;
 		public const int SacrificeActiveTieBreakerScore = 15;
 		public const int MaxLevelOverflowTieBreakerBonus = 5;
+		public const int TabletPlusMinusCollisionPenalty = 240;
+		public const int TabletMinusOnNetPositiveSlotPenalty = 160;
+		public const int TabletCollisionEffectiveLevelLossPenalty = 180;
 
 		public static int Evaluate(
 			InventorySnapshot snapshot,
@@ -101,6 +104,8 @@ namespace SephiriaOptimizer.Solver {
 			Span<int> mulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> positiveBuffBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> negativePenaltyBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> posLevelSumBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> negLevelSumBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> effectiveLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> needleRootBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> chalcedonyCatBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
@@ -120,6 +125,8 @@ namespace SephiriaOptimizer.Solver {
 				disableBuf[s] = baseDis;
 				ignoreBuf[s] = baseIgn;
 				mulBuf[s] = baseMul;
+				posLevelSumBuf[s] = Math.Max(0, permLvl);
+				negLevelSumBuf[s] = Math.Max(0, -permLvl);
 				positiveBuffBuf[s] = Math.Max(0, permLvl) + baseIgn;
 				negativePenaltyBuf[s] = Math.Max(0, -permLvl) + (baseDis * 2);
 				effectiveLevelBuf[s] = 0;
@@ -163,8 +170,10 @@ namespace SephiriaOptimizer.Solver {
 								tabletDeltaBuf[targetSlot] += eff.LevelParam;
 								if (eff.LevelParam > 0) {
 									positiveBuffBuf[targetSlot] += eff.LevelParam;
+									posLevelSumBuf[targetSlot] += eff.LevelParam;
 								} else if (eff.LevelParam < 0) {
 									negativePenaltyBuf[targetSlot] += -eff.LevelParam;
+									negLevelSumBuf[targetSlot] += -eff.LevelParam;
 								}
 							} else if (eff.LevelParam > 0) {
 								tabletPlacementScore -= eff.LevelParam * WastedPositiveOutOfBoundsPenalty;
@@ -411,6 +420,44 @@ namespace SephiriaOptimizer.Solver {
 					|| disableBuf[s] > 0
 					|| displayedLevel <= -1
 					|| !criteriaSatisfied;
+
+				if (!absorbsPenalty) {
+					int rawPosLevels = posLevelSumBuf[s];
+					int rawNegLevels = negLevelSumBuf[s];
+					if (rawPosLevels > 0 && rawNegLevels > 0) {
+						int baseMul = mulBuf[s] != 0 ? Math.Abs(mulBuf[s]) : 1;
+						int mysticMul = (amplifiedMysticMask & (1UL << s)) != 0UL ? 2 : 1;
+						int slotMultiplier = Math.Max(1, baseMul * mysticMul);
+						int rawCanceled = Math.Min(rawPosLevels, rawNegLevels);
+						int canceledPositiveBuff = rawCanceled * slotMultiplier;
+						int collisionPenalty = canceledPositiveBuff * TabletPlusMinusCollisionPenalty;
+						if (slotLevel > 0) {
+							collisionPenalty += (rawNegLevels * slotMultiplier)
+								* TabletMinusOnNetPositiveSlotPenalty;
+						}
+						if (!isDisabled && item.MaxLevel > 0) {
+							int positiveMul = mulBuf[s] > 0 ? mulBuf[s] : 1;
+							int unpenalizedSlotLevel = rawPosLevels * positiveMul * mysticMul;
+							int unpenalizedEffective = Math.Clamp(
+								item.BaseLevel + unpenalizedSlotLevel,
+								0,
+								item.MaxLevel
+							);
+							int actualEffective = Math.Clamp(displayedLevel, 0, item.MaxLevel);
+							int lostEffectiveLevels = Math.Max(0, unpenalizedEffective - actualEffective);
+							if (lostEffectiveLevels > 0) {
+								collisionPenalty += (int)Math.Round(
+									lostEffectiveLevels
+									* TabletCollisionEffectiveLevelLossPenalty
+									* GetNormalizedWeight(item)
+								);
+							}
+						}
+						totalScore -= collisionPenalty;
+					} else if (disableBuf[s] > 0 && posBuff > 0) {
+						totalScore -= posBuff * TabletPlusMinusCollisionPenalty;
+					}
+				}
 
 				if (isDisabled) {
 					isActiveBuf[s] = 0;

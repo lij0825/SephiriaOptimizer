@@ -3975,6 +3975,264 @@ namespace SephiriaOptimizer.Tests {
 			Assert.Equal(434, aboveEvalDps);
 		}
 
+		[Fact(DisplayName = "한 석판의 마이너스 효과가 다른 석판의 플러스 효과와 겹쳐 양수(>0)로 남는 손해 배치를 감지하고 무충돌 배치로 복원한다")]
+		public void Solve_ResolvesCrossTabletMinusPlusOverlapOnNetPositiveSlotAndRestoresFullBuff() {
+			int width = 4;
+			int height = 2;
+			int unlockedSlots = 8;
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			TabletPlacementRule[] bipolarPlus1Minus1Rules = CreateBipolarTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				1,
+				-1,
+				0,
+				-1
+			);
+
+			SlotItemSnapshot tabletA = CreateTablet(0, 2601, 0, 0, true, rightPlus2Rules, 1);
+			SlotItemSnapshot tabletB = CreateTablet(1, 2602, 2, 0, true, bipolarPlus1Minus1Rules, 2);
+			SlotItemSnapshot cap1Artifact = CreateArtifact(
+				2,
+				2603,
+				1,
+				0,
+				1,
+				6,
+				ArtifactConstraintType.None,
+				3
+			);
+			SlotItemSnapshot cap2Artifact = CreateArtifact(
+				3,
+				2604,
+				3,
+				0,
+				2,
+				8,
+				ArtifactConstraintType.None,
+				4
+			);
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new[] { tabletA, tabletB, cap1Artifact, cap2Artifact }
+			);
+
+			int[] collidingLayout = new[] { 0, 2, 1, 3, -1, -1, -1, -1 };
+			int[] collidingRots = new[] { 0, 0, 0, 0 };
+			SlotEvaluationDetail[] collidingDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				collidingLayout,
+				collidingRots
+			);
+			Assert.Equal(1, collidingDetails[1].DisplayedLevel);
+			Assert.Equal(1, collidingDetails[1].EffectiveLevel);
+
+			int[] cleanSameArtifactsLayout = new[] { 0, 2, 1, -1, -1, -1, 3, -1 };
+			int[] cleanSameArtifactsRots = new[] { 0, 3, 0, 0 };
+			int collidingScore = ObjectiveEvaluator.Evaluate(snapshot, collidingLayout, collidingRots);
+			int cleanRotatedScore = ObjectiveEvaluator.Evaluate(
+				snapshot,
+				cleanSameArtifactsLayout,
+				cleanSameArtifactsRots
+			);
+			Assert.True(cleanRotatedScore > collidingScore);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			int slotCap2 = result.BestItemToSlotIndex[3];
+			int slotCap1 = result.BestItemToSlotIndex[2];
+			Assert.True(slotCap2 >= 0);
+			Assert.True(slotCap1 >= 0);
+			Assert.Equal(2, result.BestSlotDetails[slotCap2].EffectiveLevel);
+			Assert.Equal(1, result.BestSlotDetails[slotCap1].EffectiveLevel);
+			Assert.True(result.BestScore > collidingScore);
+		}
+
+		[Fact(DisplayName = "5단계 석판 배치 알고리즘이 대규모 격자에서 석판 간 +/- 충돌과 아티팩트 고착 국소 최적점을 탈출한다")]
+		public void Solve_StagedAlgorithmEscapesCoupledTabletArtifactLocalMinimumInLargeGrid() {
+			int width = 5;
+			int height = 3;
+			int unlockedSlots = 15;
+
+			TabletPlacementRule[] bipolarPlus2Minus1Rules = CreateBipolarTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				2,
+				-1,
+				0,
+				-1
+			);
+			TabletPlacementRule[] verticalPlus2Minus1Rules = CreateBipolarTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				0,
+				1,
+				2,
+				0,
+				-1,
+				-1
+			);
+
+			SlotItemSnapshot tablet0 = CreateTablet(0, 2701, 1, 0, true, bipolarPlus2Minus1Rules, 1);
+			SlotItemSnapshot tablet1 = CreateTablet(1, 2702, 3, 2, true, bipolarPlus2Minus1Rules, 1);
+			SlotItemSnapshot tablet2 = CreateTablet(2, 2703, 7, 0, true, verticalPlus2Minus1Rules, 2);
+
+			SlotItemSnapshot[] items = new SlotItemSnapshot[11];
+			items[0] = tablet0;
+			items[1] = tablet1;
+			items[2] = tablet2;
+			for (int i = 3; i < 11; i++) {
+				int maxLv = i <= 6 ? 3 : 2;
+				int weight = i <= 6 ? 12 : 6;
+				int initSlot = i + 2;
+				items[i] = CreateArtifact(
+					i,
+					2700 + i,
+					initSlot,
+					0,
+					maxLv,
+					weight,
+					ArtifactConstraintType.None,
+					10 + i
+				);
+			}
+
+			InventorySnapshot snapshot = CreateSimpleSnapshot(width, height, unlockedSlots, items);
+
+			SlotEvaluationDetail[] initDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				snapshot.InitialSlotToItemIndex,
+				snapshot.InitialItemRotations
+			);
+			Assert.True(initDetails[2].DisplayedLevel > 0);
+
+			OptimizationSolver solver = new OptimizationSolver();
+			OptimizationResult result = solver.Solve(snapshot);
+
+			Assert.True(result.BestScore > result.InitialScore);
+
+			int totalEffectiveLevels = 0;
+			for (int s = 0; s < unlockedSlots; s++) {
+				int idx = result.BestSlotToItemIndex[s];
+				if (idx >= 3) {
+					Assert.True(result.BestSlotDetails[s].IsEnabled);
+					totalEffectiveLevels += result.BestSlotDetails[s].EffectiveLevel;
+				}
+			}
+			Assert.True(totalEffectiveLevels >= 6);
+		}
+
+		[Fact(DisplayName = "모든 슬롯이 가득 차고 다른 방향 회전 시 핵심 아티팩트가 비활성화되는 불가피한 경우에는 +/- 중첩으로 양수(>0) 유지를 허용한다")]
+		public void Solve_AllowsInevitablePlusMinusOverlapWhenAllOtherOrientationsDeactivateCoreArtifact() {
+			int width = 3;
+			int height = 1;
+			int unlockedSlots = 3;
+
+			TabletPlacementRule[] rightPlus2Rules = CreateDirectionalTabletRules(
+				width,
+				height,
+				unlockedSlots,
+				1,
+				0,
+				TabletEffectType.IncreaseConstLevel,
+				2
+			);
+			TabletPlacementRule[] leftOrRightMinus1Rules = new TabletPlacementRule[unlockedSlots * 4];
+			for (int s = 0; s < unlockedSlots; s++) {
+				int x = s % width;
+				int y = s / width;
+				for (int rot = 0; rot < 4; rot++) {
+					int dx = (rot & 1) == 0 ? -1 : 1;
+					int targetSlot = CoordToSlot(x + dx, y, width, height, unlockedSlots);
+					PrecomputedEffect[] effs = new[] {
+						new PrecomputedEffect(
+							(sbyte)(x + dx),
+							(sbyte)y,
+							targetSlot,
+							TabletEffectType.IncreaseConstLevel,
+							-1
+						)
+					};
+					leftOrRightMinus1Rules[(s * 4) + rot] = new TabletPlacementRule(
+						Array.Empty<PrecomputedCondition>(),
+						effs
+					);
+				}
+			}
+
+			SlotItemSnapshot pinnedLeftPlus2Tablet = CreateTablet(0, 2801, 0, 0, false, rightPlus2Rules, 1);
+			SlotItemSnapshot centerArtifact = CreateArtifact(
+				1,
+				2802,
+				1,
+				0,
+				2,
+				10,
+				ArtifactConstraintType.None,
+				2
+			);
+			SlotItemSnapshot pinnedRightMinus1Tablet = CreateTablet(
+				2,
+				2803,
+				2,
+				1,
+				true,
+				leftOrRightMinus1Rules,
+				3
+			);
+
+			bool[] pinned = new[] { true, false, false };
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				pinned,
+				true,
+				1,
+				new[] { pinnedLeftPlus2Tablet, centerArtifact, pinnedRightMinus1Tablet }
+			);
+
+			int[] forcedOverlapLayout = new[] { 0, 1, 2 };
+			int[] overlapRots = new[] { 0, 0, 0 };
+			SlotEvaluationDetail[] overlapDetails = ObjectiveEvaluator.EvaluateDetailed(
+				snapshot,
+				forcedOverlapLayout,
+				overlapRots
+			);
+			Assert.True(overlapDetails[1].IsEnabled);
+			Assert.Equal(1, overlapDetails[1].DisplayedLevel);
+
+			int[] deactivatedLayout = new[] { 0, 2, 1 };
+			int[] deactivatedRots = new[] { 0, 0, 1 };
+			int overlapScore = ObjectiveEvaluator.Evaluate(snapshot, forcedOverlapLayout, overlapRots);
+			int deactivatedScore = ObjectiveEvaluator.Evaluate(snapshot, deactivatedLayout, deactivatedRots);
+			Assert.True(overlapScore > deactivatedScore);
+		}
+
 
 		private static int CountBits(ulong mask) {
 			int count = 0;
@@ -4106,6 +4364,51 @@ namespace SephiriaOptimizer.Tests {
 							targetSlot,
 							effectType,
 							levelParam
+						)
+					};
+					rules[(slotIdx * 4) + rot] = new TabletPlacementRule(
+						Array.Empty<PrecomputedCondition>(),
+						effects
+					);
+				}
+			}
+			return rules;
+		}
+
+		private static TabletPlacementRule[] CreateBipolarTabletRules(
+			int width,
+			int height,
+			int unlockedSlots,
+			int posBaseDx,
+			int posBaseDy,
+			int posLevelParam,
+			int negBaseDx,
+			int negBaseDy,
+			int negLevelParam
+		) {
+			TabletPlacementRule[] rules = new TabletPlacementRule[unlockedSlots * 4];
+			for (int slotIdx = 0; slotIdx < unlockedSlots; slotIdx++) {
+				int x = slotIdx % width;
+				int y = slotIdx / width;
+				for (int rot = 0; rot < 4; rot++) {
+					(int pDx, int pDy) = RotateOffset(posBaseDx, posBaseDy, rot);
+					(int nDx, int nDy) = RotateOffset(negBaseDx, negBaseDy, rot);
+					int posTarget = CoordToSlot(x + pDx, y + pDy, width, height, unlockedSlots);
+					int negTarget = CoordToSlot(x + nDx, y + nDy, width, height, unlockedSlots);
+					PrecomputedEffect[] effects = new[] {
+						new PrecomputedEffect(
+							(sbyte)(x + pDx),
+							(sbyte)(y + pDy),
+							posTarget,
+							TabletEffectType.IncreaseConstLevel,
+							posLevelParam
+						),
+						new PrecomputedEffect(
+							(sbyte)(x + nDx),
+							(sbyte)(y + nDy),
+							negTarget,
+							TabletEffectType.IncreaseConstLevel,
+							negLevelParam
 						)
 					};
 					rules[(slotIdx * 4) + rot] = new TabletPlacementRule(
