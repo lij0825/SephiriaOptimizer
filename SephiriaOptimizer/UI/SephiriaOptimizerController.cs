@@ -17,8 +17,6 @@ namespace SephiriaOptimizer.UI {
 		private const float CollapsedPanelWidth = 224f;
 		private const float CollapsedPanelHeight = 32f;
 		private const float ScreenEdgeMargin = 12f;
-		private const float BreakdownTooltipWidth = 442f;
-		private const float BreakdownTooltipHeight = 294f;
 
 		private static readonly (string Id, string KorName)[] ChalcedonyComboTags = new[] {
 			("STURDY", "견고"),
@@ -78,8 +76,6 @@ namespace SephiriaOptimizer.UI {
 
 		private bool isPanelCollapsed;
 		private Rect lastRenderedSidePanelRect;
-		private Rect lastRenderedDpsBoxRect;
-		private bool isDpsBoxHovered;
 		private DpsTooltipCache cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
 
 		private bool isOverlayEnabled = true;
@@ -103,12 +99,6 @@ namespace SephiriaOptimizer.UI {
 		private GUIStyle? badgeStyle;
 		private GUIStyle? coordBadgeStyle;
 		private GUIStyle? pinTagStyle;
-		private GUIStyle? tooltipTitleStyle;
-		private GUIStyle? tooltipSectionHeaderStyle;
-		private GUIStyle? tooltipValueStyle;
-		private GUIStyle? tooltipDescStyle;
-		private GUIStyle? tooltipWarningStyle;
-		private GUIStyle? tooltipTotalStyle;
 
 		public void InitializeModContext(string? loadedModVersion, string? loadedModDirectory) {
 			if (!string.IsNullOrWhiteSpace(loadedModDirectory)) {
@@ -244,10 +234,6 @@ namespace SephiriaOptimizer.UI {
 			if (isConfigPanelOpen && latestSnapshot != null) {
 				DrawConfigPanel(statusPanel, inventory, latestSnapshot);
 			}
-
-			if (isDpsBoxHovered && !isPanelCollapsed) {
-				DrawDpsBreakdownTooltip();
-			}
 		}
 
 		public void ClearGuides() {
@@ -255,7 +241,6 @@ namespace SephiriaOptimizer.UI {
 			latestSnapshot = null;
 			pendingTaskSnapshot = null;
 			selectedSlotIndex = -1;
-			isDpsBoxHovered = false;
 			lastObservedStateHash = 0;
 			cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
 		}
@@ -596,7 +581,6 @@ namespace SephiriaOptimizer.UI {
 			DrawRectBorder(panelRect, borderColor, 1.5f);
 
 			if (isPanelCollapsed) {
-				isDpsBoxHovered = false;
 				DrawCollapsedPanelHeader(panelRect, showVersionStrip || showUpdateStrip);
 				return;
 			}
@@ -614,7 +598,6 @@ namespace SephiriaOptimizer.UI {
 
 			if (GUI.Button(new Rect(panelRect.xMax - 31f, curY, 23f, 22f), "—", compactButtonStyle!)) {
 				isPanelCollapsed = true;
-				isDpsBoxHovered = false;
 				SaveLayoutPreferences();
 				return;
 			}
@@ -629,16 +612,7 @@ namespace SephiriaOptimizer.UI {
 			}
 
 			Rect dpsBox = new Rect(padX, curY, innerWidth, 42f);
-			lastRenderedDpsBoxRect = dpsBox;
-			isDpsBoxHovered = Event.current != null && dpsBox.Contains(Event.current.mousePosition);
-
-			Color dpsBoxBg = isDpsBoxHovered
-				? new Color(0.14f, 0.20f, 0.30f, 0.96f)
-				: new Color(0.11f, 0.15f, 0.22f, 0.92f);
-			DrawColoredBox(dpsBox, dpsBoxBg);
-			if (isDpsBoxHovered) {
-				DrawRectBorder(dpsBox, new Color(0.45f, 0.82f, 1.0f, 0.92f), 1f);
-			}
+			DrawColoredBox(dpsBox, new Color(0.11f, 0.15f, 0.22f, 0.92f));
 
 			GUI.Label(
 				new Rect(padX + 6f, curY + 3f, innerWidth - 12f, 19f),
@@ -1825,137 +1799,6 @@ namespace SephiriaOptimizer.UI {
 			}
 		}
 
-		private void DrawDpsBreakdownTooltip() {
-			if (!cachedDpsTooltip.IsPopulated) {
-				RefreshCachedDpsTooltip();
-			}
-
-			(float clampedX, float clampedY) = DpsEstimator.ComputeClampedTooltipPosition(
-				lastRenderedDpsBoxRect.xMin,
-				lastRenderedDpsBoxRect.yMin,
-				BreakdownTooltipWidth,
-				BreakdownTooltipHeight,
-				Screen.width,
-				Screen.height,
-				ScreenEdgeMargin
-			);
-
-			float maxTooltipX = Mathf.Max(ScreenEdgeMargin, Screen.width - BreakdownTooltipWidth - ScreenEdgeMargin);
-			float maxTooltipY = Mathf.Max(ScreenEdgeMargin, Screen.height - BreakdownTooltipHeight - ScreenEdgeMargin);
-			Rect tooltipRect = new Rect(
-				Mathf.Clamp(clampedX, ScreenEdgeMargin, maxTooltipX),
-				Mathf.Clamp(clampedY, ScreenEdgeMargin, maxTooltipY),
-				BreakdownTooltipWidth,
-				BreakdownTooltipHeight
-			);
-
-			DrawColoredBox(tooltipRect, new Color(0.04f, 0.06f, 0.11f, 0.98f));
-			DrawRectBorder(tooltipRect, new Color(0.38f, 0.72f, 1.0f, 0.95f), 1.5f);
-
-			float padX = tooltipRect.x + 12f;
-			float innerW = tooltipRect.width - 24f;
-			float curY = tooltipRect.y + 8f;
-
-			GUI.Label(
-				new Rect(padX, curY, innerW, 20f),
-				cachedDpsTooltip.TooltipTitle,
-				tooltipTitleStyle!
-			);
-			curY += 22f;
-			DrawHorizontalDivider(padX, curY, innerW, new Color(0.32f, 0.52f, 0.78f, 0.75f));
-			curY += 5f;
-
-			GUI.Label(
-				new Rect(padX, curY, innerW, 18f),
-				cachedDpsTooltip.BaseDpsHeader,
-				tooltipSectionHeaderStyle!
-			);
-			curY += 18f;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 19f),
-				cachedDpsTooltip.BaseDpsValueLine,
-				tooltipValueStyle!
-			);
-			curY += 18f;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 17f),
-				cachedDpsTooltip.BaseDpsDescLine,
-				tooltipDescStyle!
-			);
-			curY += 20f;
-			DrawHorizontalDivider(padX, curY, innerW, new Color(0.24f, 0.34f, 0.48f, 0.65f));
-			curY += 5f;
-
-			if (cachedDpsTooltip.HasGoldenNeedleWarning) {
-				Rect needleWarnBox = new Rect(padX - 4f, curY - 2f, innerW + 8f, 56f);
-				DrawColoredBox(needleWarnBox, new Color(0.36f, 0.22f, 0.05f, 0.42f));
-				DrawRectBorder(needleWarnBox, new Color(0.95f, 0.68f, 0.18f, 0.78f), 1f);
-			}
-
-			GUI.Label(
-				new Rect(padX, curY, innerW, 18f),
-				cachedDpsTooltip.GoldenNeedleHeader,
-				tooltipSectionHeaderStyle!
-			);
-			curY += 18f;
-			GUIStyle needleValStyle = cachedDpsTooltip.HasGoldenNeedleWarning
-				? tooltipWarningStyle!
-				: tooltipValueStyle!;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 19f),
-				cachedDpsTooltip.GoldenNeedleValueLine,
-				needleValStyle
-			);
-			curY += 18f;
-			GUIStyle needleDescStyle = cachedDpsTooltip.HasGoldenNeedleWarning
-				? tooltipWarningStyle!
-				: tooltipDescStyle!;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 17f),
-				cachedDpsTooltip.GoldenNeedleStatusLine,
-				needleDescStyle
-			);
-			curY += 20f;
-			DrawHorizontalDivider(padX, curY, innerW, new Color(0.24f, 0.34f, 0.48f, 0.65f));
-			curY += 5f;
-
-			GUI.Label(
-				new Rect(padX, curY, innerW, 18f),
-				cachedDpsTooltip.HarmonyHeader,
-				tooltipSectionHeaderStyle!
-			);
-			curY += 18f;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 19f),
-				cachedDpsTooltip.HarmonyValueLine,
-				tooltipValueStyle!
-			);
-			curY += 18f;
-			GUI.Label(
-				new Rect(padX + 6f, curY, innerW - 6f, 17f),
-				cachedDpsTooltip.HarmonyAddedDpsLine,
-				tooltipDescStyle!
-			);
-			curY += 21f;
-			DrawHorizontalDivider(padX, curY, innerW, new Color(0.38f, 0.72f, 1.0f, 0.85f));
-			curY += 6f;
-
-			Rect summaryBox = new Rect(padX - 4f, curY, innerW + 8f, 44f);
-			DrawColoredBox(summaryBox, new Color(0.09f, 0.16f, 0.26f, 0.94f));
-			DrawRectBorder(summaryBox, new Color(0.32f, 0.78f, 0.56f, 0.85f), 1f);
-
-			GUI.Label(
-				new Rect(padX + 4f, curY + 3f, innerW - 8f, 20f),
-				cachedDpsTooltip.TotalSummaryLine,
-				tooltipTotalStyle!
-			);
-			GUI.Label(
-				new Rect(padX + 4f, curY + 23f, innerW - 8f, 18f),
-				cachedDpsTooltip.ShareSummaryLine,
-				subHeaderStyle!
-			);
-		}
-
 		private void EnsureGuiStyles() {
 			if (headerLabelStyle != null) {
 				return;
@@ -2024,39 +1867,6 @@ namespace SephiriaOptimizer.UI {
 				fontStyle = FontStyle.Bold,
 				normal = { textColor = new Color(1f, 0.85f, 0.1f, 1f) }
 			};
-			tooltipTitleStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 12,
-				fontStyle = FontStyle.Bold,
-				normal = { textColor = new Color(0.58f, 0.92f, 1f, 1f) }
-			};
-			tooltipSectionHeaderStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 11,
-				fontStyle = FontStyle.Bold,
-				normal = { textColor = new Color(0.88f, 0.92f, 0.98f, 1f) }
-			};
-			tooltipValueStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 11,
-				fontStyle = FontStyle.Bold,
-				normal = { textColor = new Color(0.98f, 0.99f, 1f, 1f) }
-			};
-			tooltipDescStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 10,
-				normal = { textColor = new Color(0.72f, 0.80f, 0.90f, 1f) }
-			};
-			tooltipWarningStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 11,
-				fontStyle = FontStyle.Bold,
-				normal = { textColor = new Color(1f, 0.75f, 0.22f, 1f) }
-			};
-			tooltipTotalStyle = new GUIStyle(GUI.skin.label) {
-				fontSize = 12,
-				fontStyle = FontStyle.Bold,
-				normal = { textColor = new Color(0.38f, 1f, 0.64f, 1f) }
-			};
-		}
-
-		private static void DrawHorizontalDivider(float x, float y, float width, Color color) {
-			DrawColoredBox(new Rect(x, y, width, 1f), color);
 		}
 
 		private static void DrawColoredBox(Rect rect, Color color) {
