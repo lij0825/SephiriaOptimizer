@@ -76,7 +76,6 @@ namespace SephiriaOptimizer.UI {
 
 		private bool isPanelCollapsed;
 		private Rect lastRenderedSidePanelRect;
-		private DpsTooltipCache cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
 
 		private bool isOverlayEnabled = true;
 		private bool isPinModeEnabled;
@@ -242,7 +241,6 @@ namespace SephiriaOptimizer.UI {
 			pendingTaskSnapshot = null;
 			selectedSlotIndex = -1;
 			lastObservedStateHash = 0;
-			cachedDpsTooltip = DpsTooltipCache.CreateIdle(string.Empty);
 		}
 
 		private void InvalidateStaleGuidesOnInventoryChange(GridInventory inventory) {
@@ -290,7 +288,6 @@ namespace SephiriaOptimizer.UI {
 				pendingTaskSnapshot = snapshot;
 				if (latestSnapshot == null) {
 					latestSnapshot = snapshot;
-					RefreshCachedDpsTooltip();
 				}
 				activeSolveTask = Task.Run(() => solver.Solve(snapshot));
 			} catch (Exception ex) {
@@ -308,7 +305,6 @@ namespace SephiriaOptimizer.UI {
 					OptimizationResult result = activeSolveTask.Result;
 					latestSnapshot = pendingTaskSnapshot;
 					latestResult = result;
-					RefreshCachedDpsTooltip();
 				}
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Solver task failed: {ex.Message}");
@@ -377,16 +373,14 @@ namespace SephiriaOptimizer.UI {
 
 			latestSnapshot = snapshot;
 			latestResult = result;
-			RefreshCachedDpsTooltip();
 
-			bool noImprovement = result.BestEstimatedDps <= result.InitialEstimatedDps
-				&& result.BestScore <= result.InitialScore;
+			bool noImprovement = result.BestScore <= result.InitialScore;
 			if (noImprovement || plan.TotalOperations == 0) {
-				SetStatusBanner($"이미 최적 배치 상태입니다 (예상 DPS: {result.BestEstimatedDps:N0} DPS).");
+				SetStatusBanner("이미 최적 배치 상태입니다.");
 				return;
 			}
 
-			StartCoroutine(ExecuteAutoSwapCoroutine(statusPanel, avatar, inventory, snapshot, plan, result));
+			StartCoroutine(ExecuteAutoSwapCoroutine(statusPanel, avatar, inventory, snapshot, plan));
 		}
 
 		private IEnumerator ExecuteAutoSwapCoroutine(
@@ -394,8 +388,7 @@ namespace SephiriaOptimizer.UI {
 			PlayerAvatar avatar,
 			GridInventory inventory,
 			InventorySnapshot snapshot,
-			ExecutionPlan plan,
-			OptimizationResult targetResult
+			ExecutionPlan plan
 		) {
 			isAutoSwapRunning = true;
 			SetStatusBanner($"자동 정렬 중... (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)");
@@ -486,12 +479,8 @@ namespace SephiriaOptimizer.UI {
 
 			isAutoSwapRunning = false;
 			lastObservedStateHash = 0;
-			string pctStr = targetResult.EstimatedDpsGainPercent >= 0.0
-				? $"+{targetResult.EstimatedDpsGainPercent:F1}%"
-				: $"{targetResult.EstimatedDpsGainPercent:F1}%";
 			SetStatusBanner(
-				$"재배치 완료: {targetResult.InitialEstimatedDps:N0} DPS -> "
-				+ $"{targetResult.BestEstimatedDps:N0} DPS ({pctStr}, {plan.SwapSteps.Count}회 스왑)"
+				$"재배치 완료 (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)"
 			);
 		}
 
@@ -610,21 +599,6 @@ namespace SephiriaOptimizer.UI {
 			if (showUpdateStrip) {
 				curY = DrawReleaseUpdateStrip(padX, curY, innerWidth);
 			}
-
-			Rect dpsBox = new Rect(padX, curY, innerWidth, 42f);
-			DrawColoredBox(dpsBox, new Color(0.11f, 0.15f, 0.22f, 0.92f));
-
-			GUI.Label(
-				new Rect(padX + 6f, curY + 3f, innerWidth - 12f, 19f),
-				cachedDpsTooltip.PanelMainDpsLine,
-				headerLabelStyle!
-			);
-			GUI.Label(
-				new Rect(padX + 6f, curY + 21f, innerWidth - 12f, 18f),
-				cachedDpsTooltip.PanelSubDpsLine,
-				subHeaderStyle!
-			);
-			curY += 47f;
 
 			bool isSwapLocked = compatibilityReport != null && compatibilityReport.ShouldLockAutoSwap;
 			string runBtnText = isSwapLocked ? "자동 정렬 잠김 (API 변경)" : "자동 정렬 실행";
@@ -847,7 +821,7 @@ namespace SephiriaOptimizer.UI {
 		}
 
 		private float CalculateExpandedPanelHeight(bool showVersionStrip, bool showUpdateStrip) {
-			float totalHeight = 234f;
+			float totalHeight = 187f;
 			if (showVersionStrip) {
 				totalHeight += 47f;
 			}
@@ -1579,27 +1553,6 @@ namespace SephiriaOptimizer.UI {
 			GUI.Label(badgeRect, label, badgeStyle!);
 		}
 
-		private static string BuildTalentSummaryBadge(InventorySnapshot? snapshot) {
-			if (snapshot == null) {
-				return string.Empty;
-			}
-			List<string> tags = new List<string>(3);
-			TalentRuleSnapshot rules = snapshot.TalentRules;
-			if (rules.TabletEngravingCount > 0) {
-				tags.Add($"각인:{rules.TabletEngravingCount}");
-			}
-			if (rules.UniquePairCount > 0) {
-				tags.Add($"한쌍:{rules.UniquePairCount}");
-			}
-			if (rules.UnlimitedComboStat > 0) {
-				tags.Add("무한콤보");
-			}
-			if (tags.Count == 0) {
-				return string.Empty;
-			}
-			return " | " + string.Join(",", tags);
-		}
-
 		private static string GetPriorityShortLabel(ArtifactPriorityTier tier) {
 			return tier switch {
 				ArtifactPriorityTier.Core => "최상",
@@ -1774,29 +1727,6 @@ namespace SephiriaOptimizer.UI {
 
 		private void SetStatusBanner(string message) {
 			statusBannerText = message;
-		}
-
-		private void RefreshCachedDpsTooltip() {
-			string talentBadge = BuildTalentSummaryBadge(latestSnapshot);
-			if (latestResult != null) {
-				cachedDpsTooltip = DpsEstimator.BuildTooltipCache(
-					latestResult.CurrentBreakdown,
-					latestResult.OptimizedBreakdown,
-					latestResult.UsedExactBranchAndBound,
-					latestResult.ElapsedMilliseconds,
-					talentBadge
-				);
-			} else if (latestSnapshot != null) {
-				cachedDpsTooltip = DpsEstimator.BuildTooltipCache(
-					latestSnapshot.CurrentBreakdown,
-					null,
-					false,
-					0.0,
-					talentBadge
-				);
-			} else {
-				cachedDpsTooltip = DpsTooltipCache.CreateIdle(talentBadge);
-			}
 		}
 
 		private void EnsureGuiStyles() {

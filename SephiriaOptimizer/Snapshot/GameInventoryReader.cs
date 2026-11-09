@@ -655,14 +655,6 @@ namespace SephiriaOptimizer.Snapshot {
 						}
 						effectiveReloadSeconds = crossbow.reloadTime / Math.Max(0.2f, reloadSpeedFactor);
 					}
-				} else if (weapon is WeaponSimple_Staff staff) {
-					if (staff.fireIntervalTimer != null && staff.fireIntervalTimer.time > 0.02f) {
-						baseSwingRate = Math.Clamp(1.0f / staff.fireIntervalTimer.time, 0.4f, 20.0f);
-					}
-					if (staff.ammoCount > 0 && staff.reloadTimer != null && staff.reloadTimer.time > 0.02f) {
-						magazineCapacity = staff.ammoCount;
-						effectiveReloadSeconds = staff.reloadTimer.time;
-					}
 				}
 
 				if (weapon is WeaponSimple_GreatSword greatSword

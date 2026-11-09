@@ -48,7 +48,7 @@ namespace SephiriaOptimizer.Solver {
 		public const int WhitePaperGeneralCopiedBonus = 120;
 		public const int WhitePaperCopiedBonus = WhitePaperGeneralCopiedBonus;
 		public const int WhitePaperWastedPenalty = 300;
-		public const int WastedPositiveOnEmptySlotPenalty = 140;
+		public const int WastedPositiveOnEmptySlotPenalty = 360;
 		public const int WastedMultiplierPenalty = 90;
 		public const int IgnoreConstraintSynergyBonus = 95;
 		public const int ConnectedCharmSynergyBonus = 60;
@@ -63,16 +63,16 @@ namespace SephiriaOptimizer.Solver {
 		public const int EngravingOutOfBoundsBonus = 45;
 		public const int SacrificeActiveTieBreakerScore = 15;
 		public const int MaxLevelOverflowTieBreakerBonus = 5;
-		public const int TabletPlusMinusCollisionPenalty = 240;
-		public const int TabletMinusOnNetPositiveSlotPenalty = 160;
-		public const int TabletCollisionEffectiveLevelLossPenalty = 180;
+		public const int TabletPlusMinusCollisionPenalty = 950;
+		public const int TabletMinusOnNetPositiveSlotPenalty = 650;
+		public const int TabletCollisionEffectiveLevelLossPenalty = 320;
 
 		public static int Evaluate(
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations
 		) {
-			return EvaluateWithDps(snapshot, slotToItemIndex, itemRotations, out _);
+			return EvaluateInternal(snapshot, slotToItemIndex, itemRotations, false, out _);
 		}
 
 		public static int CalculateEstimatedDummyDps(
@@ -80,7 +80,7 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations
 		) {
-			EvaluateWithDps(snapshot, slotToItemIndex, itemRotations, out int estimatedDps);
+			EvaluateInternal(snapshot, slotToItemIndex, itemRotations, true, out int estimatedDps);
 			return estimatedDps;
 		}
 
@@ -88,6 +88,16 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations,
+			out int estimatedDps
+		) {
+			return EvaluateInternal(snapshot, slotToItemIndex, itemRotations, true, out estimatedDps);
+		}
+
+		private static int EvaluateInternal(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<int> itemRotations,
+			bool computeDps,
 			out int estimatedDps
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
@@ -372,7 +382,6 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			int totalScore = tabletPlacementScore;
-			int activeNonSacrificeArtifactCount = 0;
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
@@ -481,7 +490,6 @@ namespace SephiriaOptimizer.Solver {
 					continue;
 				}
 
-				activeNonSacrificeArtifactCount++;
 				double artifactWeight = GetNormalizedWeight(item);
 				int levelScore = item.MaxLevel > 0 ? (effectiveLevel * EffectiveLevelScoreMultiplier) : 0;
 				int maxBonus = (item.MaxLevel > 0 && effectiveLevel == item.MaxLevel) ? MaxLevelReachedBonus : 0;
@@ -495,6 +503,9 @@ namespace SephiriaOptimizer.Solver {
 				int artifactScore = (int)Math.Round(
 					(BaseActiveArtifactScore + levelScore + maxBonus + ignoreBonus) * artifactWeight
 				);
+				if (slotLevel < 0) {
+					artifactScore -= (-slotLevel) * 140;
+				}
 				if (displayedLevel > item.MaxLevel && slotLevel > 0) {
 					int overflowLevels = Math.Min(displayedLevel - item.MaxLevel, slotLevel);
 					artifactScore += overflowLevels * MaxLevelOverflowTieBreakerBonus;
@@ -628,20 +639,19 @@ namespace SephiriaOptimizer.Solver {
 				totalScore += EvaluateArrangementPatterns(snapshot, slotToItemIndex);
 			}
 
-			estimatedDps = ComputeEstimatedDummyDpsFromState(
-				snapshot,
-				slotToItemIndex,
-				isActiveBuf,
-				effectiveLevelBuf,
-				needleRootBuf,
-				chalcedonyCatBuf,
-				dynamicComboBonusCounts,
-				out int baseWeaponOnlyDps
-			);
-
-			if (activeNonSacrificeArtifactCount > 0) {
-				int artifactInducedDps = Math.Max(0, estimatedDps - baseWeaponOnlyDps);
-				totalScore += artifactInducedDps * DpsScaleFactor;
+			if (computeDps) {
+				estimatedDps = ComputeEstimatedDummyDpsFromState(
+					snapshot,
+					slotToItemIndex,
+					isActiveBuf,
+					effectiveLevelBuf,
+					needleRootBuf,
+					chalcedonyCatBuf,
+					dynamicComboBonusCounts,
+					out _
+				);
+			} else {
+				estimatedDps = 0;
 			}
 
 			return totalScore;

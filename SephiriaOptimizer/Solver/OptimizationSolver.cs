@@ -74,7 +74,6 @@ namespace SephiriaOptimizer.Solver {
 					bestSlots,
 					bestRotations,
 					ref bestScore,
-					ref bestEstimatedDps,
 					ref evaluations
 				);
 			}
@@ -115,19 +114,12 @@ namespace SephiriaOptimizer.Solver {
 				);
 			}
 
-			bestEstimatedDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
-				snapshot,
-				bestSlots,
-				bestRotations
-			);
-
 			if (HasAnyStoneTablet(snapshot)) {
 				RunTabletCollisionRepairPass(
 					snapshot,
 					bestSlots,
 					bestRotations,
 					ref bestScore,
-					ref bestEstimatedDps,
 					ref evaluations
 				);
 			}
@@ -137,9 +129,18 @@ namespace SephiriaOptimizer.Solver {
 				bestSlots,
 				bestRotations,
 				ref bestScore,
-				ref bestEstimatedDps,
 				ref evaluations
 			);
+
+			if (HasAnyStoneTablet(snapshot)) {
+				RunTabletCollisionRepairPass(
+					snapshot,
+					bestSlots,
+					bestRotations,
+					ref bestScore,
+					ref evaluations
+				);
+			}
 
 			bestScore = ObjectiveEvaluator.EvaluateWithDps(
 				snapshot,
@@ -1071,27 +1072,11 @@ namespace SephiriaOptimizer.Solver {
 			return false;
 		}
 
-		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static bool IsBetterPolishCandidate(
-			int candidateScore,
-			int candidateDps,
-			int bestScore,
-			int bestDps
-		) {
-			int nonDpsPenaltyDrop = (bestScore - (bestDps * ObjectiveEvaluator.DpsScaleFactor))
-				- (candidateScore - (candidateDps * ObjectiveEvaluator.DpsScaleFactor));
-			if (candidateDps > bestDps && nonDpsPenaltyDrop < 2000) {
-				return true;
-			}
-			return candidateDps >= bestDps && candidateScore > bestScore;
-		}
-
 		private static void RunDeterministicPolish(
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
 			ref int bestScore,
-			ref int bestDps,
 			ref int evaluations
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
@@ -1119,16 +1104,14 @@ namespace SephiriaOptimizer.Solver {
 							continue;
 						}
 						bestRotations[i] = rot;
-						int score = ObjectiveEvaluator.EvaluateWithDps(
+						int score = ObjectiveEvaluator.Evaluate(
 							snapshot,
 							bestSlots,
-							bestRotations,
-							out int candidateDps
+							bestRotations
 						);
 						evaluations++;
-						if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+						if (score > bestScore) {
 							bestScore = score;
-							bestDps = candidateDps;
 							bestRotForItem = rot;
 							improved = true;
 						}
@@ -1157,16 +1140,14 @@ namespace SephiriaOptimizer.Solver {
 									continue;
 								}
 								bestRotations[iB] = rB;
-								int score = ObjectiveEvaluator.EvaluateWithDps(
+								int score = ObjectiveEvaluator.Evaluate(
 									snapshot,
 									bestSlots,
-									bestRotations,
-									out int candidateDps
+									bestRotations
 								);
 								evaluations++;
-								if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+								if (score > bestScore) {
 									bestScore = score;
-									bestDps = candidateDps;
 									bestPairRotA = rA;
 									bestPairRotB = rB;
 									pairImproved = true;
@@ -1213,16 +1194,14 @@ namespace SephiriaOptimizer.Solver {
 								bestRotations[itemA] = rA;
 								for (int rB = 0; rB < 4; rB++) {
 									bestRotations[itemB] = rB;
-									int score = ObjectiveEvaluator.EvaluateWithDps(
+									int score = ObjectiveEvaluator.Evaluate(
 										snapshot,
 										bestSlots,
-										bestRotations,
-										out int candidateDps
+										bestRotations
 									);
 									evaluations++;
-									if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+									if (score > bestScore) {
 										bestScore = score;
-										bestDps = candidateDps;
 										bestSwapRotA = rA;
 										bestSwapRotB = rB;
 										swapImproved = true;
@@ -1248,16 +1227,14 @@ namespace SephiriaOptimizer.Solver {
 
 							for (int r = 0; r < 4; r++) {
 								bestRotations[rotTarget] = r;
-								int score = ObjectiveEvaluator.EvaluateWithDps(
+								int score = ObjectiveEvaluator.Evaluate(
 									snapshot,
 									bestSlots,
-									bestRotations,
-									out int candidateDps
+									bestRotations
 								);
 								evaluations++;
-								if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+								if (score > bestScore) {
 									bestScore = score;
-									bestDps = candidateDps;
 									bestSwapRot = r;
 									swapImproved = true;
 									improved = true;
@@ -1272,16 +1249,14 @@ namespace SephiriaOptimizer.Solver {
 								bestSlots[sB] = itemB;
 							}
 						} else {
-							int score = ObjectiveEvaluator.EvaluateWithDps(
+							int score = ObjectiveEvaluator.Evaluate(
 								snapshot,
 								bestSlots,
-								bestRotations,
-								out int candidateDps
+								bestRotations
 							);
 							evaluations++;
-							if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+							if (score > bestScore) {
 								bestScore = score;
-								bestDps = candidateDps;
 								improved = true;
 							} else {
 								bestSlots[sA] = itemA;
@@ -1326,7 +1301,6 @@ namespace SephiriaOptimizer.Solver {
 								bestSlots,
 								bestRotations,
 								ref bestScore,
-								ref bestDps,
 								ref evaluations
 							)) {
 								improved = true;
@@ -1347,7 +1321,6 @@ namespace SephiriaOptimizer.Solver {
 			int[] bestSlots,
 			int[] bestRotations,
 			ref int bestScore,
-			ref int bestDps,
 			ref int evaluations
 		) {
 			if (topB == botA) {
@@ -1357,16 +1330,14 @@ namespace SephiriaOptimizer.Solver {
 				bestSlots[topA] = i2;
 				bestSlots[botA] = i0;
 				bestSlots[botB] = i1;
-				int score = ObjectiveEvaluator.EvaluateWithDps(
+				int score = ObjectiveEvaluator.Evaluate(
 					snapshot,
 					bestSlots,
-					bestRotations,
-					out int candidateDps
+					bestRotations
 				);
 				evaluations++;
-				if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+				if (score > bestScore) {
 					bestScore = score;
-					bestDps = candidateDps;
 					return true;
 				}
 				bestSlots[topA] = i0;
@@ -1382,16 +1353,14 @@ namespace SephiriaOptimizer.Solver {
 				bestSlots[topB] = i1;
 				bestSlots[topA] = i2;
 				bestSlots[botA] = i0;
-				int score = ObjectiveEvaluator.EvaluateWithDps(
+				int score = ObjectiveEvaluator.Evaluate(
 					snapshot,
 					bestSlots,
-					bestRotations,
-					out int candidateDps
+					bestRotations
 				);
 				evaluations++;
-				if (IsBetterPolishCandidate(score, candidateDps, bestScore, bestDps)) {
+				if (score > bestScore) {
 					bestScore = score;
-					bestDps = candidateDps;
 					return true;
 				}
 				bestSlots[topB] = i0;
@@ -1408,16 +1377,14 @@ namespace SephiriaOptimizer.Solver {
 			bestSlots[botA] = bBot;
 			bestSlots[topB] = aTop;
 			bestSlots[botB] = aBot;
-			int disjointScore = ObjectiveEvaluator.EvaluateWithDps(
+			int disjointScore = ObjectiveEvaluator.Evaluate(
 				snapshot,
 				bestSlots,
-				bestRotations,
-				out int disjointDps
+				bestRotations
 			);
 			evaluations++;
-			if (IsBetterPolishCandidate(disjointScore, disjointDps, bestScore, bestDps)) {
+			if (disjointScore > bestScore) {
 				bestScore = disjointScore;
-				bestDps = disjointDps;
 				return true;
 			}
 			bestSlots[topA] = aTop;
@@ -1536,22 +1503,10 @@ namespace SephiriaOptimizer.Solver {
 				int maxLvlScore = (int)Math.Ceiling(rawBaseMax * weight)
 					+ (32 * ObjectiveEvaluator.MaxLevelOverflowTieBreakerBonus);
 
-				int maxDpsScore = 0;
-				if (item.IsAttackableCharm) {
-					double maxRawAttackDps = item.GetAttackRawDpsAtLevel(item.MaxLevel) * 3.5;
-					maxDpsScore += (int)Math.Ceiling(maxRawAttackDps * ObjectiveEvaluator.DpsScaleFactor);
-				}
-				float maxStatPct = item.GetStatBonusPercentAtLevel(item.MaxLevel);
-				if (maxStatPct > 0f) {
-					maxDpsScore += (int)Math.Ceiling(maxStatPct * 18.0 * ObjectiveEvaluator.DpsScaleFactor);
-				}
-				maxLvlScore += maxDpsScore;
-
 				if (item.HasDependencyTarget) {
 					SlotItemSnapshot[] allItems = snapshot.Items;
 					double maxRootWeight = 1.0;
 					int maxRootMaxLevel = 0;
-					double maxRootDps = 200.0;
 					for (int i = 0; i < allItems.Length; i++) {
 						SlotItemSnapshot cand = allItems[i];
 						if (cand.Kind == SlotItemKind.Artifact && cand.IsAttackableCharm) {
@@ -1562,10 +1517,6 @@ namespace SephiriaOptimizer.Solver {
 							if (cand.MaxLevel > maxRootMaxLevel) {
 								maxRootMaxLevel = cand.MaxLevel;
 							}
-							double candDps = cand.GetAttackRawDpsAtLevel(cand.MaxLevel);
-							if (candDps > maxRootDps) {
-								maxRootDps = candDps;
-							}
 						}
 					}
 					double maxAmpFactor = 1.0 + (0.25 * (item.MaxLevel + 1));
@@ -1573,13 +1524,9 @@ namespace SephiriaOptimizer.Solver {
 						* (ObjectiveEvaluator.GoldenNeedleRootLevelFactor * maxRootMaxLevel)
 						* maxRootWeight
 						+ (35.0 * (item.MaxLevel + 1));
-					int maxNeedlePct = item.GetNeedleBonusPercent(item.MaxLevel, 0);
-					int maxNeedleDpsGain = (int)Math.Ceiling(
-						maxRootDps * (maxNeedlePct * 0.01) * 3.0 * ObjectiveEvaluator.DpsScaleFactor
-					);
 					int maxNeedleSynergy = (int)Math.Ceiling(
 						ObjectiveEvaluator.GoldenNeedleLinkBaseBonus * maxRootWeight
-					) + (int)Math.Ceiling(maxNeedleAmp) + maxNeedleDpsGain + 250;
+					) + (int)Math.Ceiling(maxNeedleAmp) + 250;
 					maxLvlScore += maxNeedleSynergy;
 				}
 
@@ -1594,22 +1541,18 @@ namespace SephiriaOptimizer.Solver {
 					float maxRate = item.GetCrystalRatePerLevel(item.MaxLevel);
 					int maxHarmonyBonus = (int)Math.Ceiling(
 						8 * maxNeighborLv * maxRate * ObjectiveEvaluator.CrystalNeighborLevelFactor * weight
-					) + (8 * ObjectiveEvaluator.CrystalNeighborSlotBonus)
-						+ (int)Math.Ceiling(8 * maxNeighborLv * maxRate * 25.0 * ObjectiveEvaluator.DpsScaleFactor)
-						+ 120;
+					) + (8 * ObjectiveEvaluator.CrystalNeighborSlotBonus) + 120;
 					maxLvlScore += maxHarmonyBonus;
 				}
 
 				if (item.IsElementalByRowCharm) {
 					int maxElemBonus = item.GetRowElementalBonus(item.MaxLevel);
 					maxLvlScore += ObjectiveEvaluator.ChalcedonyTargetMatchBonus
-						+ (maxElemBonus * 50 * ObjectiveEvaluator.DpsScaleFactor)
-						+ 800;
+						+ (maxElemBonus * 140)
+						+ 400;
 				}
 				if (item.IsWhitePaperCharm) {
-					maxLvlScore += ObjectiveEvaluator.WhitePaperTargetCopiedBonus
-						+ (150 * ObjectiveEvaluator.DpsScaleFactor)
-						+ 200;
+					maxLvlScore += ObjectiveEvaluator.WhitePaperTargetCopiedBonus + 200;
 				}
 				return maxLvlScore + 100;
 			}
@@ -1644,12 +1587,11 @@ namespace SephiriaOptimizer.Solver {
 		}
 
 		private static int ComputeGlobalComboAndPatternPotential(InventorySnapshot snapshot) {
-			int potential = 2500 + (400 * ObjectiveEvaluator.DpsScaleFactor);
+			int potential = 2500;
 			ComboCategoryInfo[] cats = snapshot.ComboCategories;
 			for (int i = 0; i < cats.Length; i++) {
 				potential += (cats[i].Breakpoints.Length * ObjectiveEvaluator.TargetComboBreakpointBonus)
-					+ (8 * ObjectiveEvaluator.TargetComboDynamicStackBonus)
-					+ (150 * ObjectiveEvaluator.DpsScaleFactor);
+					+ (8 * ObjectiveEvaluator.TargetComboDynamicStackBonus);
 			}
 			if (snapshot.TalentRules.ArrangementBonusStat > 0) {
 				potential += snapshot.TalentRules.ArrangementPatterns.Length
@@ -1783,7 +1725,6 @@ namespace SephiriaOptimizer.Solver {
 			int[] bestSlots,
 			int[] bestRotations,
 			ref int bestScore,
-			ref int bestDps,
 			ref int evaluations
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
@@ -1794,7 +1735,7 @@ namespace SephiriaOptimizer.Solver {
 			Span<int> candidateSlots = stackalloc int[unlockedSlots];
 			Span<int> candidateRotations = stackalloc int[itemCount];
 
-			for (int mode = 0; mode < 2; mode++) {
+			for (int mode = 0; mode < 3; mode++) {
 				candidateSlots.Fill(-1);
 				snapshot.InitialItemRotations.AsSpan(0, itemCount).CopyTo(candidateRotations);
 
@@ -1812,22 +1753,20 @@ namespace SephiriaOptimizer.Solver {
 					snapshot,
 					candidateSlots,
 					candidateRotations,
-					placeFromScratch: mode == 0
+					mode
 				);
 				AssignArtifactsToTabletField(snapshot, candidateSlots, candidateRotations);
 				RunArtifactOnlyLocalPolish(snapshot, candidateSlots, candidateRotations, ref evaluations);
 
-				int score = ObjectiveEvaluator.EvaluateWithDps(
+				int score = ObjectiveEvaluator.Evaluate(
 					snapshot,
 					candidateSlots,
-					candidateRotations,
-					out int dps
+					candidateRotations
 				);
 				evaluations++;
 
-				if (IsBetterPolishCandidate(score, dps, bestScore, bestDps) || score > bestScore) {
+				if (score > bestScore) {
 					bestScore = score;
-					bestDps = dps;
 					candidateSlots.CopyTo(bestSlots);
 					candidateRotations.CopyTo(bestRotations);
 				}
@@ -1838,7 +1777,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			Span<int> tabletSlots,
 			Span<int> tabletRotations,
-			bool placeFromScratch
+			int mode
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			SlotItemSnapshot[] items = snapshot.Items;
@@ -1861,9 +1800,9 @@ namespace SephiriaOptimizer.Solver {
 				return;
 			}
 
-			SortTabletsByFieldImpact(items, unpinnedTablets, tabletCount);
+			SortTabletsByFieldImpact(items, unpinnedTablets, tabletCount, negativeFirst: mode == 2);
 
-			if (placeFromScratch) {
+			if (mode != 1) {
 				for (int t = 0; t < tabletCount; t++) {
 					int tabletIdx = unpinnedTablets[t];
 					SlotItemSnapshot tablet = items[tabletIdx];
@@ -2756,7 +2695,6 @@ namespace SephiriaOptimizer.Solver {
 			int[] bestSlots,
 			int[] bestRotations,
 			ref int bestScore,
-			ref int bestDps,
 			ref int evaluations
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
@@ -2836,17 +2774,15 @@ namespace SephiriaOptimizer.Solver {
 							AssignArtifactsToTabletField(snapshot, workingSlots, workingRotations);
 							RunArtifactOnlyLocalPolish(snapshot, workingSlots, workingRotations, ref evaluations);
 
-							int score = ObjectiveEvaluator.EvaluateWithDps(
+							int score = ObjectiveEvaluator.Evaluate(
 								snapshot,
 								workingSlots,
-								workingRotations,
-								out int dps
+								workingRotations
 							);
 							evaluations++;
 
-							if (IsBetterPolishCandidate(score, dps, bestScore, bestDps)) {
+							if (score > bestScore) {
 								bestScore = score;
-								bestDps = dps;
 								workingSlots.CopyTo(bestSlots);
 								workingRotations.CopyTo(bestRotations);
 								baselineFieldScore = candFieldScore;
@@ -2914,13 +2850,14 @@ namespace SephiriaOptimizer.Solver {
 		private static void SortTabletsByFieldImpact(
 			SlotItemSnapshot[] items,
 			Span<int> tablets,
-			int count
+			int count,
+			bool negativeFirst
 		) {
 			for (int i = 1; i < count; i++) {
 				int keyIdx = tablets[i];
-				int keyImpact = GetTabletFieldImpactScore(items[keyIdx]);
+				int keyImpact = GetTabletFieldImpactScore(items[keyIdx], negativeFirst);
 				int j = i - 1;
-				while (j >= 0 && GetTabletFieldImpactScore(items[tablets[j]]) < keyImpact) {
+				while (j >= 0 && GetTabletFieldImpactScore(items[tablets[j]], negativeFirst) < keyImpact) {
 					tablets[j + 1] = tablets[j];
 					j--;
 				}
@@ -2928,7 +2865,7 @@ namespace SephiriaOptimizer.Solver {
 			}
 		}
 
-		private static int GetTabletFieldImpactScore(SlotItemSnapshot tablet) {
+		private static int GetTabletFieldImpactScore(SlotItemSnapshot tablet, bool negativeFirst) {
 			if (tablet.PlacementRules.Length == 0) {
 				return 0;
 			}
@@ -2939,11 +2876,11 @@ namespace SephiriaOptimizer.Solver {
 				PrecomputedEffect eff = effects[e];
 				switch (eff.EffectType) {
 					case TabletEffectType.MultiplyConstLevel: {
-						score += 800;
+						score += negativeFirst ? 300 : 800;
 						break;
 					}
 					case TabletEffectType.Disable: {
-						score += 350;
+						score += negativeFirst ? 900 : 350;
 						break;
 					}
 					case TabletEffectType.IgnoreCriteria: {
@@ -2951,7 +2888,11 @@ namespace SephiriaOptimizer.Solver {
 						break;
 					}
 					case TabletEffectType.IncreaseConstLevel: {
-						score += Math.Abs(eff.LevelParam) * 120;
+						if (eff.LevelParam < 0) {
+							score += (-eff.LevelParam) * (negativeFirst ? 500 : 120);
+						} else {
+							score += eff.LevelParam * (negativeFirst ? 90 : 120);
+						}
 						break;
 					}
 				}
