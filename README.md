@@ -5,7 +5,7 @@
 세피리아 인벤토리의 석판과 아티팩트 배치를 계산해서 정렬해 주는 모드
 
 [![Release](https://img.shields.io/github/v/release/lij0825/SephiriaOptimizer?style=flat-square&color=2ea44f)](https://github.com/lij0825/SephiriaOptimizer/releases/latest)
-[![Sephiria](https://img.shields.io/badge/Sephiria-1.0.33-3b82f6?style=flat-square)](https://store.steampowered.com/app/2436940/Sephiria/)
+[![Sephiria](https://img.shields.io/badge/Sephiria-1.1.3-3b82f6?style=flat-square)](https://store.steampowered.com/app/2436940/Sephiria/)
 [![Platform](https://img.shields.io/badge/Windows%20%7C%20Steam%20Deck%20%7C%20macOS-6366f1?style=flat-square)](#설치)
 
 </div>
@@ -17,7 +17,7 @@
 
 ## 설치
 
-1. [릴리즈 페이지](https://github.com/lij0825/SephiriaOptimizer/releases/latest)에서 `SephiriaOptimizer_v2.2.0.zip`을 받아 압축을 풉니다.
+1. [릴리즈 페이지](https://github.com/lij0825/SephiriaOptimizer/releases/latest)에서 `SephiriaOptimizer_v2.3.0.zip`을 받아 압축을 풉니다.
 2. 설치 파일을 실행합니다.
    - Windows: `Install.bat` 더블클릭
    - Steam Deck / Linux / macOS: 터미널에서 `chmod +x install.sh && ./install.sh`

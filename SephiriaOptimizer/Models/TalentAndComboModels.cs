@@ -947,9 +947,41 @@ namespace SephiriaOptimizer.Models {
 
 	public sealed class ArrangementPattern {
 		public ArrangementOffsetEntry[] Entries { get; }
+		public int[] RequiredEntityIds { get; }
+		public CombatStatDelta StatDelta { get; }
 
 		public ArrangementPattern(ArrangementOffsetEntry[] entries) {
 			Entries = entries ?? Array.Empty<ArrangementOffsetEntry>();
+			if (Entries.Length == 0) {
+				RequiredEntityIds = Array.Empty<int>();
+			} else {
+				int[] ids = new int[Entries.Length];
+				for (int i = 0; i < Entries.Length; i++) {
+					ids[i] = Entries[i].RequiredEntityId;
+				}
+				RequiredEntityIds = ids;
+			}
+			StatDelta = CombatStatDelta.Zero;
+		}
+
+		public ArrangementPattern(
+			int[] requiredEntityIds,
+			CombatStatDelta statDelta = default,
+			ArrangementOffsetEntry[]? entries = null
+		) {
+			RequiredEntityIds = requiredEntityIds ?? Array.Empty<int>();
+			StatDelta = statDelta;
+			if (entries != null) {
+				Entries = entries;
+			} else if (RequiredEntityIds.Length == 0) {
+				Entries = Array.Empty<ArrangementOffsetEntry>();
+			} else {
+				ArrangementOffsetEntry[] built = new ArrangementOffsetEntry[RequiredEntityIds.Length];
+				for (int i = 0; i < RequiredEntityIds.Length; i++) {
+					built[i] = new ArrangementOffsetEntry((sbyte)i, 0, RequiredEntityIds[i]);
+				}
+				Entries = built;
+			}
 		}
 	}
 

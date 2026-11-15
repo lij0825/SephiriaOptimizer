@@ -24,6 +24,8 @@ namespace SephiriaOptimizer.Models {
 		public bool HasDependencyTarget { get; }
 		public sbyte DependencyOffsetX { get; }
 		public sbyte DependencyOffsetY { get; }
+		public (sbyte X, sbyte Y)[] DependencyParentOffsets { get; }
+		public bool IsCompassBreakthrough { get; }
 		public bool HasDependencyCondition { get; }
 		public int DependencyMaxRarity { get; }
 		public int[] NeedleDamageBonusByLevel { get; }
@@ -107,7 +109,9 @@ namespace SephiriaOptimizer.Models {
 			float[]? finalDamagePercentByLevel = null,
 			CombatStatDelta[]? statDeltaByLevel = null,
 			byte charmScalingElementKind = 0,
-			float[]? charmElementalPercentByLevel = null
+			float[]? charmElementalPercentByLevel = null,
+			(sbyte X, sbyte Y)[]? dependencyParentOffsets = null,
+			bool isCompassBreakthrough = false
 		) {
 			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
@@ -131,10 +135,22 @@ namespace SephiriaOptimizer.Models {
 			HasDependencyTarget = hasDependencyTarget;
 			DependencyOffsetX = dependencyOffsetX;
 			DependencyOffsetY = dependencyOffsetY;
+			if (dependencyParentOffsets != null && dependencyParentOffsets.Length > 0) {
+				DependencyParentOffsets = dependencyParentOffsets;
+			} else if (hasDependencyTarget && (dependencyOffsetX != 0 || dependencyOffsetY != 0)) {
+				DependencyParentOffsets = new (sbyte X, sbyte Y)[] {
+					(dependencyOffsetX, dependencyOffsetY)
+				};
+			} else {
+				DependencyParentOffsets = Array.Empty<(sbyte X, sbyte Y)>();
+			}
+			IsCompassBreakthrough = isCompassBreakthrough;
 			HasDependencyCondition = hasDependencyCondition;
 			DependencyMaxRarity = dependencyMaxRarity;
-			NeedleDamageBonusByLevel = needleDamageBonusByLevel ?? new[] { 5, 10, 15, 20, 30 };
-			NeedleDependencyBonusByLevel = needleDependencyBonusByLevel ?? new[] { 5, 10, 15, 20, 30 };
+			NeedleDamageBonusByLevel = needleDamageBonusByLevel
+				?? (isCompassBreakthrough ? Array.Empty<int>() : new[] { 5, 10, 15, 20, 30 });
+			NeedleDependencyBonusByLevel = needleDependencyBonusByLevel
+				?? (isCompassBreakthrough ? Array.Empty<int>() : new[] { 5, 10, 15, 20, 30 });
 			IsElementalByRowCharm = isElementalByRowCharm;
 			RowCategoryIds = rowCategoryIds ?? Array.Empty<int>();
 			RowElementalBonusByLevel = rowElementalBonusByLevel ?? new[] { 2, 4, 6, 8 };
@@ -189,10 +205,17 @@ namespace SephiriaOptimizer.Models {
 			return TabletPlacementRule.Empty;
 		}
 
-		public int GetNeedleBonusPercent(int needleEffectiveLevel, int rootRarityTier) {
+		public int GetNeedleBonusPercent(
+			int needleEffectiveLevel,
+			int rootRarityTier,
+			bool bypassRarityCondition = false
+		) {
+			if (IsCompassBreakthrough && NeedleDamageBonusByLevel.Length == 0) {
+				return 0;
+			}
 			int levelIdx = Math.Clamp(needleEffectiveLevel, 0, Math.Max(0, NeedleDamageBonusByLevel.Length - 1));
 			int bonus = NeedleDamageBonusByLevel.Length > 0 ? NeedleDamageBonusByLevel[levelIdx] : 10;
-			if (HasDependencyCondition && rootRarityTier <= DependencyMaxRarity) {
+			if (HasDependencyCondition && (bypassRarityCondition || rootRarityTier <= DependencyMaxRarity)) {
 				int depIdx = Math.Clamp(needleEffectiveLevel, 0, Math.Max(0, NeedleDependencyBonusByLevel.Length - 1));
 				bonus += NeedleDependencyBonusByLevel.Length > 0 ? NeedleDependencyBonusByLevel[depIdx] : 10;
 			}

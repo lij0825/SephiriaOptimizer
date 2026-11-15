@@ -502,7 +502,8 @@ namespace SephiriaOptimizer.UI {
 			if (avatar.IsInBattle || avatar.IsDead || !inventory.IsPickable) {
 				return false;
 			}
-			return statusPanel.InventoryMode == UI_CharacterStatusPanel.EInventoryMode.None;
+			return statusPanel.InventoryMode == UI_CharacterStatusPanel.EInventoryMode.None
+				&& statusPanel.ItemInteractionBinding == null;
 		}
 
 		private static bool IsCursorHoldingAnyItem() {

@@ -8,8 +8,8 @@ using UnityEngine;
 namespace SephiriaOptimizer.Update {
 	public static class ModVersionConstants {
 		public const string ModName = "SephiriaOptimizer";
-		public const string CurrentModVersion = "2.2.0";
-		public const string DefaultTargetGameVersion = "1.0.33";
+		public const string CurrentModVersion = "2.3.0";
+		public const string DefaultTargetGameVersion = "1.1.3";
 		public const string SteamAppId = "2436940";
 		public const string SteamRunGameUri = "steam://rungameid/2436940";
 		public const string ModDllFileName = "SephiriaOptimizer.dll";

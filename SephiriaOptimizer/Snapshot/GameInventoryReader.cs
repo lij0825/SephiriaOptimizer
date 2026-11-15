@@ -171,18 +171,41 @@ namespace SephiriaOptimizer.Snapshot {
 						|| charm is Charm_RightSpellCooldownHelper;
 					bool isAttackable = charm is IAttackableCharm attackable && attackable.IsAttackableCharm();
 
-					bool hasDependency = charm is Charm_UpCharmDamage;
-					sbyte depX = charm is Charm_UpCharmDamage upX ? upX.xOffset : (sbyte)0;
-					sbyte depY = charm is Charm_UpCharmDamage upY ? upY.yOffset : (sbyte)0;
-					bool hasDepCond = charm is Charm_UpCharmDamage upCond && upCond.hasDependencyCondition;
-					int depMaxRarity = charm is Charm_UpCharmDamage upRar ? (int)upRar.maxRarity : 1;
-					int[]? needleDmg = charm is Charm_UpCharmDamage upDmg && upDmg.damageBonusByLevel != null
+					bool hasDependency = charm is Charm_Compass;
+					bool isCompassBreakthrough = charm is Charm_CompassBreakthrough;
+					sbyte depX = 0;
+					sbyte depY = 0;
+					(sbyte X, sbyte Y)[]? depOffsets = null;
+					if (charm is Charm_Compass compassCharm
+						&& compassCharm.parentOffsets != null
+						&& compassCharm.parentOffsets.Length > 0) {
+						List<(sbyte X, sbyte Y)> offsetList = new List<(sbyte X, sbyte Y)>(
+							compassCharm.parentOffsets.Length
+						);
+						for (int p = 0; p < compassCharm.parentOffsets.Length; p++) {
+							UnityEngine.Vector2Int rawOff = compassCharm.parentOffsets[p];
+							if (rawOff.x == 0 && rawOff.y == 0) {
+								continue;
+							}
+							sbyte ox = (sbyte)Math.Clamp(rawOff.x, sbyte.MinValue, sbyte.MaxValue);
+							sbyte oy = (sbyte)Math.Clamp(rawOff.y, sbyte.MinValue, sbyte.MaxValue);
+							offsetList.Add((ox, oy));
+						}
+						if (offsetList.Count > 0) {
+							depOffsets = offsetList.ToArray();
+							depX = depOffsets[0].X;
+							depY = depOffsets[0].Y;
+						}
+					}
+					bool hasDepCond = charm is Charm_CompassDamageUp upCond && upCond.hasDependencyCondition;
+					int depMaxRarity = charm is Charm_CompassDamageUp upRar ? (int)upRar.maxRarity : 1;
+					int[]? needleDmg = charm is Charm_CompassDamageUp upDmg && upDmg.damageBonusByLevel != null
 						? (int[])upDmg.damageBonusByLevel.Clone()
-						: null;
-					int[]? needleDepDmg = charm is Charm_UpCharmDamage upDep
+						: (isCompassBreakthrough ? Array.Empty<int>() : null);
+					int[]? needleDepDmg = charm is Charm_CompassDamageUp upDep
 						&& upDep.dependencyDamageBonusByLevel != null
 						? (int[])upDep.dependencyDamageBonusByLevel.Clone()
-						: null;
+						: (isCompassBreakthrough ? Array.Empty<int>() : null);
 
 					bool isElementalByRow = charm is Charm_3Elemental_ByRow;
 					int[]? rowCategoryIds = null;
@@ -228,13 +251,23 @@ namespace SephiriaOptimizer.Snapshot {
 					if (!isDynamicCategoryProvider) {
 						bool countStaticCombo = !talentRules.PreventOverlapItemCombo
 							|| seenStaticEntityIds.Add(entity.id);
+						int comboIncrement = 1;
+						if (inventory.uniquePairCount > 0
+							&& inventory.uniquePairAddedComboCount != null
+							&& inventory.uniquePairAddedComboCount.TryGetValue(
+								itemInstance.InstanceID,
+								out int extraPairCombo
+							)
+							&& extraPairCombo > 0) {
+							comboIncrement += extraPairCombo;
+						}
 						for (int c = 0; c < categories.Length; c++) {
 							if (categoryKeyToId.TryGetValue(categories[c], out int catId)
 								&& catId >= 0
 								&& catId < InventorySnapshot.MaxSupportedCategories) {
 								staticCatMask |= 1u << catId;
 								if (countStaticCombo) {
-									staticCategoryCounts[catId]++;
+									staticCategoryCounts[catId] += comboIncrement;
 								}
 							}
 						}
@@ -338,7 +371,9 @@ namespace SephiriaOptimizer.Snapshot {
 						finalDamagePercentByLevel,
 						statDeltaByLevel,
 						charmScalingElementKind,
-						charmElementalPercentByLevel
+						charmElementalPercentByLevel,
+						depOffsets,
+						isCompassBreakthrough
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet? tablet = ResolveSlotTablet(
@@ -1289,7 +1324,10 @@ namespace SephiriaOptimizer.Snapshot {
 					}
 
 					int effLv = Math.Clamp(liveCharm.limitedEffectEnabledLevel, 0, item.MaxLevel);
-					if (liveCharm is Charm_StatusInstance || liveCharm is Charm_CriticalChanceIncreaseWithTablets) {
+					if (liveCharm is Charm_StatusInstance
+						|| liveCharm is Charm_CriticalChanceIncreaseWithTablets
+						|| liveCharm is Charm_FinalDamageIncreaseWithPotions
+						|| liveCharm is Charm_IncreaseCriticalChance_NormalAttack) {
 						activeDelta = activeDelta.Add(item.GetStatDeltaAtLevel(effLv));
 					} else if (liveCharm is Charm_BurnWeaponDamage && BurnWeaponAddedField != null) {
 						object? rawAdded = BurnWeaponAddedField.GetValue(liveCharm);
@@ -1322,6 +1360,33 @@ namespace SephiriaOptimizer.Snapshot {
 					activeDelta = activeDelta.Add(
 						new CombatStatDelta(allDamageBonus: comboBonusDamageStat * liveActiveComboTypes)
 					);
+				}
+
+				if (inventory.ActiveArrangementBonusGroups != null
+					&& inventory.ActiveArrangementBonusGroups.Count > 0) {
+					HashSet<int> deductedBonusIds = new HashSet<int>();
+					for (int g = 0; g < inventory.ActiveArrangementBonusGroups.Count; g++) {
+						ArrangementBonusGroup group = inventory.ActiveArrangementBonusGroups[g];
+						ArrangementBonusEntity? bonus = group.bonus;
+						if (bonus == null
+							|| bonus.IsCombine
+							|| bonus.stats == null
+							|| !deductedBonusIds.Add(bonus.id)) {
+							continue;
+						}
+						for (int s = 0; s < bonus.stats.Length; s++) {
+							ArrangementBonusEntity.StatBonus statBonus = bonus.stats[s];
+							if (statBonus != null && !string.IsNullOrEmpty(statBonus.stat) && statBonus.value != 0) {
+								CombatStatDelta arrDelta = ConvertStatusIdToStatDelta(
+									statBonus.stat,
+									statBonus.value,
+									out _,
+									out _
+								);
+								activeDelta = activeDelta.Add(in arrDelta);
+							}
+						}
+					}
 				}
 
 				WeaponCombatProfile deductedProfile = rawBaseline.WeaponProfile.WithDeductedInventoryDelta(
@@ -1485,6 +1550,7 @@ namespace SephiriaOptimizer.Snapshot {
 				&& !isElementalByRow
 				&& statBonusPercentByLevel == null) {
 				ExtractReflectionStatBonusTable(
+					avatar,
 					charm,
 					fields,
 					levelCount,
@@ -1831,7 +1897,24 @@ namespace SephiriaOptimizer.Snapshot {
 			};
 		}
 
+		private static int CountInventoryPotions(PlayerAvatar? avatar) {
+			if (avatar == null || avatar.Inventory == null || avatar.Inventory.inventoryMatrix == null) {
+				return 0;
+			}
+			int count = 0;
+			foreach (NewItemOwnInstance? instance in avatar.Inventory.inventoryMatrix.Values) {
+				if (instance != null && instance.Quantity > 0) {
+					ItemEntity? entity = instance.Entity;
+					if (entity != null && entity.type == EItemType.Potion) {
+						count += instance.Quantity;
+					}
+				}
+			}
+			return count;
+		}
+
 		private static void ExtractReflectionStatBonusTable(
+			PlayerAvatar? avatar,
 			Charm_Basic charm,
 			FieldInfo[] fields,
 			int levelCount,
@@ -1841,6 +1924,21 @@ namespace SephiriaOptimizer.Snapshot {
 		) {
 			statResult = new float[levelCount];
 			deltaResult = new CombatStatDelta[levelCount];
+
+			if (charm is Charm_FinalDamageIncreaseWithPotions potionDmgCharm
+				&& potionDmgCharm.damageBonusByLevel != null) {
+				float[]? dmgArr = ConvertNumericArrayToFloat(potionDmgCharm.damageBonusByLevel);
+				if (dmgArr != null && dmgArr.Length > 0) {
+					float[] norm = NormalizeTableToLength(dmgArr, levelCount);
+					int potionCount = CountInventoryPotions(avatar);
+					for (int lv = 0; lv < levelCount; lv++) {
+						float allDmgBonus = Math.Max(0f, norm[lv] * potionCount);
+						statResult[lv] = allDmgBonus;
+						deltaResult[lv] = new CombatStatDelta(allDamageBonus: allDmgBonus);
+					}
+					return;
+				}
+			}
 
 			if (charm is Charm_BurnWeaponDamage burnWeapon && burnWeapon.addDamageByStackedBurn != null) {
 				float[]? burnArr = ConvertNumericArrayToFloat(burnWeapon.addDamageByStackedBurn);
@@ -2750,32 +2848,57 @@ namespace SephiriaOptimizer.Snapshot {
 
 			List<ArrangementPattern> patterns = new List<ArrangementPattern>();
 			if (arrangementBonus > 0) {
-				HashSet<int> ownedEntityIds = new HashSet<int>();
+				Dictionary<int, int> ownedEntityCounts = new Dictionary<int, int>();
 				foreach (NewItemOwnInstance inst in inventory.inventoryMatrix.Values) {
 					if (inst != null) {
-						ownedEntityIds.Add(inst.EntityID);
+						ownedEntityCounts[inst.EntityID] = ownedEntityCounts.GetValueOrDefault(inst.EntityID) + 1;
 					}
 				}
+				Dictionary<int, int> requiredCounts = new Dictionary<int, int>();
 				foreach (ArrangementBonusEntity bonusEntity in ItemDatabase.GetAllArrangementBonuses()) {
-					if (bonusEntity == null || !bonusEntity.isEnabled || bonusEntity.arrangements == null) {
+					if (!ArrangementBonusEntity.IsValid(bonusEntity) || bonusEntity.IsCombine) {
 						continue;
 					}
-					if (bonusEntity.arrangements.Length == 0) {
-						continue;
-					}
+					requiredCounts.Clear();
+					int[] requiredIds = new int[bonusEntity.arrangements.Length];
 					bool allOwned = true;
-					ArrangementOffsetEntry[] entries = new ArrangementOffsetEntry[bonusEntity.arrangements.Length];
 					for (int a = 0; a < bonusEntity.arrangements.Length; a++) {
 						ArrangementBonusEntity.Arrangement arr = bonusEntity.arrangements[a];
-						if (arr == null || arr.item == null || !ownedEntityIds.Contains(arr.item.id)) {
+						if (arr == null || arr.item == null) {
 							allOwned = false;
 							break;
 						}
-						entries[a] = new ArrangementOffsetEntry(arr.offset.x, arr.offset.y, arr.item.id);
+						int reqId = arr.item.id;
+						requiredIds[a] = reqId;
+						int nextReq = requiredCounts.GetValueOrDefault(reqId) + 1;
+						requiredCounts[reqId] = nextReq;
+						if (ownedEntityCounts.GetValueOrDefault(reqId) < nextReq) {
+							allOwned = false;
+							break;
+						}
 					}
-					if (allOwned) {
-						patterns.Add(new ArrangementPattern(entries));
+					if (!allOwned) {
+						continue;
 					}
+
+					CombatStatDelta bonusStatDelta = CombatStatDelta.Zero;
+					if (bonusEntity.stats != null) {
+						for (int s = 0; s < bonusEntity.stats.Length; s++) {
+							ArrangementBonusEntity.StatBonus statBonus = bonusEntity.stats[s];
+							if (statBonus != null
+								&& !string.IsNullOrEmpty(statBonus.stat)
+								&& statBonus.value != 0) {
+								CombatStatDelta singleDelta = ConvertStatusIdToStatDelta(
+									statBonus.stat,
+									statBonus.value,
+									out _,
+									out _
+								);
+								bonusStatDelta = bonusStatDelta.Add(in singleDelta);
+							}
+						}
+					}
+					patterns.Add(new ArrangementPattern(requiredIds, bonusStatDelta));
 				}
 			}
 
@@ -2987,7 +3110,7 @@ namespace SephiriaOptimizer.Snapshot {
 				if (charm is IAttackableCharm attackable && attackable.IsAttackableCharm()) {
 					rarityWeight += 3;
 				}
-				if (charm is Charm_UpCharmDamage || charm is Charm_NearLevelDamage) {
+				if (charm is Charm_Compass || charm is Charm_NearLevelDamage) {
 					rarityWeight += 3;
 				}
 			}

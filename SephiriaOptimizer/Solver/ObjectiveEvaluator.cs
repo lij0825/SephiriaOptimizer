@@ -118,6 +118,8 @@ namespace SephiriaOptimizer.Solver {
 			Span<int> negLevelSumBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> effectiveLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> needleRootBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<ulong> needleRootsMaskBuf = stackalloc ulong[InventorySnapshot.MaxSupportedSlots];
+			Span<ulong> needleBypassMaskBuf = stackalloc ulong[InventorySnapshot.MaxSupportedSlots];
 			Span<int> chalcedonyCatBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> isActiveBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> naturalCriteriaBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
@@ -141,6 +143,8 @@ namespace SephiriaOptimizer.Solver {
 				negativePenaltyBuf[s] = Math.Max(0, -permLvl) + (baseDis * 2);
 				effectiveLevelBuf[s] = 0;
 				needleRootBuf[s] = -1;
+				needleRootsMaskBuf[s] = 0UL;
+				needleBypassMaskBuf[s] = 0UL;
 				chalcedonyCatBuf[s] = -1;
 				isActiveBuf[s] = 0;
 				naturalCriteriaBuf[s] = 0;
@@ -297,10 +301,26 @@ namespace SephiriaOptimizer.Solver {
 				}
 				SlotItemSnapshot item = items[slotToItemIndex[s]];
 				if (item.HasDependencyTarget) {
-					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, isActiveBuf, s);
+					ResolveNeedleRootMasks(
+						snapshot,
+						slotToItemIndex,
+						isActiveBuf,
+						s,
+						out ulong rootsMask,
+						out ulong bypassMask,
+						out int rootSlot
+					);
 					needleRootBuf[s] = rootSlot;
-					if (rootSlot >= 0) {
-						uint rootCategories = categoryMaskBuf[rootSlot];
+					needleRootsMaskBuf[s] = rootsMask;
+					needleBypassMaskBuf[s] = bypassMask;
+					if (rootsMask != 0UL) {
+						uint rootCategories = 0u;
+						ulong iterMask = rootsMask;
+						while (iterMask != 0UL) {
+							int rSlot = BitOperations.TrailingZeroCount(iterMask);
+							iterMask &= iterMask - 1UL;
+							rootCategories |= categoryMaskBuf[rSlot];
+						}
 						categoryMaskBuf[s] |= rootCategories;
 						AccumulateMaskIntoComboCounts(rootCategories, dynamicComboBonusCounts);
 					}
@@ -551,26 +571,38 @@ namespace SephiriaOptimizer.Solver {
 					if (isActiveBuf[s] == 0) {
 						totalScore -= UnlinkedGoldenNeedlePenalty;
 					} else {
-						int rootSlot = needleRootBuf[s];
-						if (rootSlot >= 0 && isActiveBuf[rootSlot] != 0) {
+						ulong rootsMask = needleRootsMaskBuf[s];
+						ulong bypassMask = needleBypassMaskBuf[s];
+						int linkedRootCount = 0;
+						while (rootsMask != 0UL) {
+							int rootSlot = BitOperations.TrailingZeroCount(rootsMask);
+							rootsMask &= rootsMask - 1UL;
+							if (rootSlot < 0 || rootSlot >= unlockedSlots || isActiveBuf[rootSlot] == 0) {
+								continue;
+							}
 							SlotItemSnapshot rootItem = items[slotToItemIndex[rootSlot]];
 							double rootWeight = GetNeedleRootWeight(snapshot, rootItem);
 							if (rootWeight <= 0.0) {
-								totalScore -= UnlinkedGoldenNeedlePenalty;
-							} else {
-								int needleLevel = effectiveLevelBuf[s];
-								int rootLevel = effectiveLevelBuf[rootSlot];
-								int fixedLinkBonus = (int)Math.Round(GoldenNeedleLinkBaseBonus * rootWeight);
-								double ampFactor = 1.0 + (0.25 * (needleLevel + 1));
-								double multiplicativeAmp = ampFactor
-									* (GoldenNeedleRootLevelFactor * rootLevel)
-									* rootWeight;
-								if (item.HasDependencyCondition && rootItem.RarityTier <= item.DependencyMaxRarity) {
-									multiplicativeAmp += 35.0 * (needleLevel + 1);
-								}
-								totalScore += fixedLinkBonus + (int)Math.Round(multiplicativeAmp);
+								continue;
 							}
-						} else {
+							linkedRootCount++;
+							int needleLevel = effectiveLevelBuf[s];
+							int rootLevel = effectiveLevelBuf[rootSlot];
+							int fixedLinkBonus = (int)Math.Round(GoldenNeedleLinkBaseBonus * rootWeight);
+							double ampFactor = item.IsCompassBreakthrough
+								? 0.65
+								: (1.0 + (0.25 * (needleLevel + 1)));
+							double multiplicativeAmp = ampFactor
+								* (GoldenNeedleRootLevelFactor * rootLevel)
+								* rootWeight;
+							bool bypassRarity = (bypassMask & (1UL << rootSlot)) != 0UL;
+							if (item.HasDependencyCondition
+								&& (bypassRarity || rootItem.RarityTier <= item.DependencyMaxRarity)) {
+								multiplicativeAmp += 35.0 * (needleLevel + 1);
+							}
+							totalScore += fixedLinkBonus + (int)Math.Round(multiplicativeAmp);
+						}
+						if (linkedRootCount == 0) {
 							totalScore -= UnlinkedGoldenNeedlePenalty;
 						}
 					}
@@ -635,8 +667,13 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
+			CombatStatDelta matchedArrangementDelta = CombatStatDelta.Zero;
 			if (talentRules.ArrangementBonusStat > 0 && talentRules.ArrangementPatterns.Length > 0) {
-				totalScore += EvaluateArrangementPatterns(snapshot, slotToItemIndex);
+				totalScore += EvaluateArrangementPatterns(
+					snapshot,
+					slotToItemIndex,
+					out matchedArrangementDelta
+				);
 			}
 
 			if (computeDps) {
@@ -645,9 +682,11 @@ namespace SephiriaOptimizer.Solver {
 					slotToItemIndex,
 					isActiveBuf,
 					effectiveLevelBuf,
-					needleRootBuf,
+					needleRootsMaskBuf,
+					needleBypassMaskBuf,
 					chalcedonyCatBuf,
 					dynamicComboBonusCounts,
+					in matchedArrangementDelta,
 					out _
 				);
 			} else {
@@ -663,9 +702,11 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<byte> isActiveBuf,
 			ReadOnlySpan<int> effectiveLevelBuf,
-			ReadOnlySpan<int> needleRootBuf,
+			ReadOnlySpan<ulong> needleRootsMaskBuf,
+			ReadOnlySpan<ulong> needleBypassMaskBuf,
 			ReadOnlySpan<int> chalcedonyCatBuf,
 			ReadOnlySpan<int> dynamicComboBonusCounts,
+			in CombatStatDelta matchedArrangementDelta,
 			out int baseWeaponOnlyDps
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
@@ -690,17 +731,27 @@ namespace SephiriaOptimizer.Solver {
 					|| needleItem.PriorityTier == ArtifactPriorityTier.Sacrifice) {
 					continue;
 				}
-				int rootSlot = needleRootBuf[s];
-				if (rootSlot >= 0 && rootSlot < unlockedSlots && isActiveBuf[rootSlot] != 0) {
-					int rootItemIdx = slotToItemIndex[rootSlot];
-					if (rootItemIdx >= 0) {
-						SlotItemSnapshot rootItem = items[rootItemIdx];
-						if (rootItem.Kind == SlotItemKind.Artifact
-							&& rootItem.IsAttackableCharm
-							&& rootItem.PriorityTier != ArtifactPriorityTier.Sacrifice) {
-							int needleLv = effectiveLevelBuf[s];
-							int bonusPct = needleItem.GetNeedleBonusPercent(needleLv, rootItem.RarityTier);
-							needleBonusPctSumBySlot[rootSlot] += bonusPct;
+				ulong rootsMask = needleRootsMaskBuf[s];
+				ulong bypassMask = needleBypassMaskBuf[s];
+				while (rootsMask != 0UL) {
+					int rootSlot = BitOperations.TrailingZeroCount(rootsMask);
+					rootsMask &= rootsMask - 1UL;
+					if (rootSlot >= 0 && rootSlot < unlockedSlots && isActiveBuf[rootSlot] != 0) {
+						int rootItemIdx = slotToItemIndex[rootSlot];
+						if (rootItemIdx >= 0) {
+							SlotItemSnapshot rootItem = items[rootItemIdx];
+							if (rootItem.Kind == SlotItemKind.Artifact
+								&& rootItem.IsAttackableCharm
+								&& rootItem.PriorityTier != ArtifactPriorityTier.Sacrifice) {
+								int needleLv = effectiveLevelBuf[s];
+								bool bypassRarity = (bypassMask & (1UL << rootSlot)) != 0UL;
+								int bonusPct = needleItem.GetNeedleBonusPercent(
+									needleLv,
+									rootItem.RarityTier,
+									bypassRarity
+								);
+								needleBonusPctSumBySlot[rootSlot] += bonusPct;
+							}
 						}
 					}
 				}
@@ -713,7 +764,7 @@ namespace SephiriaOptimizer.Solver {
 
 			if (snapshot.CombatBaseline.HasDetailedWeaponProfile) {
 				baseWeaponOnlyDps = (int)Math.Round(snapshot.CombatBaseline.BaseWeaponDps);
-				CombatStatDelta totalDelta = CombatStatDelta.Zero;
+				CombatStatDelta totalDelta = matchedArrangementDelta;
 				double customFinalDamageMultiplier = 1.0;
 
 				for (int s = 0; s < unlockedSlots; s++) {
@@ -845,7 +896,12 @@ namespace SephiriaOptimizer.Solver {
 			baseWeaponOnlyDps = (int)Math.Round(baseWeaponRawDps * baseElemMultiplier * bucketCCritMultiplier);
 
 			double charmAttackRawDps = 0.0;
-			double statBonusPercentSum = snapshot.CombatBaseline.ElementalDamageBonusPercent;
+			double statBonusPercentSum = snapshot.CombatBaseline.ElementalDamageBonusPercent
+				+ matchedArrangementDelta.AllDamageBonus
+				+ matchedArrangementDelta.PhysicalDamage
+				+ matchedArrangementDelta.FireDamage
+				+ matchedArrangementDelta.IceDamage
+				+ matchedArrangementDelta.LightningDamage;
 			double finalDamageMultiplier = 1.0;
 
 			for (int s = 0; s < unlockedSlots; s++) {
@@ -1061,10 +1117,24 @@ namespace SephiriaOptimizer.Solver {
 					&& items[itemIdx].Kind == SlotItemKind.Artifact
 					&& items[itemIdx].HasDependencyTarget;
 				if (hasDep) {
-					int rootSlot = ResolveNeedleRootSlot(snapshot, slotToItemIndex, isActiveBuf, s);
+					ResolveNeedleRootMasks(
+						snapshot,
+						slotToItemIndex,
+						isActiveBuf,
+						s,
+						out ulong rootsMask,
+						out _,
+						out int rootSlot
+					);
 					connectedTargetBuf[s] = rootSlot;
-					if (rootSlot >= 0) {
-						uint rootCategories = categoryMaskBuf[rootSlot];
+					if (rootsMask != 0UL) {
+						uint rootCategories = 0u;
+						ulong iterMask = rootsMask;
+						while (iterMask != 0UL) {
+							int rSlot = BitOperations.TrailingZeroCount(iterMask);
+							iterMask &= iterMask - 1UL;
+							rootCategories |= categoryMaskBuf[rSlot];
+						}
 						categoryMaskBuf[s] |= rootCategories;
 						AccumulateMaskIntoComboCounts(rootCategories, dynamicComboBonusCounts);
 					}
@@ -1279,6 +1349,121 @@ namespace SephiriaOptimizer.Solver {
 			}
 		}
 
+		public static void ResolveNeedleRootMasks(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<byte> isActiveBuf,
+			int startNeedleSlot,
+			out ulong rootSlotsMask,
+			out ulong bypassRootSlotsMask,
+			out int primaryRootSlot
+		) {
+			rootSlotsMask = 0UL;
+			bypassRootSlotsMask = 0UL;
+			primaryRootSlot = -1;
+			if ((uint)startNeedleSlot >= (uint)snapshot.UnlockedSlots || isActiveBuf[startNeedleSlot] == 0) {
+				return;
+			}
+			int startItemIdx = slotToItemIndex[startNeedleSlot];
+			if (startItemIdx < 0) {
+				return;
+			}
+			SlotItemSnapshot[] items = snapshot.Items;
+			SlotItemSnapshot startItem = items[startItemIdx];
+			if (!startItem.HasDependencyTarget) {
+				return;
+			}
+
+			Span<byte> queueSlot = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> queueBypass = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			int head = 0;
+			int tail = 0;
+
+			bool initBypass = startItem.IsCompassBreakthrough;
+			ulong visitedNoBypass = initBypass ? 0UL : (1UL << startNeedleSlot);
+			ulong visitedWithBypass = initBypass ? (1UL << startNeedleSlot) : 0UL;
+			queueSlot[tail] = (byte)startNeedleSlot;
+			queueBypass[tail] = initBypass ? (byte)1 : (byte)0;
+			tail++;
+
+			while (head < tail) {
+				int curSlot = queueSlot[head];
+				bool curBypass = queueBypass[head] != 0;
+				head++;
+
+				SlotItemSnapshot curItem = items[slotToItemIndex[curSlot]];
+				(sbyte X, sbyte Y)[] offsets = curItem.DependencyParentOffsets;
+				SlotCoord coord = snapshot.Slots[curSlot];
+
+				for (int p = 0; p < offsets.Length; p++) {
+					int nextSlot = snapshot.CoordToSlotIndex(
+						coord.X + offsets[p].X,
+						coord.Y + offsets[p].Y
+					);
+					if (nextSlot < 0
+						|| nextSlot >= snapshot.UnlockedSlots
+						|| isActiveBuf[nextSlot] == 0) {
+						continue;
+					}
+					int nextItemIdx = slotToItemIndex[nextSlot];
+					if (nextItemIdx < 0) {
+						continue;
+					}
+					SlotItemSnapshot nextItem = items[nextItemIdx];
+					if (nextItem.Kind != SlotItemKind.Artifact) {
+						continue;
+					}
+
+					ulong nextBit = 1UL << nextSlot;
+					if (!nextItem.HasDependencyTarget) {
+						if (nextItem.IsAttackableCharm) {
+							if (primaryRootSlot < 0) {
+								primaryRootSlot = nextSlot;
+							}
+							rootSlotsMask |= nextBit;
+							if (curBypass) {
+								bypassRootSlotsMask |= nextBit;
+							}
+						}
+						continue;
+					}
+
+					if (nextItem.IsAttackableCharm) {
+						if (primaryRootSlot < 0) {
+							primaryRootSlot = nextSlot;
+						}
+						rootSlotsMask |= nextBit;
+						if (curBypass) {
+							bypassRootSlotsMask |= nextBit;
+						}
+					}
+
+					if (nextSlot == startNeedleSlot) {
+						continue;
+					}
+
+					bool nextBypass = curBypass || nextItem.IsCompassBreakthrough;
+					if (nextBypass) {
+						if ((visitedWithBypass & nextBit) == 0UL
+							&& tail < InventorySnapshot.MaxSupportedSlots) {
+							visitedWithBypass |= nextBit;
+							queueSlot[tail] = (byte)nextSlot;
+							queueBypass[tail] = 1;
+							tail++;
+						}
+					} else {
+						if (((visitedNoBypass | visitedWithBypass) & nextBit) == 0UL
+							&& tail < InventorySnapshot.MaxSupportedSlots) {
+							visitedNoBypass |= nextBit;
+							queueSlot[tail] = (byte)nextSlot;
+							queueBypass[tail] = 0;
+							tail++;
+						}
+					}
+				}
+			}
+		}
+
 		public static int ResolveNeedleRootSlot(
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> slotToItemIndex,
@@ -1287,39 +1472,20 @@ namespace SephiriaOptimizer.Solver {
 			if ((uint)startNeedleSlot >= (uint)snapshot.UnlockedSlots) {
 				return -1;
 			}
-			SlotItemSnapshot[] items = snapshot.Items;
-			ulong visitedMask = 1UL << startNeedleSlot;
-			int cursorSlot = startNeedleSlot;
-			int hopCount = 0;
-
-			while (hopCount <= 8) {
-				hopCount++;
-				int cursorItemIdx = slotToItemIndex[cursorSlot];
-				if (cursorItemIdx < 0) {
-					return -1;
-				}
-				SlotItemSnapshot cursorItem = items[cursorItemIdx];
-				if (!cursorItem.HasDependencyTarget) {
-					return cursorItem.IsAttackableCharm ? cursorSlot : -1;
-				}
-
-				SlotCoord coord = snapshot.Slots[cursorSlot];
-				int nextSlot = snapshot.CoordToSlotIndex(
-					coord.X + cursorItem.DependencyOffsetX,
-					coord.Y + cursorItem.DependencyOffsetY
-				);
-				if (nextSlot < 0 || nextSlot >= InventorySnapshot.MaxSupportedSlots) {
-					return -1;
-				}
-				ulong nextBit = 1UL << nextSlot;
-				if ((visitedMask & nextBit) != 0UL) {
-					return -1;
-				}
-				visitedMask |= nextBit;
-				cursorSlot = nextSlot;
+			Span<byte> allActive = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			for (int s = 0; s < snapshot.UnlockedSlots; s++) {
+				allActive[s] = 1;
 			}
-
-			return -1;
+			ResolveNeedleRootMasks(
+				snapshot,
+				slotToItemIndex,
+				allActive,
+				startNeedleSlot,
+				out _,
+				out _,
+				out int primaryRootSlot
+			);
+			return primaryRootSlot;
 		}
 
 		public static int ResolveNeedleRootSlot(
@@ -1328,45 +1494,16 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<byte> isActiveBuf,
 			int startNeedleSlot
 		) {
-			if ((uint)startNeedleSlot >= (uint)snapshot.UnlockedSlots || isActiveBuf[startNeedleSlot] == 0) {
-				return -1;
-			}
-			SlotItemSnapshot[] items = snapshot.Items;
-			ulong visitedMask = 1UL << startNeedleSlot;
-			int cursorSlot = startNeedleSlot;
-			int hopCount = 0;
-
-			while (hopCount <= 8) {
-				hopCount++;
-				if (isActiveBuf[cursorSlot] == 0) {
-					return -1;
-				}
-				int cursorItemIdx = slotToItemIndex[cursorSlot];
-				if (cursorItemIdx < 0) {
-					return -1;
-				}
-				SlotItemSnapshot cursorItem = items[cursorItemIdx];
-				if (!cursorItem.HasDependencyTarget) {
-					return cursorItem.IsAttackableCharm ? cursorSlot : -1;
-				}
-
-				SlotCoord coord = snapshot.Slots[cursorSlot];
-				int nextSlot = snapshot.CoordToSlotIndex(
-					coord.X + cursorItem.DependencyOffsetX,
-					coord.Y + cursorItem.DependencyOffsetY
-				);
-				if (nextSlot < 0 || nextSlot >= InventorySnapshot.MaxSupportedSlots) {
-					return -1;
-				}
-				ulong nextBit = 1UL << nextSlot;
-				if ((visitedMask & nextBit) != 0UL) {
-					return -1;
-				}
-				visitedMask |= nextBit;
-				cursorSlot = nextSlot;
-			}
-
-			return -1;
+			ResolveNeedleRootMasks(
+				snapshot,
+				slotToItemIndex,
+				isActiveBuf,
+				startNeedleSlot,
+				out _,
+				out _,
+				out int primaryRootSlot
+			);
+			return primaryRootSlot;
 		}
 
 		public static bool IsTabletConditionMet(
@@ -1850,60 +1987,155 @@ namespace SephiriaOptimizer.Solver {
 			return synergy;
 		}
 
-		private static int EvaluateArrangementPatterns(
+		public static int EvaluateArrangementPatterns(
 			InventorySnapshot snapshot,
-			ReadOnlySpan<int> slotToItemIndex
+			ReadOnlySpan<int> slotToItemIndex,
+			out CombatStatDelta matchedStatDelta
 		) {
+			matchedStatDelta = CombatStatDelta.Zero;
 			ArrangementPattern[] patterns = snapshot.TalentRules.ArrangementPatterns;
-			SlotItemSnapshot[] items = snapshot.Items;
-			int unlockedSlots = snapshot.UnlockedSlots;
 			int matchedCount = 0;
 
 			for (int p = 0; p < patterns.Length; p++) {
-				ArrangementOffsetEntry[] entries = patterns[p].Entries;
-				if (entries.Length == 0) {
-					continue;
-				}
-				int firstEntityId = entries[0].RequiredEntityId;
-				bool patternMatched = false;
-
-				for (int s = 0; s < unlockedSlots; s++) {
-					int itemIdx = slotToItemIndex[s];
-					if (itemIdx < 0 || items[itemIdx].EntityId != firstEntityId) {
-						continue;
-					}
-					SlotCoord anchor = snapshot.Slots[s];
-					bool allEntriesMatch = true;
-
-					for (int e = 1; e < entries.Length; e++) {
-						ArrangementOffsetEntry entry = entries[e];
-						int targetSlot = snapshot.CoordToSlotIndex(
-							anchor.X + entry.OffsetX,
-							anchor.Y + entry.OffsetY
-						);
-						if (targetSlot < 0) {
-							allEntriesMatch = false;
-							break;
-						}
-						int targetItemIdx = slotToItemIndex[targetSlot];
-						if (targetItemIdx < 0 || items[targetItemIdx].EntityId != entry.RequiredEntityId) {
-							allEntriesMatch = false;
-							break;
-						}
-					}
-
-					if (allEntriesMatch) {
-						patternMatched = true;
-						break;
-					}
-				}
-
-				if (patternMatched) {
+				ArrangementPattern pattern = patterns[p];
+				if (IsArrangementPatternMatched(snapshot, slotToItemIndex, pattern)) {
 					matchedCount++;
+					CombatStatDelta patternDelta = pattern.StatDelta;
+					if (patternDelta.HasAnyNonZero) {
+						matchedStatDelta = matchedStatDelta.Add(in patternDelta);
+					}
 				}
 			}
 
 			return matchedCount * ArrangementPatternMatchBonus;
+		}
+
+		public static bool IsArrangementPatternMatched(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ArrangementPattern pattern
+		) {
+			int[] requiredIds = pattern.RequiredEntityIds;
+			int reqCount = requiredIds.Length;
+			if (reqCount <= 0) {
+				return false;
+			}
+
+			int unlockedSlots = snapshot.UnlockedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+			if (reqCount == 1) {
+				int targetId = requiredIds[0];
+				for (int s = 0; s < unlockedSlots; s++) {
+					int idx = slotToItemIndex[s];
+					if (idx >= 0 && items[idx].EntityId == targetId) {
+						return true;
+					}
+				}
+				return false;
+			}
+
+			ulong candidateSlotsMask = 0UL;
+			for (int s = 0; s < unlockedSlots; s++) {
+				int idx = slotToItemIndex[s];
+				if (idx < 0) {
+					continue;
+				}
+				int entityId = items[idx].EntityId;
+				for (int r = 0; r < reqCount; r++) {
+					if (requiredIds[r] == entityId) {
+						candidateSlotsMask |= 1UL << s;
+						break;
+					}
+				}
+			}
+
+			if (BitOperations.PopCount(candidateSlotsMask) < reqCount) {
+				return false;
+			}
+
+			ulong remainingCandidates = candidateSlotsMask;
+			while (remainingCandidates != 0UL) {
+				int seedSlot = BitOperations.TrailingZeroCount(remainingCandidates);
+				ulong seedBit = 1UL << seedSlot;
+				remainingCandidates &= ~seedBit;
+				ulong compMask = seedBit;
+				ulong frontier = seedBit;
+
+				while (frontier != 0UL) {
+					int cur = BitOperations.TrailingZeroCount(frontier);
+					frontier &= frontier - 1UL;
+					SlotCoord coord = snapshot.Slots[cur];
+
+					int leftSlot = snapshot.CoordToSlotIndex(coord.X - 1, coord.Y);
+					if (leftSlot >= 0) {
+						ulong nBit = 1UL << leftSlot;
+						if ((remainingCandidates & nBit) != 0UL) {
+							remainingCandidates &= ~nBit;
+							compMask |= nBit;
+							frontier |= nBit;
+						}
+					}
+					int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
+					if (rightSlot >= 0) {
+						ulong nBit = 1UL << rightSlot;
+						if ((remainingCandidates & nBit) != 0UL) {
+							remainingCandidates &= ~nBit;
+							compMask |= nBit;
+							frontier |= nBit;
+						}
+					}
+					int upSlot = snapshot.CoordToSlotIndex(coord.X, coord.Y - 1);
+					if (upSlot >= 0) {
+						ulong nBit = 1UL << upSlot;
+						if ((remainingCandidates & nBit) != 0UL) {
+							remainingCandidates &= ~nBit;
+							compMask |= nBit;
+							frontier |= nBit;
+						}
+					}
+					int downSlot = snapshot.CoordToSlotIndex(coord.X, coord.Y + 1);
+					if (downSlot >= 0) {
+						ulong nBit = 1UL << downSlot;
+						if ((remainingCandidates & nBit) != 0UL) {
+							remainingCandidates &= ~nBit;
+							compMask |= nBit;
+							frontier |= nBit;
+						}
+					}
+				}
+
+				if (BitOperations.PopCount(compMask) < reqCount) {
+					continue;
+				}
+
+				ulong usedSlotsMask = 0UL;
+				bool allFound = true;
+				for (int r = 0; r < reqCount; r++) {
+					int reqId = requiredIds[r];
+					ulong avail = compMask & ~usedSlotsMask;
+					bool foundOne = false;
+					while (avail != 0UL) {
+						int slot = BitOperations.TrailingZeroCount(avail);
+						avail &= avail - 1UL;
+						int itemIdx = slotToItemIndex[slot];
+						if (itemIdx >= 0 && items[itemIdx].EntityId == reqId) {
+							usedSlotsMask |= 1UL << slot;
+							foundOne = true;
+							break;
+						}
+					}
+					if (!foundOne) {
+						allFound = false;
+						break;
+					}
+				}
+
+				if (allFound) {
+					return true;
+				}
+			}
+
+			return false;
 		}
 	}
 }

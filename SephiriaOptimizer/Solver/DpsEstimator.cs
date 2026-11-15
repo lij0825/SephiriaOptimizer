@@ -195,6 +195,8 @@ namespace SephiriaOptimizer.Solver {
 			Span<int> mulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> effectiveLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> needleRootBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<ulong> needleRootsMaskBuf = stackalloc ulong[InventorySnapshot.MaxSupportedSlots];
+			Span<ulong> needleBypassMaskBuf = stackalloc ulong[InventorySnapshot.MaxSupportedSlots];
 			Span<int> chalcedonyCatBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> isActiveBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> naturalCriteriaBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
@@ -211,6 +213,8 @@ namespace SephiriaOptimizer.Solver {
 				mulBuf[s] = snapshot.BaseSlotMultiplyLevel[s];
 				effectiveLevelBuf[s] = 0;
 				needleRootBuf[s] = -1;
+				needleRootsMaskBuf[s] = 0UL;
+				needleBypassMaskBuf[s] = 0UL;
 				chalcedonyCatBuf[s] = -1;
 				isActiveBuf[s] = 0;
 				naturalCriteriaBuf[s] = 0;
@@ -322,15 +326,26 @@ namespace SephiriaOptimizer.Solver {
 				}
 				SlotItemSnapshot item = items[slotToItemIndex[s]];
 				if (item.HasDependencyTarget) {
-					int rootSlot = ObjectiveEvaluator.ResolveNeedleRootSlot(
+					ObjectiveEvaluator.ResolveNeedleRootMasks(
 						snapshot,
 						slotToItemIndex,
 						isActiveBuf,
-						s
+						s,
+						out ulong rootsMask,
+						out ulong bypassMask,
+						out int rootSlot
 					);
 					needleRootBuf[s] = rootSlot;
-					if (rootSlot >= 0) {
-						uint rootCategories = categoryMaskBuf[rootSlot];
+					needleRootsMaskBuf[s] = rootsMask;
+					needleBypassMaskBuf[s] = bypassMask;
+					if (rootsMask != 0UL) {
+						uint rootCategories = 0u;
+						ulong iterMask = rootsMask;
+						while (iterMask != 0UL) {
+							int rSlot = BitOperations.TrailingZeroCount(iterMask);
+							iterMask &= iterMask - 1UL;
+							rootCategories |= categoryMaskBuf[rSlot];
+						}
 						categoryMaskBuf[s] |= rootCategories;
 						AccumulateCategoryMask(rootCategories, dynamicComboBonusCounts);
 					}
@@ -449,24 +464,44 @@ namespace SephiriaOptimizer.Solver {
 					|| needleItem.PriorityTier == ArtifactPriorityTier.Sacrifice) {
 					continue;
 				}
-				int rootSlot = needleRootBuf[s];
-				if (rootSlot >= 0 && rootSlot < unlockedSlots && isActiveBuf[rootSlot] != 0) {
-					int rootItemIdx = slotToItemIndex[rootSlot];
-					if (rootItemIdx >= 0) {
-						SlotItemSnapshot rootItem = items[rootItemIdx];
-						if (rootItem.Kind == SlotItemKind.Artifact
-							&& rootItem.IsAttackableCharm
-							&& rootItem.PriorityTier != ArtifactPriorityTier.Sacrifice) {
-							int needleLv = effectiveLevelBuf[s];
-							int bonusPct = needleItem.GetNeedleBonusPercent(needleLv, rootItem.RarityTier);
-							needleBonusPctSumBySlot[rootSlot] += bonusPct;
-							isLinkedNeedleRootSlot[rootSlot] = 1;
-							hasActiveGoldenNeedle = true;
-							activeNeedlePercentSum += bonusPct;
-							activeNeedleCount++;
+				ulong rootsMask = needleRootsMaskBuf[s];
+				ulong bypassMask = needleBypassMaskBuf[s];
+				while (rootsMask != 0UL) {
+					int rootSlot = BitOperations.TrailingZeroCount(rootsMask);
+					rootsMask &= rootsMask - 1UL;
+					if (rootSlot >= 0 && rootSlot < unlockedSlots && isActiveBuf[rootSlot] != 0) {
+						int rootItemIdx = slotToItemIndex[rootSlot];
+						if (rootItemIdx >= 0) {
+							SlotItemSnapshot rootItem = items[rootItemIdx];
+							if (rootItem.Kind == SlotItemKind.Artifact
+								&& rootItem.IsAttackableCharm
+								&& rootItem.PriorityTier != ArtifactPriorityTier.Sacrifice) {
+								int needleLv = effectiveLevelBuf[s];
+								bool bypassRarity = (bypassMask & (1UL << rootSlot)) != 0UL;
+								int bonusPct = needleItem.GetNeedleBonusPercent(
+									needleLv,
+									rootItem.RarityTier,
+									bypassRarity
+								);
+								needleBonusPctSumBySlot[rootSlot] += bonusPct;
+								isLinkedNeedleRootSlot[rootSlot] = 1;
+								hasActiveGoldenNeedle = true;
+								activeNeedlePercentSum += bonusPct;
+								activeNeedleCount++;
+							}
 						}
 					}
 				}
+			}
+
+			CombatStatDelta matchedArrangementDelta = CombatStatDelta.Zero;
+			if (snapshot.TalentRules.ArrangementBonusStat > 0
+				&& snapshot.TalentRules.ArrangementPatterns.Length > 0) {
+				ObjectiveEvaluator.EvaluateArrangementPatterns(
+					snapshot,
+					slotToItemIndex,
+					out matchedArrangementDelta
+				);
 			}
 
 			bool hasActiveHarmonyCrystal = false;
@@ -477,7 +512,7 @@ namespace SephiriaOptimizer.Solver {
 			int unlimitedComboStat = snapshot.TalentRules.UnlimitedComboStat;
 
 			if (snapshot.CombatBaseline.HasDetailedWeaponProfile) {
-				CombatStatDelta totalDelta = CombatStatDelta.Zero;
+				CombatStatDelta totalDelta = matchedArrangementDelta;
 				double customFinalDamageMultiplier = 1.0;
 
 				for (int s = 0; s < unlockedSlots; s++) {
@@ -649,7 +684,12 @@ namespace SephiriaOptimizer.Solver {
 			double amplifiedCharmAttackRawDps = 0.0;
 			double linkedRootUnamplifiedRawDps = 0.0;
 			double linkedRootAmplifiedRawDps = 0.0;
-			double statBonusPercentSum = snapshot.CombatBaseline.ElementalDamageBonusPercent;
+			double statBonusPercentSum = snapshot.CombatBaseline.ElementalDamageBonusPercent
+				+ matchedArrangementDelta.AllDamageBonus
+				+ matchedArrangementDelta.PhysicalDamage
+				+ matchedArrangementDelta.FireDamage
+				+ matchedArrangementDelta.IceDamage
+				+ matchedArrangementDelta.LightningDamage;
 			double finalDamageMultiplier = 1.0;
 
 			for (int s = 0; s < unlockedSlots; s++) {

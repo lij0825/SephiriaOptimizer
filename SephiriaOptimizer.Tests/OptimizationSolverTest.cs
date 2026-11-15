@@ -4233,6 +4233,266 @@ namespace SephiriaOptimizer.Tests {
 			Assert.True(overlapScore > deactivatedScore);
 		}
 
+		[Fact(DisplayName = "v1.1.3 나침반 돌파(Charm_CompassBreakthrough)와 다중 부모 오프셋이 상위 등급 공격 아티팩트 증폭 및 다중 태그 복제를 정확히 계산한다")]
+		public void Evaluate_SupportsCompassBreakthroughRarityBypassAndMultiParentOffsets() {
+			int width = 3;
+			int height = 3;
+			int unlockedSlots = 9;
+
+			SlotItemSnapshot highRarityAttackA = new SlotItemSnapshot(
+				0,
+				2901,
+				2901,
+				"전설 화염창",
+				SlotItemKind.Artifact,
+				0,
+				0,
+				false,
+				2,
+				3,
+				3,
+				10,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "EMBER" },
+				Array.Empty<TabletPlacementRule>(),
+				1,
+				ArtifactPriorityTier.Core,
+				1u << 0,
+				attackDamageByLevel: new[] { 50f, 100f, 150f, 200f },
+				baseProcsPerSecond: 1.0f
+			);
+
+			SlotItemSnapshot attackB = new SlotItemSnapshot(
+				1,
+				2902,
+				2902,
+				"빙하 파편",
+				SlotItemKind.Artifact,
+				1,
+				0,
+				false,
+				1,
+				3,
+				1,
+				8,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				true,
+				false,
+				0,
+				0,
+				false,
+				false,
+				new[] { "GLACIER" },
+				Array.Empty<TabletPlacementRule>(),
+				2,
+				ArtifactPriorityTier.High,
+				1u << 1,
+				attackDamageByLevel: new[] { 40f, 80f, 120f, 160f },
+				baseProcsPerSecond: 1.0f
+			);
+
+			SlotItemSnapshot compassBreakthrough = new SlotItemSnapshot(
+				2,
+				2903,
+				2903,
+				"돌파의 나침반",
+				SlotItemKind.Artifact,
+				3,
+				0,
+				false,
+				1,
+				2,
+				1,
+				6,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				3,
+				ArtifactPriorityTier.Normal,
+				dependencyParentOffsets: new (sbyte X, sbyte Y)[] { (0, -1), (1, -1) },
+				isCompassBreakthrough: true
+			);
+
+			SlotItemSnapshot compassDamageUp = new SlotItemSnapshot(
+				3,
+				2904,
+				2904,
+				"북향의 금빛침",
+				SlotItemKind.Artifact,
+				6,
+				0,
+				false,
+				2,
+				3,
+				1,
+				7,
+				ArtifactConstraintType.None,
+				false,
+				false,
+				false,
+				false,
+				true,
+				0,
+				-1,
+				false,
+				false,
+				Array.Empty<string>(),
+				Array.Empty<TabletPlacementRule>(),
+				4,
+				ArtifactPriorityTier.Normal,
+				hasDependencyCondition: true,
+				dependencyMaxRarity: 2,
+				needleDamageBonusByLevel: new[] { 15, 25, 35, 50 },
+				needleDependencyBonusByLevel: new[] { 5, 10, 15, 25 }
+			);
+
+			ComboCategoryInfo[] combos = new[] {
+				new ComboCategoryInfo(0, "EMBER", "잉걸불", 1, new[] { 2, 3 }, true, new[] { 5f, 10f }),
+				new ComboCategoryInfo(1, "GLACIER", "빙하", 1, new[] { 2, 3 }, true, new[] { 5f, 10f })
+			};
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { highRarityAttackA, attackB, compassBreakthrough, compassDamageUp },
+				combos,
+				TalentRuleSnapshot.Default,
+				-1,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(50f, 1.0f, 0f, 1.5f, 0f)
+			);
+
+			DpsBreakdown withBreakthrough = DpsEstimator.CalculateCurrentBreakdown(snapshot);
+			Assert.True(withBreakthrough.HasActiveGoldenNeedle);
+			Assert.False(withBreakthrough.HasUnlinkedGoldenNeedle);
+			Assert.True(withBreakthrough.GoldenNeedleAddedDps > 0.0);
+
+			int[] directWithoutBreakthroughSlots = new[] { 0, 1, -1, 3, -1, -1, 2, -1, -1 };
+			int[] rotations = new[] { 0, 0, 0, 0 };
+			DpsBreakdown withoutBreakthrough = DpsEstimator.CalculateBreakdown(
+				snapshot,
+				directWithoutBreakthroughSlots,
+				rotations
+			);
+			Assert.Equal(35.0, withoutBreakthrough.GoldenNeedleAmpPercent, 3);
+			Assert.True(withBreakthrough.GoldenNeedleAmpPercent > withoutBreakthrough.GoldenNeedleAmpPercent);
+			Assert.True(withBreakthrough.TotalEstimatedDps > withoutBreakthrough.TotalEstimatedDps);
+		}
+
+		[Fact(DisplayName = "v1.1.3 4방향 상하좌우 연결 배치 보너스(ArrangementBonusEntity)가 위치 무관 4-연결 컴포넌트일 때만 매칭되고 스탯 델타를 DPS에 반영한다")]
+		public void EvaluateArrangementPatterns_MatchesAnyFourConnectedComponentAndAppliesStatDelta() {
+			int width = 3;
+			int height = 3;
+			int unlockedSlots = 9;
+
+			SlotItemSnapshot itemA = CreateArtifact(0, 3001, 0, 1, 2, 5, ArtifactConstraintType.None, 1);
+			SlotItemSnapshot itemB = CreateArtifact(1, 3002, 4, 1, 2, 5, ArtifactConstraintType.None, 2);
+			SlotItemSnapshot itemC = CreateArtifact(2, 3003, 8, 1, 2, 5, ArtifactConstraintType.None, 3);
+
+			ArrangementPattern pattern = new ArrangementPattern(
+				new[] { 3001, 3002, 3003 },
+				new CombatStatDelta(allDamageBonus: 25f)
+			);
+			TalentRuleSnapshot talents = new TalentRuleSnapshot(
+				0,
+				0,
+				0,
+				0,
+				25,
+				false,
+				false,
+				0,
+				0,
+				0,
+				0,
+				new[] { pattern }
+			);
+
+			InventorySnapshot snapshot = new InventorySnapshot(
+				width,
+				height,
+				unlockedSlots,
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new int[unlockedSlots],
+				new bool[unlockedSlots],
+				true,
+				1,
+				new[] { itemA, itemB, itemC },
+				Array.Empty<ComboCategoryInfo>(),
+				talents,
+				-1,
+				-1,
+				null,
+				-1,
+				-1,
+				2,
+				4,
+				null,
+				new PlayerCombatBaseline(100f, 1.0f, 0f, 1.5f, 0f)
+			);
+
+			int[] diagonalDisconnected = new[] { 0, -1, -1, -1, 1, -1, -1, -1, 2 };
+			Assert.False(ObjectiveEvaluator.IsArrangementPatternMatched(snapshot, diagonalDisconnected, pattern));
+			int disconnectedDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				diagonalDisconnected,
+				snapshot.InitialItemRotations
+			);
+
+			int[] lShapeConnected = new[] { -1, 0, -1, -1, 1, 2, -1, -1, -1 };
+			Assert.True(ObjectiveEvaluator.IsArrangementPatternMatched(snapshot, lShapeConnected, pattern));
+			int connectedDps = ObjectiveEvaluator.CalculateEstimatedDummyDps(
+				snapshot,
+				lShapeConnected,
+				snapshot.InitialItemRotations
+			);
+			DpsBreakdown connectedBreakdown = DpsEstimator.CalculateBreakdown(
+				snapshot,
+				lShapeConnected,
+				snapshot.InitialItemRotations
+			);
+
+			Assert.Equal(disconnectedDps + 25, connectedDps);
+			Assert.Equal(connectedDps, (int)Math.Round(connectedBreakdown.TotalEstimatedDps));
+		}
+
 
 		private static int CountBits(ulong mask) {
 			int count = 0;
