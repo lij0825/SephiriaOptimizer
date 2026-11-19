@@ -237,6 +237,221 @@ namespace SephiriaOptimizer.Execution {
 		public static bool IsValidGuideItemKind(SlotItemKind kind) {
 			return kind == SlotItemKind.Artifact || kind == SlotItemKind.StoneTablet;
 		}
+		public static void CountExecutionCost(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> currentSlotToItem,
+			ReadOnlySpan<int> targetSlotToItem,
+			ReadOnlySpan<int> currentItemRotations,
+			ReadOnlySpan<int> targetItemRotations,
+			out int swapCount,
+			out int rotateClickCount
+		) {
+			swapCount = 0;
+			rotateClickCount = 0;
+			if (snapshot == null) {
+				return;
+			}
+
+			int unlockedSlots = snapshot.UnlockedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+			int itemCount = items.Length;
+			if (unlockedSlots <= 0 || itemCount <= 0) {
+				return;
+			}
+
+			Span<int> workingSlots = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> resolvedTargetSlots = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> nextSlotInPerm = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> visited = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> hasIncoming = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
+
+			int safeMaxItems = itemCount <= InventorySnapshot.MaxSupportedSlots
+				? itemCount
+				: InventorySnapshot.MaxSupportedSlots;
+			Span<int> resolvedTargetRots = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> targetSlotForItem = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				workingSlots[s] = s < currentSlotToItem.Length ? currentSlotToItem[s] : -1;
+				resolvedTargetSlots[s] = s < targetSlotToItem.Length ? targetSlotToItem[s] : -1;
+				visited[s] = 0;
+				nextSlotInPerm[s] = -1;
+				hasIncoming[s] = 0;
+			}
+
+			for (int i = 0; i < safeMaxItems; i++) {
+				resolvedTargetRots[i] = i < targetItemRotations.Length ? (targetItemRotations[i] & 3) : 0;
+				targetSlotForItem[i] = -1;
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				int itemIdx = resolvedTargetSlots[s];
+				if (itemIdx >= 0 && itemIdx < safeMaxItems) {
+					targetSlotForItem[itemIdx] = s;
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				int curItem = workingSlots[s];
+				int dstItem = resolvedTargetSlots[s];
+				if (curItem < 0 && dstItem < 0) {
+					visited[s] = 1;
+					continue;
+				}
+				if (curItem < 0 || dstItem < 0 || curItem >= safeMaxItems || dstItem >= safeMaxItems) {
+					continue;
+				}
+				if (curItem == dstItem) {
+					visited[s] = 1;
+					continue;
+				}
+
+				SlotItemSnapshot curSnap = items[curItem];
+				SlotItemSnapshot dstSnap = items[dstItem];
+				if (curSnap.SymmetryGroupId != dstSnap.SymmetryGroupId) {
+					continue;
+				}
+
+				int curRot = curItem < currentItemRotations.Length ? (currentItemRotations[curItem] & 3) : 0;
+				bool sameRotation = !curSnap.IsRotatable || (curRot == (resolvedTargetRots[dstItem] & 3));
+				if (sameRotation) {
+					SwapIdentityTargetsSpan(
+						s,
+						curItem,
+						dstItem,
+						workingSlots,
+						resolvedTargetSlots,
+						targetSlotForItem,
+						resolvedTargetRots,
+						visited
+					);
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (visited[s] != 0) {
+					continue;
+				}
+				int curItem = workingSlots[s];
+				int dstItem = resolvedTargetSlots[s];
+				if (curItem < 0 || dstItem < 0 || curItem >= safeMaxItems || dstItem >= safeMaxItems) {
+					continue;
+				}
+				if (curItem == dstItem) {
+					visited[s] = 1;
+					continue;
+				}
+				if (items[curItem].SymmetryGroupId == items[dstItem].SymmetryGroupId) {
+					SwapIdentityTargetsSpan(
+						s,
+						curItem,
+						dstItem,
+						workingSlots,
+						resolvedTargetSlots,
+						targetSlotForItem,
+						resolvedTargetRots,
+						visited
+					);
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (visited[s] != 0) {
+					nextSlotInPerm[s] = s;
+					hasIncoming[s] = 1;
+					continue;
+				}
+				int itemIdx = workingSlots[s];
+				if (itemIdx >= 0 && itemIdx < safeMaxItems) {
+					int dstSlot = targetSlotForItem[itemIdx];
+					if (dstSlot >= 0 && dstSlot < unlockedSlots) {
+						nextSlotInPerm[s] = dstSlot;
+						hasIncoming[dstSlot] = 1;
+					}
+				}
+			}
+
+			for (int startSlot = 0; startSlot < unlockedSlots; startSlot++) {
+				if (visited[startSlot] == 0 && workingSlots[startSlot] >= 0 && hasIncoming[startSlot] == 0) {
+					int cursor = startSlot;
+					while (nextSlotInPerm[cursor] >= 0 && nextSlotInPerm[cursor] != startSlot) {
+						cursor = nextSlotInPerm[cursor];
+					}
+					if (nextSlotInPerm[cursor] < 0) {
+						nextSlotInPerm[cursor] = startSlot;
+						hasIncoming[startSlot] = 1;
+					}
+				}
+			}
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (visited[s] != 0) {
+					continue;
+				}
+				int next = nextSlotInPerm[s];
+				if (next < 0 || next == s) {
+					visited[s] = 1;
+					continue;
+				}
+				int cycleLength = 0;
+				int cursor = s;
+				while (cursor >= 0 && visited[cursor] == 0) {
+					visited[cursor] = 1;
+					cycleLength++;
+					cursor = nextSlotInPerm[cursor];
+				}
+				if (cycleLength > 1) {
+					swapCount += cycleLength - 1;
+				}
+			}
+
+			for (int i = 0; i < safeMaxItems; i++) {
+				SlotItemSnapshot item = items[i];
+				if (item.Kind != SlotItemKind.StoneTablet || !item.IsRotatable) {
+					continue;
+				}
+				int curRot = i < currentItemRotations.Length ? (currentItemRotations[i] & 3) : 0;
+				int dstRot = resolvedTargetRots[i] & 3;
+				int clicks = (dstRot - curRot + 4) & 3;
+				if (clicks > 0) {
+					int finalSlot = targetSlotForItem[i];
+					if (finalSlot >= 0 && finalSlot < unlockedSlots) {
+						rotateClickCount += clicks;
+					}
+				}
+			}
+		}
+
+		private static void SwapIdentityTargetsSpan(
+			int slotIndex,
+			int curItem,
+			int dstItem,
+			ReadOnlySpan<int> workingSlots,
+			Span<int> resolvedTargetSlots,
+			Span<int> targetSlotForItem,
+			Span<int> resolvedTargetRotations,
+			Span<byte> visited
+		) {
+			int prevTargetOfCur = targetSlotForItem[curItem];
+			int prevRotOfCur = resolvedTargetRotations[curItem];
+			int prevRotOfDst = resolvedTargetRotations[dstItem];
+
+			resolvedTargetSlots[slotIndex] = curItem;
+			targetSlotForItem[curItem] = slotIndex;
+			resolvedTargetRotations[curItem] = prevRotOfDst;
+
+			if (prevTargetOfCur >= 0) {
+				resolvedTargetSlots[prevTargetOfCur] = dstItem;
+			}
+			targetSlotForItem[dstItem] = prevTargetOfCur;
+			resolvedTargetRotations[dstItem] = prevRotOfCur;
+
+			visited[slotIndex] = 1;
+			if (prevTargetOfCur >= 0 && workingSlots[prevTargetOfCur] == dstItem) {
+				visited[prevTargetOfCur] = 1;
+			}
+		}
+
 		public static ExecutionPlan BuildExecutionPlan(
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> currentSlotToItem,

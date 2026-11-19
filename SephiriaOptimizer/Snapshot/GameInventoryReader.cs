@@ -24,6 +24,31 @@ namespace SephiriaOptimizer.Snapshot {
 			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
 		);
 
+		private static readonly FieldInfo? NearLevelCurrentBonusField = typeof(Charm_NearLevelDamage).GetField(
+			"currentDamageBonus",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
+		private static readonly FieldInfo? WoodenBoxAppliedField = typeof(Charm_WoodenBox).GetField(
+			"applied",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
+		private static readonly FieldInfo? WoodenBoxAppliedLevelField = typeof(Charm_WoodenBox).GetField(
+			"appliedLevel",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
+		private static readonly FieldInfo? FireIceLeftAddedField = typeof(Charm_FireIce).GetField(
+			"leftStatAdded",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
+		private static readonly FieldInfo? FireIceRightAddedField = typeof(Charm_FireIce).GetField(
+			"rightStatAdded",
+			BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic
+		);
+
 		public static InventorySnapshot CaptureSnapshot(
 			PlayerAvatar avatar,
 			GridInventory inventory,
@@ -240,7 +265,24 @@ namespace SephiriaOptimizer.Snapshot {
 						|| (entity.categories != null && entity.categories.Contains("PLANET"));
 					bool isNearMagicBullet = charm is Charm_NearMagicBullet;
 					bool isWoodenBox = charm is Charm_WoodenBox;
+					int[]? woodenBoxApByLevel = charm is Charm_WoodenBox boxCharm && boxCharm.apPerQuickSlotCharmByLevel != null
+						? (int[])boxCharm.apPerQuickSlotCharmByLevel.Clone()
+						: null;
 					bool isFireIce = charm is Charm_FireIce || charm is Charm_FireIceWeapon;
+					int[]? fireIceMainByLevel = null;
+					int[]? fireIceOppByLevel = null;
+					byte fireIceLeftElem = 2;
+					byte fireIceRightElem = 3;
+					if (charm is Charm_FireIce fireIceCharm) {
+						if (fireIceCharm.mainStat != null && fireIceCharm.mainStat.Length > 0) {
+							fireIceMainByLevel = (int[])fireIceCharm.mainStat.Clone();
+						}
+						if (fireIceCharm.oppositeStat != null && fireIceCharm.oppositeStat.Length > 0) {
+							fireIceOppByLevel = (int[])fireIceCharm.oppositeStat.Clone();
+						}
+						fireIceLeftElem = MapCustomStatToElementKind(fireIceCharm.leftStatName);
+						fireIceRightElem = MapCustomStatToElementKind(fireIceCharm.rightStatName);
+					}
 
 					string[] categories = entity.categories != null
 						? entity.categories.ToArray()
@@ -373,7 +415,12 @@ namespace SephiriaOptimizer.Snapshot {
 						charmScalingElementKind,
 						charmElementalPercentByLevel,
 						depOffsets,
-						isCompassBreakthrough
+						isCompassBreakthrough,
+						woodenBoxApByLevel,
+						fireIceMainByLevel,
+						fireIceOppByLevel,
+						fireIceLeftElem,
+						fireIceRightElem
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet? tablet = ResolveSlotTablet(
@@ -510,6 +557,7 @@ namespace SephiriaOptimizer.Snapshot {
 				out int mysticSlot1,
 				out int mysticTier1Threshold,
 				out int mysticTier2Threshold,
+				out int[] extraMysticTier1Slots,
 				out int[] extraMysticTier2Slots
 			);
 
@@ -546,7 +594,8 @@ namespace SephiriaOptimizer.Snapshot {
 				mysticTier1Threshold,
 				mysticTier2Threshold,
 				extraMysticTier2Slots,
-				combatBaseline
+				combatBaseline,
+				extraMysticTier1Slots
 			);
 		}
 
@@ -1334,6 +1383,43 @@ namespace SephiriaOptimizer.Snapshot {
 						if (rawAdded is int burnAdded && burnAdded != 0) {
 							activeDelta = activeDelta.Add(new CombatStatDelta(finalWeaponDamage: burnAdded));
 						}
+					}
+
+					if (liveCharm is Charm_NearLevelDamage && NearLevelCurrentBonusField != null) {
+						object? rawHarmony = NearLevelCurrentBonusField.GetValue(liveCharm);
+						if (rawHarmony is int harmonyAdded && harmonyAdded != 0) {
+							activeDelta = activeDelta.Add(new CombatStatDelta(allDamageBonus: harmonyAdded));
+						}
+					} else if (liveCharm is Charm_WoodenBox boxLive
+						&& WoodenBoxAppliedField != null
+						&& WoodenBoxAppliedLevelField != null) {
+						int appliedCount = WoodenBoxAppliedField.GetValue(boxLive) is int cVal ? cVal : 0;
+						int appliedLv = WoodenBoxAppliedLevelField.GetValue(boxLive) is int lvVal ? lvVal : -1;
+						if (appliedCount > 0
+							&& appliedLv >= 0
+							&& boxLive.apPerQuickSlotCharmByLevel != null
+							&& boxLive.apPerQuickSlotCharmByLevel.Length > 0) {
+							int clampedLv = Math.Clamp(appliedLv, 0, boxLive.apPerQuickSlotCharmByLevel.Length - 1);
+							int apDelta = boxLive.apPerQuickSlotCharmByLevel[clampedLv] * appliedCount;
+							if (apDelta != 0) {
+								activeDelta = activeDelta.Add(new CombatStatDelta(
+									fireDamage: apDelta,
+									iceDamage: apDelta,
+									lightningDamage: apDelta
+								));
+							}
+						}
+					} else if (liveCharm is Charm_FireIce fireIceLive) {
+						int leftAdded = FireIceLeftAddedField?.GetValue(fireIceLive) is int lv ? lv : 0;
+						int rightAdded = FireIceRightAddedField?.GetValue(fireIceLive) is int rv ? rv : 0;
+						activeDelta = activeDelta.AddElementalByKind(
+							MapCustomStatToElementKind(fireIceLive.leftStatName),
+							leftAdded
+						);
+						activeDelta = activeDelta.AddElementalByKind(
+							MapCustomStatToElementKind(fireIceLive.rightStatName),
+							rightAdded
+						);
 					}
 
 					if (item.IsElementalByRowCharm && item.RowCategoryIds.Length > 0) {
@@ -2981,17 +3067,6 @@ namespace SephiriaOptimizer.Snapshot {
 					}
 				}
 
-				if (talentBonusPerCategory > 0f && breakpoints.Length > 0) {
-					if (extractedBonuses != null && extractedBonuses.Length > 0) {
-						extractedBonuses[0] += talentBonusPerCategory;
-					}
-					if (extractedDeltas != null && extractedDeltas.Length > 0) {
-						extractedDeltas[0] = extractedDeltas[0].Add(
-							new CombatStatDelta(allDamageBonus: talentBonusPerCategory)
-						);
-					}
-				}
-
 				float[] breakpointBonuses = extractedBonuses ?? new float[breakpoints.Length];
 
 				int staticCount = staticCategoryCounts[i];
@@ -3199,12 +3274,14 @@ namespace SephiriaOptimizer.Snapshot {
 			out int mysticSlot1,
 			out int mysticTier1Threshold,
 			out int mysticTier2Threshold,
+			out int[] extraMysticTier1Slots,
 			out int[] extraMysticTier2Slots
 		) {
 			mysticSlot0 = -1;
 			mysticSlot1 = -1;
 			mysticTier1Threshold = 2;
 			mysticTier2Threshold = 4;
+			extraMysticTier1Slots = Array.Empty<int>();
 			extraMysticTier2Slots = Array.Empty<int>();
 
 			if (unlockedSlots <= 0) {
@@ -3247,15 +3324,33 @@ namespace SephiriaOptimizer.Snapshot {
 			if (resolvedSlots.Count >= 1) {
 				mysticSlot0 = resolvedSlots[0];
 			}
-			if (resolvedSlots.Count >= 2) {
-				mysticSlot1 = resolvedSlots[1];
-			}
-			if (resolvedSlots.Count > 2) {
-				extraMysticTier2Slots = new int[resolvedSlots.Count - 2];
-				for (int i = 2; i < resolvedSlots.Count; i++) {
-					extraMysticTier2Slots[i - 2] = resolvedSlots[i];
+			int tier1Extras = Math.Min(firstCount, resolvedSlots.Count) - 1;
+			if (tier1Extras > 0) {
+				extraMysticTier1Slots = new int[tier1Extras];
+				for (int i = 0; i < tier1Extras; i++) {
+					extraMysticTier1Slots[i] = resolvedSlots[1 + i];
 				}
 			}
+			if (resolvedSlots.Count > firstCount) {
+				mysticSlot1 = resolvedSlots[firstCount];
+			}
+			int tier2Extras = resolvedSlots.Count - firstCount - 1;
+			if (tier2Extras > 0) {
+				extraMysticTier2Slots = new int[tier2Extras];
+				for (int i = 0; i < tier2Extras; i++) {
+					extraMysticTier2Slots[i] = resolvedSlots[firstCount + 1 + i];
+				}
+			}
+		}
+
+		private static byte MapCustomStatToElementKind(ECustomStat stat) {
+			return stat switch {
+				ECustomStat.PhysicalDamage => 1,
+				ECustomStat.FireDamage => 2,
+				ECustomStat.IceDamage => 3,
+				ECustomStat.LightningDamage => 4,
+				_ => 0
+			};
 		}
 
 		private static int GetOrAssignSymmetryGroup(

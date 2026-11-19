@@ -907,8 +907,7 @@ namespace SephiriaOptimizer.Models {
 
 			if (unlimitedComboStat > 0 && HighestBreakpoint > 0 && totalCount > HighestBreakpoint) {
 				int surplus = totalCount - HighestBreakpoint;
-				float surplusBonus = surplus * Math.Clamp(unlimitedComboStat, 1, 4) * 2.0f;
-				totalDelta = totalDelta.AddElementalByKind(CategoryElementalKind, surplusBonus);
+				totalDelta = totalDelta.Add(new CombatStatDelta(allDamageBonus: surplus * unlimitedComboStat));
 			}
 
 			return totalDelta;

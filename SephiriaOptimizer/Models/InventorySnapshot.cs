@@ -34,6 +34,7 @@ namespace SephiriaOptimizer.Models {
 		public int MysticTier2Threshold { get; }
 		public int MysticSlot0 { get; }
 		public int MysticSlot1 { get; }
+		public int[] ExtraMysticTier1Slots { get; }
 		public int[] ExtraMysticTier2Slots { get; }
 		public uint UserTargetCategoryMask { get; }
 		public int DependencyArtifactCount { get; }
@@ -62,7 +63,8 @@ namespace SephiriaOptimizer.Models {
 			int mysticTier1Threshold = 2,
 			int mysticTier2Threshold = 4,
 			int[]? extraMysticTier2Slots = null,
-			PlayerCombatBaseline? combatBaseline = null
+			PlayerCombatBaseline? combatBaseline = null,
+			int[]? extraMysticTier1Slots = null
 		) {
 			Width = Math.Max(1, width);
 			UnlockedSlots = Math.Clamp(unlockedSlots, 0, MaxSupportedSlots);
@@ -115,6 +117,12 @@ namespace SephiriaOptimizer.Models {
 			MysticTier2Threshold = Math.Max(MysticTier1Threshold + 1, mysticTier2Threshold);
 			MysticSlot0 = (mysticSlot0 >= 0 && mysticSlot0 < UnlockedSlots) ? mysticSlot0 : -1;
 			MysticSlot1 = (mysticSlot1 >= 0 && mysticSlot1 < UnlockedSlots) ? mysticSlot1 : -1;
+			ExtraMysticTier1Slots = SanitizeExtraMysticSlots(
+				extraMysticTier1Slots,
+				UnlockedSlots,
+				MysticSlot0,
+				MysticSlot1
+			);
 			ExtraMysticTier2Slots = SanitizeExtraMysticSlots(
 				extraMysticTier2Slots,
 				UnlockedSlots,

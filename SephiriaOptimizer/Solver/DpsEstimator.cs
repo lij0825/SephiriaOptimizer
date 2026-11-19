@@ -187,12 +187,12 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			Span<int> rawSlotLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
-			Span<int> finalSlotLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> tabletDeltaBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> disableBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> ignoreBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> mulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> mysticMulBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
+			Span<int> displayedLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> effectiveLevelBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<int> needleRootBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
 			Span<ulong> needleRootsMaskBuf = stackalloc ulong[InventorySnapshot.MaxSupportedSlots];
@@ -205,12 +205,12 @@ namespace SephiriaOptimizer.Solver {
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int permLvl = snapshot.BaseSlotLevel[s];
-				rawSlotLevelBuf[s] = permLvl;
-				finalSlotLevelBuf[s] = permLvl;
 				tabletDeltaBuf[s] = permLvl;
 				disableBuf[s] = snapshot.BaseSlotDisable[s];
 				ignoreBuf[s] = snapshot.BaseSlotIgnoreCriteria[s];
 				mulBuf[s] = snapshot.BaseSlotMultiplyLevel[s];
+				mysticMulBuf[s] = 0;
+				displayedLevelBuf[s] = permLvl;
 				effectiveLevelBuf[s] = 0;
 				needleRootBuf[s] = -1;
 				needleRootsMaskBuf[s] = 0UL;
@@ -267,13 +267,6 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			for (int s = 0; s < unlockedSlots; s++) {
-				int delta = tabletDeltaBuf[s];
-				int mul = mulBuf[s];
-				rawSlotLevelBuf[s] = mul != 0 ? (delta * mul) : delta;
-				finalSlotLevelBuf[s] = rawSlotLevelBuf[s];
-			}
-
 			bool globalEnabled = snapshot.GlobalActiveValue > 0;
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
@@ -292,7 +285,9 @@ namespace SephiriaOptimizer.Solver {
 				);
 				naturalCriteriaBuf[s] = naturalCriteriaMet ? (byte)1 : (byte)0;
 				bool criteriaSatisfied = ignoreBuf[s] > 0 || naturalCriteriaMet;
-				int prelimDisplayedLevel = item.BaseLevel + rawSlotLevelBuf[s];
+				int preMulPrelim = item.BaseLevel + tabletDeltaBuf[s];
+				int mulPrelim = mulBuf[s];
+				int prelimDisplayedLevel = mulPrelim != 0 ? (preMulPrelim * mulPrelim) : preMulPrelim;
 				bool isPrelimActive = globalEnabled
 					&& !item.IsDisabledByWeaponOrDual
 					&& disableBuf[s] == 0
@@ -361,12 +356,20 @@ namespace SephiriaOptimizer.Solver {
 					SlotCoord coord = snapshot.Slots[s];
 					int leftSlot = snapshot.CoordToSlotIndex(coord.X - 1, coord.Y);
 					int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
-					uint leftMask = (leftSlot >= 0 && isActiveBuf[leftSlot] != 0)
-						? categoryMaskBuf[leftSlot]
-						: 0u;
-					uint rightMask = (rightSlot >= 0 && isActiveBuf[rightSlot] != 0)
-						? categoryMaskBuf[rightSlot]
-						: 0u;
+					uint leftMask = ObjectiveEvaluator.ResolveWhitePaperNeighborMask(
+						snapshot,
+						slotToItemIndex,
+						isActiveBuf,
+						categoryMaskBuf,
+						leftSlot
+					);
+					uint rightMask = ObjectiveEvaluator.ResolveWhitePaperNeighborMask(
+						snapshot,
+						slotToItemIndex,
+						isActiveBuf,
+						categoryMaskBuf,
+						rightSlot
+					);
 					uint copiedMask = item.WhitePaperMatchCount <= 1
 						? (leftMask | rightMask)
 						: (leftMask & rightMask);
@@ -385,44 +388,53 @@ namespace SephiriaOptimizer.Solver {
 			ulong amplifiedMysticMask = 0UL;
 
 			if (mysticTagCount >= snapshot.MysticTier1Threshold) {
-				DoubleMysticSlotLevel(
+				AddMysticSlotMultiplier(
 					snapshot.MysticSlot0,
 					unlockedSlots,
 					ref amplifiedMysticMask,
-					rawSlotLevelBuf,
-					finalSlotLevelBuf
+					mysticMulBuf
 				);
+				int[] extraTier1 = snapshot.ExtraMysticTier1Slots;
+				for (int m = 0; m < extraTier1.Length; m++) {
+					AddMysticSlotMultiplier(
+						extraTier1[m],
+						unlockedSlots,
+						ref amplifiedMysticMask,
+						mysticMulBuf
+					);
+				}
 			}
 			if (mysticTagCount >= snapshot.MysticTier2Threshold) {
-				DoubleMysticSlotLevel(
+				AddMysticSlotMultiplier(
 					snapshot.MysticSlot1,
 					unlockedSlots,
 					ref amplifiedMysticMask,
-					rawSlotLevelBuf,
-					finalSlotLevelBuf
+					mysticMulBuf
 				);
 				int[] extraMysticSlots = snapshot.ExtraMysticTier2Slots;
 				for (int m = 0; m < extraMysticSlots.Length; m++) {
-					DoubleMysticSlotLevel(
+					AddMysticSlotMultiplier(
 						extraMysticSlots[m],
 						unlockedSlots,
 						ref amplifiedMysticMask,
-						rawSlotLevelBuf,
-						finalSlotLevelBuf
+						mysticMulBuf
 					);
 				}
 			}
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
-				if (itemIdx < 0) {
+				int totalMul = mulBuf[s] + mysticMulBuf[s];
+				if (itemIdx < 0 || items[itemIdx].Kind != SlotItemKind.Artifact) {
+					int preMulEmpty = tabletDeltaBuf[s];
+					displayedLevelBuf[s] = totalMul != 0 ? (preMulEmpty * totalMul) : preMulEmpty;
 					continue;
 				}
 				SlotItemSnapshot item = items[itemIdx];
-				if (item.Kind != SlotItemKind.Artifact) {
-					continue;
-				}
-				int displayedLevel = item.BaseLevel + finalSlotLevelBuf[s];
+				int preMul = item.BaseLevel + tabletDeltaBuf[s];
+				int displayedLevel = totalMul != 0 ? (preMul * totalMul) : preMul;
+				displayedLevelBuf[s] = displayedLevel;
+
 				bool naturalCriteriaMet = naturalCriteriaBuf[s] != 0;
 				bool criteriaSatisfied = ignoreBuf[s] > 0 || naturalCriteriaMet;
 				bool isDisabled = !globalEnabled
@@ -515,6 +527,15 @@ namespace SephiriaOptimizer.Solver {
 				CombatStatDelta totalDelta = matchedArrangementDelta;
 				double customFinalDamageMultiplier = 1.0;
 
+				int top6CharmCount = 0;
+				int topLimit = Math.Min(6, unlockedSlots);
+				for (int topSlot = 0; topSlot < topLimit; topSlot++) {
+					int tIdx = slotToItemIndex[topSlot];
+					if (tIdx >= 0 && items[tIdx].Kind == SlotItemKind.Artifact) {
+						top6CharmCount++;
+					}
+				}
+
 				for (int s = 0; s < unlockedSlots; s++) {
 					if (isActiveBuf[s] == 0) {
 						continue;
@@ -548,6 +569,36 @@ namespace SephiriaOptimizer.Solver {
 						}
 					}
 
+					if (item.IsWoodenBoxCharm && top6CharmCount > 0) {
+						int apPerCharm = item.GetWoodenBoxApPerCharm(effLv);
+						if (apPerCharm != 0) {
+							int totalAp = apPerCharm * top6CharmCount;
+							totalDelta = totalDelta.Add(new CombatStatDelta(
+								fireDamage: totalAp,
+								iceDamage: totalAp,
+								lightningDamage: totalAp
+							));
+						}
+					}
+
+					if (item.IsFireIcePositionCharm) {
+						bool isLeftHalf = snapshot.Slots[s].X <= 2 && snapshot.Slots[s].X < Math.Max(1, snapshot.Width / 2);
+						item.GetFireIceStats(
+							effLv,
+							isLeftHalf,
+							out byte lElem,
+							out int lDelta,
+							out byte rElem,
+							out int rDelta
+						);
+						if (lDelta != 0) {
+							totalDelta = totalDelta.AddElementalByKind(lElem, lDelta);
+						}
+						if (rDelta != 0) {
+							totalDelta = totalDelta.AddElementalByKind(rElem, rDelta);
+						}
+					}
+
 					if (item.IsCrystalOfHarmony) {
 						hasActiveHarmonyCrystal = true;
 						ulong neighborMask = mooreNeighborMasks[s];
@@ -555,11 +606,9 @@ namespace SephiriaOptimizer.Solver {
 						while (neighborMask != 0UL) {
 							int nSlot = BitOperations.TrailingZeroCount(neighborMask);
 							neighborMask &= neighborMask - 1UL;
-							if (isActiveBuf[nSlot] != 0) {
-								int nItemIdx = slotToItemIndex[nSlot];
-								if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
-									sumNeighborLevels += effectiveLevelBuf[nSlot];
-								}
+							int nItemIdx = slotToItemIndex[nSlot];
+							if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
+								sumNeighborLevels += Math.Min(displayedLevelBuf[nSlot], items[nItemIdx].MaxLevel);
 							}
 						}
 						harmonyNeighborLevelSum += sumNeighborLevels;
@@ -592,14 +641,21 @@ namespace SephiriaOptimizer.Solver {
 					);
 				}
 
-				WeaponCombatEvaluation weaponEval = snapshot.CombatBaseline.WeaponProfile.Evaluate(
+				WeaponCombatEvaluation weaponEvalBase = snapshot.CombatBaseline.WeaponProfile.Evaluate(
 					in totalDelta,
 					customFinalDamageMultiplier
 				);
+				WeaponCombatEvaluation weaponEvalWithHarmony = totalHarmonyAmpPercent > 0.0
+					? snapshot.CombatBaseline.WeaponProfile.Evaluate(
+						totalDelta.Add(new CombatStatDelta(allDamageBonus: (float)totalHarmonyAmpPercent)),
+						customFinalDamageMultiplier
+					)
+					: weaponEvalBase;
 
 				double unamplifiedCharmRawDps = 0.0;
-				double unamplifiedCharmAfterBonusDps = 0.0;
-				double amplifiedCharmAfterBonusDps = 0.0;
+				double unamplifiedCharmAfterBonusBase = 0.0;
+				double amplifiedCharmAfterBonusBase = 0.0;
+				double amplifiedCharmAfterBonusHarmony = 0.0;
 				double detailedLinkedRootUnampRawDps = 0.0;
 				double detailedLinkedRootNeedleRawGain = 0.0;
 
@@ -619,30 +675,42 @@ namespace SephiriaOptimizer.Solver {
 					}
 
 					int effLv = effectiveLevelBuf[s];
-					double elemStat = weaponEval.ResolveElementalStat(item.CharmScalingElementKind);
+					double elemStat = weaponEvalBase.ResolveElementalStat(item.CharmScalingElementKind);
 					double rawCharmDps = item.GetAttackRawDpsAtLevelWithElement(effLv, elemStat);
 					int needlePct = needleBonusPctSumBySlot[s];
-					double unampFactor = Math.Max(0.1, 1.0 + (weaponEval.LiveCharmDamageBonusPercent * 0.01));
+					double unampFactor = Math.Max(0.1, 1.0 + (weaponEvalBase.LiveCharmDamageBonusPercent * 0.01));
 					double ampFactor = Math.Max(
 						0.1,
-						1.0 + ((weaponEval.LiveCharmDamageBonusPercent + needlePct) * 0.01)
+						1.0 + ((weaponEvalBase.LiveCharmDamageBonusPercent + needlePct) * 0.01)
 					);
 
 					unamplifiedCharmRawDps += rawCharmDps;
-					unamplifiedCharmAfterBonusDps += rawCharmDps * unampFactor;
-					amplifiedCharmAfterBonusDps += rawCharmDps * ampFactor;
+					unamplifiedCharmAfterBonusBase += rawCharmDps * unampFactor;
+					amplifiedCharmAfterBonusBase += rawCharmDps * ampFactor;
+					if (totalHarmonyAmpPercent > 0.0) {
+						double elemStatHarm = weaponEvalWithHarmony.ResolveElementalStat(item.CharmScalingElementKind);
+						double rawCharmHarm = item.GetAttackRawDpsAtLevelWithElement(effLv, elemStatHarm);
+						double ampFactorHarm = Math.Max(
+							0.1,
+							1.0 + ((weaponEvalWithHarmony.LiveCharmDamageBonusPercent + needlePct) * 0.01)
+						);
+						amplifiedCharmAfterBonusHarmony += rawCharmHarm * ampFactorHarm;
+					} else {
+						amplifiedCharmAfterBonusHarmony += rawCharmDps * ampFactor;
+					}
+
 					if (isLinkedNeedleRootSlot[s] != 0) {
 						detailedLinkedRootUnampRawDps += rawCharmDps;
 						detailedLinkedRootNeedleRawGain += rawCharmDps * (needlePct * 0.01);
 					}
 				}
 
-				double detailedBaseRawDps = weaponEval.WeaponAndAddonRawDps + unamplifiedCharmRawDps;
-				double detailedBaseEffectiveDps = weaponEval.WeaponAndAddonEffectiveDps
-					+ (unamplifiedCharmAfterBonusDps * weaponEval.CharmPostMultiplier);
+				double detailedBaseRawDps = weaponEvalBase.WeaponAndAddonRawDps + unamplifiedCharmRawDps;
+				double detailedBaseEffectiveDps = weaponEvalBase.WeaponAndAddonEffectiveDps
+					+ (unamplifiedCharmAfterBonusBase * weaponEvalBase.CharmPostMultiplier);
 				double detailedGeneralMult = detailedBaseRawDps > 1e-6
 					? (detailedBaseEffectiveDps / detailedBaseRawDps)
-					: weaponEval.CharmPostMultiplier;
+					: weaponEvalBase.CharmPostMultiplier;
 
 				double detailedNeedleAmpPct = 0.0;
 				if (hasActiveGoldenNeedle) {
@@ -656,11 +724,14 @@ namespace SephiriaOptimizer.Solver {
 
 				double detailedNeedleAddedDps = Math.Max(
 					0.0,
-					(amplifiedCharmAfterBonusDps - unamplifiedCharmAfterBonusDps) * weaponEval.CharmPostMultiplier
+					(amplifiedCharmAfterBonusBase - unamplifiedCharmAfterBonusBase) * weaponEvalBase.CharmPostMultiplier
 				);
 				double detailedDpsWithNeedle = detailedBaseEffectiveDps + detailedNeedleAddedDps;
-				double detailedHarmonyAddedDps = detailedDpsWithNeedle * (totalHarmonyAmpPercent * 0.01);
-				double detailedTotalDps = detailedDpsWithNeedle + detailedHarmonyAddedDps;
+				double detailedTotalDps = totalHarmonyAmpPercent > 0.0
+					? (weaponEvalWithHarmony.WeaponAndAddonEffectiveDps
+						+ (amplifiedCharmAfterBonusHarmony * weaponEvalWithHarmony.CharmPostMultiplier))
+					: detailedDpsWithNeedle;
+				double detailedHarmonyAddedDps = Math.Max(0.0, detailedTotalDps - detailedDpsWithNeedle);
 
 				return new DpsBreakdown(
 					detailedBaseRawDps,
@@ -743,11 +814,9 @@ namespace SephiriaOptimizer.Solver {
 					while (neighborMask != 0UL) {
 						int nSlot = BitOperations.TrailingZeroCount(neighborMask);
 						neighborMask &= neighborMask - 1UL;
-						if (isActiveBuf[nSlot] != 0) {
-							int nItemIdx = slotToItemIndex[nSlot];
-							if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
-								sumNeighborLevels += effectiveLevelBuf[nSlot];
-							}
+						int nItemIdx = slotToItemIndex[nSlot];
+						if (nItemIdx >= 0 && items[nItemIdx].Kind == SlotItemKind.Artifact) {
+							sumNeighborLevels += Math.Min(displayedLevelBuf[nSlot], items[nItemIdx].MaxLevel);
 						}
 					}
 					harmonyNeighborLevelSum += sumNeighborLevels;
@@ -957,12 +1026,11 @@ namespace SephiriaOptimizer.Solver {
 			return $"모든 피해 +{breakdown.HarmonyAmpPercent:0.#}% (인접 8칸 레벨 합: {breakdown.HarmonyNeighborLevelSum})";
 		}
 
-		private static void DoubleMysticSlotLevel(
+		private static void AddMysticSlotMultiplier(
 			int mysticSlot,
 			int unlockedSlots,
 			ref ulong amplifiedMysticMask,
-			ReadOnlySpan<int> rawSlotLevelBuf,
-			Span<int> finalSlotLevelBuf
+			Span<int> mysticMulBuf
 		) {
 			if ((uint)mysticSlot >= (uint)unlockedSlots) {
 				return;
@@ -972,7 +1040,7 @@ namespace SephiriaOptimizer.Solver {
 				return;
 			}
 			amplifiedMysticMask |= slotBit;
-			finalSlotLevelBuf[mysticSlot] = rawSlotLevelBuf[mysticSlot] * 2;
+			mysticMulBuf[mysticSlot] += 2;
 		}
 
 		private static void AccumulateCategoryMask(uint mask, Span<int> dynamicComboBonusCounts) {

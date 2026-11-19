@@ -83,6 +83,7 @@ namespace SephiriaOptimizer.UI {
 		private bool isAutoSwapRunning;
 		private int lastObservedStateHash;
 		private int selectedSlotIndex = -1;
+		private int selectedCandidateIndex;
 		private Vector2 configScrollPos;
 		private string statusBannerText = "준비 완료 — 버튼을 클릭하여 자동 정렬 및 빌드 설정";
 
@@ -240,6 +241,7 @@ namespace SephiriaOptimizer.UI {
 			latestSnapshot = null;
 			pendingTaskSnapshot = null;
 			selectedSlotIndex = -1;
+			selectedCandidateIndex = 0;
 			lastObservedStateHash = 0;
 		}
 
@@ -273,6 +275,7 @@ namespace SephiriaOptimizer.UI {
 			if (liveValidItemCount != latestSnapshot.Items.Length) {
 				latestResult = null;
 				selectedSlotIndex = -1;
+				selectedCandidateIndex = 0;
 			}
 		}
 
@@ -305,6 +308,7 @@ namespace SephiriaOptimizer.UI {
 					OptimizationResult result = activeSolveTask.Result;
 					latestSnapshot = pendingTaskSnapshot;
 					latestResult = result;
+					selectedCandidateIndex = 0;
 				}
 			} catch (Exception ex) {
 				Debug.LogError($"[SephiriaOptimizer] Solver task failed: {ex.Message}");
@@ -349,35 +353,61 @@ namespace SephiriaOptimizer.UI {
 			InventorySnapshot snapshot;
 			OptimizationResult result;
 			ExecutionPlan plan;
-			try {
-				snapshot = GameInventoryReader.CaptureSnapshot(
-					avatar,
-					inventory,
-					pinnedSlotIndices,
-					customEntityWeights,
-					userSettings
-				);
-				result = solver.Solve(snapshot);
+			int liveHash = ComputeInventoryStateHash(avatar, inventory, out _);
+			bool canExecuteSelectedAlternative = selectedCandidateIndex > 0
+				&& latestSnapshot != null
+				&& latestResult != null
+				&& selectedCandidateIndex < latestResult.TopCandidates.Count
+				&& liveHash == lastObservedStateHash;
+
+			if (canExecuteSelectedAlternative) {
+				snapshot = latestSnapshot!;
+				result = latestResult!;
+				OptimizationCandidate selectedCand = result.TopCandidates[selectedCandidateIndex];
 				plan = CycleDecomposition.BuildExecutionPlan(
 					snapshot,
 					snapshot.InitialSlotToItemIndex,
-					result.BestSlotToItemIndex,
+					selectedCand.SlotToItemIndex,
 					snapshot.InitialItemRotations,
-					result.BestItemRotations
+					selectedCand.ItemRotations
 				);
-			} catch (Exception solveEx) {
-				Debug.LogError($"[SephiriaOptimizer] AutoSwap solve failed: {solveEx.Message}");
-				SetStatusBanner($"최적화 계산 실패 ({solveEx.GetType().Name})");
-				return;
-			}
+				if (plan.TotalOperations == 0) {
+					SetStatusBanner($"후보 [{selectedCand.Rank}]와 현재 배치가 동일합니다.");
+					return;
+				}
+			} else {
+				try {
+					snapshot = GameInventoryReader.CaptureSnapshot(
+						avatar,
+						inventory,
+						pinnedSlotIndices,
+						customEntityWeights,
+						userSettings
+					);
+					result = solver.Solve(snapshot);
+					plan = CycleDecomposition.BuildExecutionPlan(
+						snapshot,
+						snapshot.InitialSlotToItemIndex,
+						result.BestSlotToItemIndex,
+						snapshot.InitialItemRotations,
+						result.BestItemRotations
+					);
+				} catch (Exception solveEx) {
+					Debug.LogError($"[SephiriaOptimizer] AutoSwap solve failed: {solveEx.Message}");
+					SetStatusBanner($"최적화 계산 실패 ({solveEx.GetType().Name})");
+					return;
+				}
 
-			latestSnapshot = snapshot;
-			latestResult = result;
+				selectedCandidateIndex = 0;
+				latestSnapshot = snapshot;
+				latestResult = result;
+				lastObservedStateHash = liveHash;
 
-			bool noImprovement = result.BestScore <= result.InitialScore;
-			if (noImprovement || plan.TotalOperations == 0) {
-				SetStatusBanner("이미 최적 배치 상태입니다.");
-				return;
+				bool noImprovement = result.BestScore <= result.InitialScore;
+				if (noImprovement || plan.TotalOperations == 0) {
+					SetStatusBanner("이미 최적 배치 상태입니다.");
+					return;
+				}
 			}
 
 			StartCoroutine(ExecuteAutoSwapCoroutine(statusPanel, avatar, inventory, snapshot, plan));
@@ -553,11 +583,12 @@ namespace SephiriaOptimizer.UI {
 				&& compatibilityReport.ShouldWarnUser
 				&& (!isVersionWarningDismissed || compatibilityReport.ShouldLockAutoSwap);
 			bool showUpdateStrip = ShouldDisplayUpdateStrip();
+			bool showCandidateStrip = latestResult != null && latestResult.HasAlternativeCandidates;
 
 			float targetWidth = isPanelCollapsed ? CollapsedPanelWidth : SidePanelWidth;
 			float targetHeight = isPanelCollapsed
 				? CollapsedPanelHeight
-				: CalculateExpandedPanelHeight(showVersionStrip, showUpdateStrip);
+				: CalculateExpandedPanelHeight(showVersionStrip, showUpdateStrip, showCandidateStrip);
 
 			Rect panelRect = ComputeSafeSidePanelRect(statusPanel, inventory, targetWidth, targetHeight);
 			lastRenderedSidePanelRect = panelRect;
@@ -607,6 +638,10 @@ namespace SephiriaOptimizer.UI {
 				TriggerAutoSwapOrFallback(statusPanel, avatar, inventory);
 			}
 			curY += 31f;
+
+			if (showCandidateStrip && latestResult != null) {
+				curY = DrawCandidateSelectionStrip(padX, curY, innerWidth, latestResult);
+			}
 
 			float halfW = (innerWidth - 4f) * 0.5f;
 			string guideLabel = isOverlayEnabled ? "가이드: 켜짐" : "가이드: 꺼짐";
@@ -821,7 +856,11 @@ namespace SephiriaOptimizer.UI {
 			};
 		}
 
-		private float CalculateExpandedPanelHeight(bool showVersionStrip, bool showUpdateStrip) {
+		private float CalculateExpandedPanelHeight(
+			bool showVersionStrip,
+			bool showUpdateStrip,
+			bool showCandidateStrip
+		) {
 			float totalHeight = 187f;
 			if (showVersionStrip) {
 				totalHeight += 47f;
@@ -829,7 +868,72 @@ namespace SephiriaOptimizer.UI {
 			if (showUpdateStrip) {
 				totalHeight += releaseUpdater.CurrentState == UpdateCheckState.Downloading ? 39f : 57f;
 			}
+			if (showCandidateStrip) {
+				totalHeight += 56f;
+			}
 			return totalHeight;
+		}
+
+		private OptimizationCandidate? GetSelectedCandidate(OptimizationResult result) {
+			int count = result.TopCandidates.Count;
+			if (count == 0) {
+				return null;
+			}
+			int safeIdx = selectedCandidateIndex >= 0 && selectedCandidateIndex < count
+				? selectedCandidateIndex
+				: 0;
+			return result.TopCandidates[safeIdx];
+		}
+
+		private float DrawCandidateSelectionStrip(
+			float x,
+			float y,
+			float width,
+			OptimizationResult result
+		) {
+			float stripHeight = 52f;
+			Rect stripRect = new Rect(x, y, width, stripHeight);
+			DrawColoredBox(stripRect, new Color(0.10f, 0.14f, 0.22f, 0.94f));
+			DrawRectBorder(stripRect, new Color(0.35f, 0.72f, 0.98f, 0.85f), 1f);
+
+			IReadOnlyList<OptimizationCandidate> candidates = result.TopCandidates;
+			int count = Math.Min(3, candidates.Count);
+			if (selectedCandidateIndex < 0 || selectedCandidateIndex >= count) {
+				selectedCandidateIndex = 0;
+			}
+
+			float btnY = y + 4f;
+			float btnW = 30f;
+			float curBtnX = x + 5f;
+			for (int i = 0; i < count; i++) {
+				GUIStyle style = i == selectedCandidateIndex ? selectedButtonStyle! : compactButtonStyle!;
+				if (GUI.Button(new Rect(curBtnX, btnY, btnW, 20f), $"[{i + 1}]", style)) {
+					selectedCandidateIndex = i;
+					isOverlayEnabled = true;
+					OptimizationCandidate picked = candidates[i];
+					SetStatusBanner(
+						$"후보 [{i + 1}] 선택: DPS {picked.Metrics.EstimatedDps:N0} · {picked.DiffSummary}"
+					);
+				}
+				curBtnX += btnW + 4f;
+			}
+
+			GUI.Label(
+				new Rect(curBtnX + 2f, btnY + 1f, width - (curBtnX - x) - 6f, 20f),
+				$"최적 대안 {count}개",
+				statusWrapStyle!
+			);
+
+			OptimizationCandidate currentCand = candidates[selectedCandidateIndex];
+			string previewLine =
+				$"DPS {currentCand.Metrics.EstimatedDps:N0} · 스왑 {currentCand.Metrics.SwapCount}회 · {currentCand.DiffSummary}";
+			GUI.Label(
+				new Rect(x + 5f, y + 26f, width - 10f, 24f),
+				previewLine,
+				statusWrapStyle!
+			);
+
+			return y + stripHeight + 4f;
 		}
 
 		private void TriggerManualUpdateCheck() {
@@ -861,6 +965,7 @@ namespace SephiriaOptimizer.UI {
 			userSettings.PreferredChalcedonyCategory = string.Empty;
 			userSettings.TargetComboCategories.Clear();
 			userSettings.PreferredNeedleTargetInstanceId = -1;
+			selectedCandidateIndex = 0;
 			lastObservedStateHash = 0;
 			SetStatusBanner("슬롯 고정 및 우선순위·콤보 설정을 초기화했습니다.");
 		}
@@ -1333,13 +1438,27 @@ namespace SephiriaOptimizer.UI {
 				}
 			}
 
+			OptimizationCandidate? selectedCandidate = GetSelectedCandidate(result);
+			int[] targetSlots = selectedCandidate != null
+				? selectedCandidate.SlotToItemIndex
+				: result.BestSlotToItemIndex;
+			int[] targetItemToSlot = selectedCandidate != null
+				? selectedCandidate.ItemToSlotIndex
+				: result.BestItemToSlotIndex;
+			int[] targetRotations = selectedCandidate != null
+				? selectedCandidate.ItemRotations
+				: result.BestItemRotations;
+			SlotEvaluationDetail[] targetDetails = selectedCandidate != null
+				? selectedCandidate.SlotDetails
+				: result.BestSlotDetails;
+
 			CycleDecomposition.EvaluateSlotGuides(
 				snapshot,
 				liveSlotToItem.Slice(0, unlockedSlots),
 				liveSlotRotations.Slice(0, unlockedSlots),
-				result.BestSlotToItemIndex,
-				result.BestItemToSlotIndex,
-				result.BestItemRotations,
+				targetSlots,
+				targetItemToSlot,
+				targetRotations,
 				guideStates.Slice(0, unlockedSlots)
 			);
 
@@ -1416,8 +1535,8 @@ namespace SephiriaOptimizer.UI {
 					GUI.Label(rotBadgeRect, rotText, coordBadgeStyle!);
 				}
 
-				if (guide.ShowExpectedStatusBadge && s < result.BestSlotDetails.Length) {
-					SlotEvaluationDetail detail = result.BestSlotDetails[s];
+				if (guide.ShowExpectedStatusBadge && s < targetDetails.Length) {
+					SlotEvaluationDetail detail = targetDetails[s];
 					if (detail.ItemIndex >= 0 && detail.ItemIndex < snapshot.Items.Length) {
 						SlotItemSnapshot placedItem = snapshot.Items[detail.ItemIndex];
 						if (placedItem.Kind == SlotItemKind.Artifact) {

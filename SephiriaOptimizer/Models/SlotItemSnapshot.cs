@@ -57,6 +57,11 @@ namespace SephiriaOptimizer.Models {
 		public bool HasExplicitStatDeltas { get; }
 		public byte CharmScalingElementKind { get; }
 		public float[] CharmElementalPercentByLevel { get; }
+		public int[] WoodenBoxApByLevel { get; }
+		public int[] FireIceMainStatByLevel { get; }
+		public int[] FireIceOppositeStatByLevel { get; }
+		public byte FireIceLeftElementKind { get; }
+		public byte FireIceRightElementKind { get; }
 
 		public SlotItemSnapshot(
 			int itemIndex,
@@ -111,7 +116,12 @@ namespace SephiriaOptimizer.Models {
 			byte charmScalingElementKind = 0,
 			float[]? charmElementalPercentByLevel = null,
 			(sbyte X, sbyte Y)[]? dependencyParentOffsets = null,
-			bool isCompassBreakthrough = false
+			bool isCompassBreakthrough = false,
+			int[]? woodenBoxApByLevel = null,
+			int[]? fireIceMainStatByLevel = null,
+			int[]? fireIceOppositeStatByLevel = null,
+			byte fireIceLeftElementKind = 2,
+			byte fireIceRightElementKind = 3
 		) {
 			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
@@ -195,6 +205,11 @@ namespace SephiriaOptimizer.Models {
 			StatDeltaByLevel = statDeltaByLevel ?? BuildDefaultStatDeltaTable(StatBonusPercentByLevel);
 			CharmScalingElementKind = charmScalingElementKind;
 			CharmElementalPercentByLevel = charmElementalPercentByLevel ?? Array.Empty<float>();
+			WoodenBoxApByLevel = woodenBoxApByLevel ?? Array.Empty<int>();
+			FireIceMainStatByLevel = fireIceMainStatByLevel ?? Array.Empty<int>();
+			FireIceOppositeStatByLevel = fireIceOppositeStatByLevel ?? Array.Empty<int>();
+			FireIceLeftElementKind = fireIceLeftElementKind == 0 ? (byte)2 : fireIceLeftElementKind;
+			FireIceRightElementKind = fireIceRightElementKind == 0 ? (byte)3 : fireIceRightElementKind;
 		}
 
 		public TabletPlacementRule GetPlacementRule(int slotIndex, int rotation) {
@@ -289,6 +304,52 @@ namespace SephiriaOptimizer.Models {
 			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
 			int idx = Math.Clamp(clampedLevel, 0, FinalDamagePercentByLevel.Length - 1);
 			return FinalDamagePercentByLevel[idx];
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public int GetWoodenBoxApPerCharm(int effectiveLevel) {
+			if (WoodenBoxApByLevel.Length == 0) {
+				return 0;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int idx = Math.Clamp(clampedLevel, 0, WoodenBoxApByLevel.Length - 1);
+			return WoodenBoxApByLevel[idx];
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public void GetFireIceStats(
+			int effectiveLevel,
+			bool isLeftHalf,
+			out byte leftElem,
+			out int leftDelta,
+			out byte rightElem,
+			out int rightDelta
+		) {
+			leftElem = FireIceLeftElementKind;
+			rightElem = FireIceRightElementKind;
+			if (FireIceMainStatByLevel.Length == 0 && FireIceOppositeStatByLevel.Length == 0) {
+				leftDelta = 0;
+				rightDelta = 0;
+				return;
+			}
+			int clampedLevel = Math.Clamp(effectiveLevel, 0, MaxLevel);
+			int mainVal = 0;
+			if (FireIceMainStatByLevel.Length > 0) {
+				int mainIdx = Math.Clamp(clampedLevel, 0, FireIceMainStatByLevel.Length - 1);
+				mainVal = FireIceMainStatByLevel[mainIdx];
+			}
+			int oppVal = 0;
+			if (FireIceOppositeStatByLevel.Length > 0) {
+				int oppIdx = Math.Clamp(clampedLevel, 0, FireIceOppositeStatByLevel.Length - 1);
+				oppVal = FireIceOppositeStatByLevel[oppIdx];
+			}
+			if (isLeftHalf) {
+				leftDelta = mainVal;
+				rightDelta = oppVal;
+			} else {
+				leftDelta = oppVal;
+				rightDelta = mainVal;
+			}
 		}
 
 		private static CombatStatDelta[] BuildDefaultStatDeltaTable(float[] statBonusPercentByLevel) {
