@@ -27,7 +27,7 @@ function ConvertFrom-UnicodeEscape {
 }
 
 function Resolve-ModVersionLabel {
-	$fallbackVer = '2.2.0'
+	$fallbackVer = '2.5.0'
 	$baseDir = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { (Get-Location).Path }
 	$metaCandidates = @(
 		(Join-Path $baseDir 'metadata.json'),
