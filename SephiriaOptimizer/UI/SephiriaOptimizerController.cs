@@ -12,6 +12,7 @@ using UnityEngine;
 namespace SephiriaOptimizer.UI {
 	public sealed class SephiriaOptimizerController : MonoBehaviour {
 		private const string PrefKeyCollapsed = "SephiriaOptimizer.UI.Collapsed";
+		private const string PrefKeyConsiderCompanionEmblem = "SephiriaOptimizer.UI.ConsiderCompanionEmblem";
 
 		private const float SidePanelWidth = 286f;
 		private const float CollapsedPanelWidth = 224f;
@@ -403,7 +404,8 @@ namespace SephiriaOptimizer.UI {
 				latestResult = result;
 				lastObservedStateHash = liveHash;
 
-				bool noImprovement = result.BestScore <= result.InitialScore;
+				bool noImprovement = result.BestEstimatedDps <= result.InitialEstimatedDps
+					&& result.BestScore <= result.InitialScore;
 				if (noImprovement || plan.TotalOperations == 0) {
 					SetStatusBanner("이미 최적 배치 상태입니다.");
 					return;
@@ -682,6 +684,24 @@ namespace SephiriaOptimizer.UI {
 			}
 			curY += 29f;
 
+			bool includeCompanion = userSettings.ConsiderCompanionEmblemArtifacts;
+			string companionLabel = includeCompanion
+				? "동료 휘장 고려: ON"
+				: "동료 휘장 고려: OFF";
+			GUIStyle companionStyle = includeCompanion ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(padX, curY, innerWidth, 25f), companionLabel, companionStyle)) {
+				userSettings.ConsiderCompanionEmblemArtifacts = !includeCompanion;
+				selectedCandidateIndex = 0;
+				lastObservedStateHash = 0;
+				SaveLayoutPreferences();
+				SetStatusBanner(
+					userSettings.ConsiderCompanionEmblemArtifacts
+						? "동료 휘장 아티팩트 고려: ON"
+						: "동료 휘장 아티팩트 고려: OFF"
+				);
+			}
+			curY += 29f;
+
 			if (GUI.Button(new Rect(padX, curY, halfW, 23f), "설정/고정 초기화", compactButtonStyle!)) {
 				ResetUserCustomizations();
 			}
@@ -861,7 +881,7 @@ namespace SephiriaOptimizer.UI {
 			bool showUpdateStrip,
 			bool showCandidateStrip
 		) {
-			float totalHeight = 187f;
+			float totalHeight = 216f;
 			if (showVersionStrip) {
 				totalHeight += 47f;
 			}
@@ -965,9 +985,11 @@ namespace SephiriaOptimizer.UI {
 			userSettings.PreferredChalcedonyCategory = string.Empty;
 			userSettings.TargetComboCategories.Clear();
 			userSettings.PreferredNeedleTargetInstanceId = -1;
+			userSettings.ConsiderCompanionEmblemArtifacts = true;
 			selectedCandidateIndex = 0;
 			lastObservedStateHash = 0;
-			SetStatusBanner("슬롯 고정 및 우선순위·콤보 설정을 초기화했습니다.");
+			SaveLayoutPreferences();
+			SetStatusBanner("슬롯 고정 및 우선순위·콤보·휘장 설정을 초기화했습니다.");
 		}
 
 		private Rect ComputeSafeSidePanelRect(
@@ -1165,10 +1187,15 @@ namespace SephiriaOptimizer.UI {
 
 		private void LoadLayoutPreferences() {
 			isPanelCollapsed = PlayerPrefs.GetInt(PrefKeyCollapsed, 0) == 1;
+			userSettings.ConsiderCompanionEmblemArtifacts = PlayerPrefs.GetInt(PrefKeyConsiderCompanionEmblem, 1) != 0;
 		}
 
 		private void SaveLayoutPreferences() {
 			PlayerPrefs.SetInt(PrefKeyCollapsed, isPanelCollapsed ? 1 : 0);
+			PlayerPrefs.SetInt(
+				PrefKeyConsiderCompanionEmblem,
+				userSettings.ConsiderCompanionEmblemArtifacts ? 1 : 0
+			);
 			PlayerPrefs.Save();
 		}
 
@@ -1337,7 +1364,12 @@ namespace SephiriaOptimizer.UI {
 				}
 
 				ArtifactPriorityTier tier = item.PriorityTier;
-				string itemLabel = $"[{GetPriorityShortLabel(tier)}] {TruncateName(item.DisplayName, 14)} "
+				bool showExcludedBadge = !userSettings.ConsiderCompanionEmblemArtifacts
+					&& item.IsCompanionEmblemArtifact;
+				string excludedBadge = showExcludedBadge ? " [휘장제외]" : string.Empty;
+				int maxNameLength = showExcludedBadge ? 10 : 14;
+				string itemLabel = $"[{GetPriorityShortLabel(tier)}] "
+					+ $"{TruncateName(item.DisplayName, maxNameLength)}{excludedBadge} "
 					+ $"(Lv.{item.BaseLevel}/{item.MaxLevel})";
 				GUI.Label(new Rect(4f, curY + 2f, 210f, 24f), itemLabel, headerLabelStyle!);
 

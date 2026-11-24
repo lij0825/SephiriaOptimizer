@@ -260,6 +260,11 @@ namespace SephiriaOptimizer.Snapshot {
 						: null;
 					bool isCompanionChaos = charm is Charm_CompanionChaos;
 					bool isCompanion = charm is ICompanionCharm;
+					bool isCompanionAttack = isCompanion && isAttackable;
+					bool isCompanionEmblem = IsCompanionEmblemCharm(entity, charm, displayName);
+					bool isUserPriorityOverridden = settings.InstancePriorities.ContainsKey(
+						itemInstance.InstanceID
+					);
 					bool isPlanetModule = charm is Charm_PlanetModule;
 					bool isPlanet = charm is Charm_SummonGreenBat
 						|| (entity.categories != null && entity.categories.Contains("PLANET"));
@@ -352,7 +357,8 @@ namespace SephiriaOptimizer.Snapshot {
 					);
 
 					string symmetryKey = $"C:{entity.id}:{baseLevel}:{maxLevel}:"
-						+ $"{(int)constraintType}:{(int)priorityTier}:{staticCatMask}";
+						+ $"{(int)constraintType}:{(int)priorityTier}:{staticCatMask}:"
+						+ $"{(isCompanionEmblem ? 1 : 0)}:{(isUserPriorityOverridden ? 1 : 0)}";
 					if (settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID) {
 						symmetryKey += $":NEEDLE_TARGET:{itemInstance.InstanceID}";
 					}
@@ -420,7 +426,10 @@ namespace SephiriaOptimizer.Snapshot {
 						fireIceMainByLevel,
 						fireIceOppByLevel,
 						fireIceLeftElem,
-						fireIceRightElem
+						fireIceRightElem,
+						isCompanionEmblem,
+						isCompanionAttack,
+						isUserPriorityOverridden
 					));
 				} else if (entity.type == EItemType.StoneTablet) {
 					StoneTablet? tablet = ResolveSlotTablet(
@@ -595,7 +604,8 @@ namespace SephiriaOptimizer.Snapshot {
 				mysticTier2Threshold,
 				extraMysticTier2Slots,
 				combatBaseline,
-				extraMysticTier1Slots
+				extraMysticTier1Slots,
+				settings.ConsiderCompanionEmblemArtifacts
 			);
 		}
 
@@ -910,7 +920,14 @@ namespace SephiriaOptimizer.Snapshot {
 				nastrondBonusMult,
 				nastrondProcsPerSec
 			);
-			return new PlayerCombatBaseline(in weaponProfile);
+			float baseFollowerDmg = avatar.GetCustomStatUnsafe("FOLLOWERDAMAGE");
+			float baseFollowerAs = avatar.GetCustomStatUnsafe("FOLLOWERATTACKSPEED");
+			float baseFollowerCritPct = Math.Max(0f, avatar.GetCustomStat("FOLLOWERCRITICAL") / 100f);
+			return new PlayerCombatBaseline(in weaponProfile).WithFollowerBaseline(
+				baseFollowerDmg,
+				baseFollowerAs,
+				baseFollowerCritPct
+			);
 		}
 
 		private static void ExtractWeaponSwingMetrics(
@@ -1478,7 +1495,23 @@ namespace SephiriaOptimizer.Snapshot {
 				WeaponCombatProfile deductedProfile = rawBaseline.WeaponProfile.WithDeductedInventoryDelta(
 					in activeDelta
 				);
-				return new PlayerCombatBaseline(in deductedProfile);
+				float netFollowerDmg = Math.Max(
+					0f,
+					rawBaseline.BaseFollowerDamageBonus - activeDelta.FollowerDamageBonus
+				);
+				float netFollowerAs = Math.Max(
+					0f,
+					rawBaseline.BaseFollowerAttackSpeed - activeDelta.FollowerAttackSpeed
+				);
+				float netFollowerCrit = Math.Max(
+					0f,
+					rawBaseline.BaseFollowerCritChancePercent - activeDelta.FollowerCritChancePercent
+				);
+				return new PlayerCombatBaseline(in deductedProfile).WithFollowerBaseline(
+					netFollowerDmg,
+					netFollowerAs,
+					netFollowerCrit
+				);
 			}
 
 			double activeInventoryStatPct = 0.0;
@@ -1676,6 +1709,18 @@ namespace SephiriaOptimizer.Snapshot {
 				return 0.5f;
 			}
 
+			if (charm is Charm_LeadNPC) {
+				return 1.0f;
+			}
+
+			if (charm is Charm_MiniBallista) {
+				return 0.8f;
+			}
+
+			if (charm is Charm_SummonUnit || charm is ICompanionCharm) {
+				return 0.85f;
+			}
+
 			if (charm is Charm_FireBulletOnHit || charm is Charm_VenomSporePouch) {
 				return 0.15f;
 			}
@@ -1854,6 +1899,36 @@ namespace SephiriaOptimizer.Snapshot {
 				populated = true;
 			}
 
+			if (charm is Charm_LeadNPC leadNpcCharm) {
+				float baseNpcAtk = 25f;
+				if (leadNpcCharm.npcSocialID != null && leadNpcCharm.npcSocialID.avatarPrefab != null) {
+					UnitAvatar? npcAvatar = leadNpcCharm.npcSocialID.avatarPrefab.GetComponent<UnitAvatar>();
+					if (npcAvatar != null && npcAvatar.attack > 0) {
+						baseNpcAtk = npcAvatar.attack;
+					}
+				}
+				int[] bonusArr = leadNpcCharm.levelBonusByLevel ?? Array.Empty<int>();
+				for (int lv = 0; lv < levelCount; lv++) {
+					float bonusPct = bonusArr.Length > 0
+						? bonusArr[Math.Clamp(lv, 0, bonusArr.Length - 1)]
+						: 0f;
+					flatResult[lv] = Math.Max(1f, baseNpcAtk * (1f + (bonusPct * 0.01f)));
+				}
+				return;
+			}
+
+			if (charm is Charm_MiniBallista ballistaCharm) {
+				float hitDmg = Math.Max(1f, ballistaCharm.ballistaDamage);
+				int[] bullets = ballistaCharm.bulletCountByLevel ?? Array.Empty<int>();
+				for (int lv = 0; lv < levelCount; lv++) {
+					int count = bullets.Length > 0
+						? Math.Clamp(bullets[Math.Clamp(lv, 0, bullets.Length - 1)], 1, 16)
+						: 1;
+					flatResult[lv] = hitDmg * count;
+				}
+				return;
+			}
+
 			if (avatar != null
 				&& charm is IAttackableCharm attackableCharm
 				&& !(charm is Charm_Magic)) {
@@ -2011,6 +2086,20 @@ namespace SephiriaOptimizer.Snapshot {
 			statResult = new float[levelCount];
 			deltaResult = new CombatStatDelta[levelCount];
 
+			if (charm is Charm_FollowerAttackSpeed followerAsCharm
+				&& followerAsCharm.attackSpeedPercentByLevel != null) {
+				float[]? asArr = ConvertNumericArrayToFloat(followerAsCharm.attackSpeedPercentByLevel);
+				if (asArr != null && asArr.Length > 0) {
+					float[] norm = NormalizeTableToLength(asArr, levelCount);
+					for (int lv = 0; lv < levelCount; lv++) {
+						float val = Math.Max(0f, norm[lv]);
+						statResult[lv] = val;
+						deltaResult[lv] = new CombatStatDelta(followerAttackSpeed: val);
+					}
+					return;
+				}
+			}
+
 			if (charm is Charm_FinalDamageIncreaseWithPotions potionDmgCharm
 				&& potionDmgCharm.damageBonusByLevel != null) {
 				float[]? dmgArr = ConvertNumericArrayToFloat(potionDmgCharm.damageBonusByLevel);
@@ -2161,6 +2250,25 @@ namespace SephiriaOptimizer.Snapshot {
 			}
 
 			string id = statusId.Trim().ToUpperInvariant();
+			if (id == "FOLLOWERDAMAGE" || id == "FOLLOWER_DAMAGE") {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(followerDamageBonus: rawValue);
+			}
+			if (id == "FOLLOWERATTACKSPEED" || id == "FOLLOWER_ATTACKSPEED") {
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue;
+				}
+				return new CombatStatDelta(followerAttackSpeed: rawValue);
+			}
+			if (id == "FOLLOWERCRITICAL" || id == "FOLLOWERCRIT") {
+				float fCritPct = rawValue / 100f;
+				if (rawValue > 0) {
+					legacyOffensivePercent = rawValue >= 50 ? fCritPct : rawValue;
+				}
+				return new CombatStatDelta(followerCritChancePercent: fCritPct);
+			}
 			if (id == "FINAL_DAMAGE" || id == "ALL_DAMAGE_AMP") {
 				if (rawValue > 0) {
 					legacyOffensivePercent = rawValue;
@@ -3127,6 +3235,55 @@ namespace SephiriaOptimizer.Snapshot {
 			int id = orderedCategoryKeys.Count;
 			categoryKeyToId[key] = id;
 			orderedCategoryKeys.Add(key);
+		}
+
+		private static bool IsCompanionEmblemCharm(
+			ItemEntity entity,
+			Charm_Basic? charm,
+			string displayName
+		) {
+			if (charm is Charm_CompanionChaos
+				|| charm is ICompanionCharm
+				|| charm is Charm_FollowerAttackSpeed
+				|| charm is Charm_CompanionCloud
+				|| charm is Charm_AttackSummon) {
+				return true;
+			}
+
+			bool hasCompanionCategory = false;
+			if (entity.categories != null) {
+				for (int i = 0; i < entity.categories.Count; i++) {
+					if (string.Equals(entity.categories[i], "COMPANION", StringComparison.OrdinalIgnoreCase)) {
+						hasCompanionCategory = true;
+						break;
+					}
+				}
+			}
+
+			if (!hasCompanionCategory) {
+				return false;
+			}
+
+			if (charm is Charm_StatusInstance statusCharm && statusCharm.stats != null) {
+				for (int g = 0; g < statusCharm.stats.Length; g++) {
+					Charm_StatusInstance.StatusGroup? group = statusCharm.stats[g];
+					if (group != null
+						&& !string.IsNullOrEmpty(group.statusID)
+						&& group.statusID.IndexOf("FOLLOWER", StringComparison.OrdinalIgnoreCase) >= 0) {
+						return true;
+					}
+				}
+			}
+
+			string rawEntityName = entity.name ?? string.Empty;
+			return displayName.IndexOf("휘장", StringComparison.Ordinal) >= 0
+				|| displayName.IndexOf("문장", StringComparison.Ordinal) >= 0
+				|| displayName.IndexOf("증표", StringComparison.Ordinal) >= 0
+				|| displayName.IndexOf("완장", StringComparison.Ordinal) >= 0
+				|| displayName.IndexOf("인식표", StringComparison.Ordinal) >= 0
+				|| rawEntityName.IndexOf("Companion", StringComparison.OrdinalIgnoreCase) >= 0
+				|| rawEntityName.IndexOf("Follower", StringComparison.OrdinalIgnoreCase) >= 0
+				|| rawEntityName.IndexOf("Summon", StringComparison.OrdinalIgnoreCase) >= 0;
 		}
 
 		private static ArtifactPriorityTier InferDefaultPriorityTier(

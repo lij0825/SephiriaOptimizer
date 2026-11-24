@@ -40,6 +40,9 @@ namespace SephiriaOptimizer.Models {
 		public float[] CrystalDamageBonusByLevel { get; }
 		public bool IsCompanionChaosCharm { get; }
 		public bool IsCompanionCharm { get; }
+		public bool IsCompanionEmblemArtifact { get; }
+		public bool IsCompanionAttackCharm { get; }
+		public bool IsUserPriorityOverridden { get; }
 		public bool IsPlanetModuleCharm { get; }
 		public bool IsPlanetCharm { get; }
 		public bool IsNearMagicBulletCharm { get; }
@@ -121,7 +124,10 @@ namespace SephiriaOptimizer.Models {
 			int[]? fireIceMainStatByLevel = null,
 			int[]? fireIceOppositeStatByLevel = null,
 			byte fireIceLeftElementKind = 2,
-			byte fireIceRightElementKind = 3
+			byte fireIceRightElementKind = 3,
+			bool isCompanionEmblemArtifact = false,
+			bool isCompanionAttackCharm = false,
+			bool isUserPriorityOverridden = false
 		) {
 			bool crystalFlag = isCrystalOfHarmony || isNearLevelDamageCharm;
 			ItemIndex = itemIndex;
@@ -171,6 +177,9 @@ namespace SephiriaOptimizer.Models {
 			CrystalDamageBonusByLevel = crystalDamageBonusByLevel ?? new[] { 1f, 2f };
 			IsCompanionChaosCharm = isCompanionChaosCharm;
 			IsCompanionCharm = isCompanionCharm;
+			IsCompanionEmblemArtifact = isCompanionEmblemArtifact || isCompanionChaosCharm || isCompanionCharm;
+			IsCompanionAttackCharm = isCompanionAttackCharm || (isCompanionCharm && isAttackableCharm);
+			IsUserPriorityOverridden = isUserPriorityOverridden;
 			IsPlanetModuleCharm = isPlanetModuleCharm;
 			IsPlanetCharm = isPlanetCharm;
 			IsNearMagicBulletCharm = isNearMagicBulletCharm;

@@ -39,6 +39,7 @@ namespace SephiriaOptimizer.Models {
 		public uint UserTargetCategoryMask { get; }
 		public int DependencyArtifactCount { get; }
 		public PlayerCombatBaseline CombatBaseline { get; }
+		public bool ConsiderCompanionEmblemArtifacts { get; }
 		public DpsBreakdown CurrentBreakdown { get; }
 
 		public InventorySnapshot(
@@ -64,7 +65,8 @@ namespace SephiriaOptimizer.Models {
 			int mysticTier2Threshold = 4,
 			int[]? extraMysticTier2Slots = null,
 			PlayerCombatBaseline? combatBaseline = null,
-			int[]? extraMysticTier1Slots = null
+			int[]? extraMysticTier1Slots = null,
+			bool considerCompanionEmblemArtifacts = true
 		) {
 			Width = Math.Max(1, width);
 			UnlockedSlots = Math.Clamp(unlockedSlots, 0, MaxSupportedSlots);
@@ -158,7 +160,16 @@ namespace SephiriaOptimizer.Models {
 				}
 			}
 			DependencyArtifactCount = depCount;
+			ConsiderCompanionEmblemArtifacts = considerCompanionEmblemArtifacts;
 			CurrentBreakdown = DpsEstimator.CalculateCurrentBreakdown(this);
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		public bool IsExcludedCompanionEmblem(SlotItemSnapshot item) {
+			return !ConsiderCompanionEmblemArtifacts
+				&& item.Kind == SlotItemKind.Artifact
+				&& item.IsCompanionEmblemArtifact
+				&& !item.IsUserPriorityOverridden;
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]

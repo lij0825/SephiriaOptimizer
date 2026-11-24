@@ -50,6 +50,9 @@ namespace SephiriaOptimizer.Models {
 		public float AttackSpeed { get; }
 		public float CritChancePercent { get; }
 		public float CritDamageBonus { get; }
+		public float FollowerDamageBonus { get; }
+		public float FollowerAttackSpeed { get; }
+		public float FollowerCritChancePercent { get; }
 
 		public CombatStatDelta(
 			float physicalDamage = 0f,
@@ -63,7 +66,10 @@ namespace SephiriaOptimizer.Models {
 			float charmDamageBonus = 0f,
 			float attackSpeed = 0f,
 			float critChancePercent = 0f,
-			float critDamageBonus = 0f
+			float critDamageBonus = 0f,
+			float followerDamageBonus = 0f,
+			float followerAttackSpeed = 0f,
+			float followerCritChancePercent = 0f
 		) {
 			PhysicalDamage = physicalDamage;
 			FireDamage = fireDamage;
@@ -77,6 +83,9 @@ namespace SephiriaOptimizer.Models {
 			AttackSpeed = attackSpeed;
 			CritChancePercent = critChancePercent;
 			CritDamageBonus = critDamageBonus;
+			FollowerDamageBonus = followerDamageBonus;
+			FollowerAttackSpeed = followerAttackSpeed;
+			FollowerCritChancePercent = followerCritChancePercent;
 		}
 
 		public bool HasAnyNonZero =>
@@ -91,7 +100,10 @@ namespace SephiriaOptimizer.Models {
 			|| CharmDamageBonus != 0f
 			|| AttackSpeed != 0f
 			|| CritChancePercent != 0f
-			|| CritDamageBonus != 0f;
+			|| CritDamageBonus != 0f
+			|| FollowerDamageBonus != 0f
+			|| FollowerAttackSpeed != 0f
+			|| FollowerCritChancePercent != 0f;
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public CombatStatDelta Add(in CombatStatDelta other) {
@@ -107,7 +119,10 @@ namespace SephiriaOptimizer.Models {
 				CharmDamageBonus + other.CharmDamageBonus,
 				AttackSpeed + other.AttackSpeed,
 				CritChancePercent + other.CritChancePercent,
-				CritDamageBonus + other.CritDamageBonus
+				CritDamageBonus + other.CritDamageBonus,
+				FollowerDamageBonus + other.FollowerDamageBonus,
+				FollowerAttackSpeed + other.FollowerAttackSpeed,
+				FollowerCritChancePercent + other.FollowerCritChancePercent
 			);
 		}
 
@@ -129,7 +144,10 @@ namespace SephiriaOptimizer.Models {
 					CharmDamageBonus,
 					AttackSpeed,
 					CritChancePercent,
-					CritDamageBonus
+					CritDamageBonus,
+					FollowerDamageBonus,
+					FollowerAttackSpeed,
+					FollowerCritChancePercent
 				),
 				2 => new CombatStatDelta(
 					PhysicalDamage,
@@ -143,7 +161,10 @@ namespace SephiriaOptimizer.Models {
 					CharmDamageBonus,
 					AttackSpeed,
 					CritChancePercent,
-					CritDamageBonus
+					CritDamageBonus,
+					FollowerDamageBonus,
+					FollowerAttackSpeed,
+					FollowerCritChancePercent
 				),
 				3 => new CombatStatDelta(
 					PhysicalDamage,
@@ -157,7 +178,10 @@ namespace SephiriaOptimizer.Models {
 					CharmDamageBonus,
 					AttackSpeed,
 					CritChancePercent,
-					CritDamageBonus
+					CritDamageBonus,
+					FollowerDamageBonus,
+					FollowerAttackSpeed,
+					FollowerCritChancePercent
 				),
 				4 => new CombatStatDelta(
 					PhysicalDamage,
@@ -171,7 +195,10 @@ namespace SephiriaOptimizer.Models {
 					CharmDamageBonus,
 					AttackSpeed,
 					CritChancePercent,
-					CritDamageBonus
+					CritDamageBonus,
+					FollowerDamageBonus,
+					FollowerAttackSpeed,
+					FollowerCritChancePercent
 				),
 				_ => new CombatStatDelta(
 					PhysicalDamage,
@@ -185,7 +212,10 @@ namespace SephiriaOptimizer.Models {
 					CharmDamageBonus,
 					AttackSpeed,
 					CritChancePercent,
-					CritDamageBonus
+					CritDamageBonus,
+					FollowerDamageBonus,
+					FollowerAttackSpeed,
+					FollowerCritChancePercent
 				)
 			};
 		}
@@ -724,6 +754,9 @@ namespace SephiriaOptimizer.Models {
 		public float BaseWeaponDps { get; }
 		public bool HasDetailedWeaponProfile { get; }
 		public WeaponCombatProfile WeaponProfile { get; }
+		public float BaseFollowerDamageBonus { get; }
+		public float BaseFollowerAttackSpeed { get; }
+		public float BaseFollowerCritChancePercent { get; }
 
 		public PlayerCombatBaseline(
 			float baseAttackDamage,
@@ -739,15 +772,30 @@ namespace SephiriaOptimizer.Models {
 			ElementalDamageBonusPercent = Math.Max(0f, elementalDamageBonusPercent);
 			HasDetailedWeaponProfile = false;
 			WeaponProfile = default;
+			BaseFollowerDamageBonus = 0f;
+			BaseFollowerAttackSpeed = 0f;
+			BaseFollowerCritChancePercent = 0f;
 
 			double critFactor = ComputeCritExpectedMultiplier();
 			double elemFactor = 1.0 + (ElementalDamageBonusPercent * 0.01);
 			BaseWeaponDps = (float)(BaseAttackDamage * AttacksPerSecond * critFactor * elemFactor);
 		}
 
-		public PlayerCombatBaseline(in WeaponCombatProfile weaponProfile) {
+		public PlayerCombatBaseline(in WeaponCombatProfile weaponProfile)
+			: this(in weaponProfile, 0f, 0f, 0f) {
+		}
+
+		private PlayerCombatBaseline(
+			in WeaponCombatProfile weaponProfile,
+			float baseFollowerDamageBonus,
+			float baseFollowerAttackSpeed,
+			float baseFollowerCritChancePercent
+		) {
 			HasDetailedWeaponProfile = true;
 			WeaponProfile = weaponProfile;
+			BaseFollowerDamageBonus = baseFollowerDamageBonus;
+			BaseFollowerAttackSpeed = baseFollowerAttackSpeed;
+			BaseFollowerCritChancePercent = Math.Max(0f, baseFollowerCritChancePercent);
 
 			WeaponCombatEvaluation baseEval = weaponProfile.Evaluate(in CombatStatDelta.Zero, 1.0);
 			double approxSwings = Math.Max(0.2, weaponProfile.BaseSwingRate);
@@ -781,6 +829,48 @@ namespace SephiriaOptimizer.Models {
 			);
 			ElementalDamageBonusPercent = Math.Max(0f, weaponProfile.BaseAllDamageBonus);
 			BaseWeaponDps = (float)Math.Max(1.0, baseEval.WeaponAndAddonEffectiveDps);
+		}
+
+		private PlayerCombatBaseline(
+			float baseAttackDamage,
+			float attacksPerSecond,
+			float critChancePercent,
+			float critDamageMultiplier,
+			float elementalDamageBonusPercent,
+			float baseFollowerDamageBonus,
+			float baseFollowerAttackSpeed,
+			float baseFollowerCritChancePercent
+		) : this(
+			baseAttackDamage,
+			attacksPerSecond,
+			critChancePercent,
+			critDamageMultiplier,
+			elementalDamageBonusPercent
+		) {
+			BaseFollowerDamageBonus = baseFollowerDamageBonus;
+			BaseFollowerAttackSpeed = baseFollowerAttackSpeed;
+			BaseFollowerCritChancePercent = Math.Max(0f, baseFollowerCritChancePercent);
+		}
+
+		public PlayerCombatBaseline WithFollowerBaseline(
+			float damageBonus,
+			float attackSpeed,
+			float critChancePercent
+		) {
+			if (HasDetailedWeaponProfile) {
+				WeaponCombatProfile profileCopy = WeaponProfile;
+				return new PlayerCombatBaseline(in profileCopy, damageBonus, attackSpeed, critChancePercent);
+			}
+			return new PlayerCombatBaseline(
+				BaseAttackDamage,
+				AttacksPerSecond,
+				CritChancePercent,
+				CritDamageMultiplier,
+				ElementalDamageBonusPercent,
+				damageBonus,
+				attackSpeed,
+				critChancePercent
+			);
 		}
 
 		public double ComputeBaseWeaponRawDps() {
@@ -1053,6 +1143,8 @@ namespace SephiriaOptimizer.Models {
 
 		public int PreferredNeedleTargetInstanceId { get; set; } = -1;
 
+		public bool ConsiderCompanionEmblemArtifacts { get; set; } = true;
+
 		public ArtifactPriorityTier GetPriority(
 			int instanceId,
 			ArtifactPriorityTier defaultTier = ArtifactPriorityTier.Normal
@@ -1102,6 +1194,7 @@ namespace SephiriaOptimizer.Models {
 		public int ComputeSettingsHash() {
 			int hash = 23;
 			hash = (hash * 31) + PreferredNeedleTargetInstanceId;
+			hash = (hash * 31) + (ConsiderCompanionEmblemArtifacts ? 1 : 0);
 			if (!string.IsNullOrEmpty(PreferredChalcedonyCategory)) {
 				hash = (hash * 31) + StringComparer.OrdinalIgnoreCase.GetHashCode(PreferredChalcedonyCategory);
 			}
