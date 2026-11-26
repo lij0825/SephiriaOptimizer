@@ -518,16 +518,15 @@ namespace SephiriaOptimizer.Tests {
 				combatBaseline: baseline
 			);
 
-			ComputeBruteForceSmallBoardOptimum(snapshot, out long bruteMaxCentiDps, out int bruteMaxScoreAtBestDps);
+			ComputeBruteForceSmallBoardOptimum(snapshot, out LexicographicScore bruteBestLex, out int bruteMaxScore);
 
 			OptimizationSolver solver = new OptimizationSolver();
 			OptimizationResult result = solver.Solve(snapshot, 500);
 
-			long solvedCentiDps = (long)Math.Round(result.TopCandidates[0].Metrics.ExactEstimatedDps * 100.0);
 			Assert.True(result.UsedExactBranchAndBound);
 			Assert.Equal(0, result.TopCandidates[0].Metrics.HardViolationCount);
-			Assert.Equal(bruteMaxCentiDps, solvedCentiDps);
-			Assert.True(result.BestScore >= bruteMaxScoreAtBestDps);
+			Assert.Equal(bruteBestLex, result.TopCandidates[0].Metrics.LexScore);
+			Assert.Equal(bruteMaxScore, result.BestScore);
 		}
 
 		[Fact(DisplayName = "30슬롯 대규모(신비·수정·금빛침·연쇄 석판) 조합에서도 수동 최적 배치 이상의 기대 DPS와 대안을 산출한다")]
@@ -1123,8 +1122,8 @@ namespace SephiriaOptimizer.Tests {
 
 		private static void ComputeBruteForceSmallBoardOptimum(
 			InventorySnapshot snapshot,
-			out long maxCentiDps,
-			out int maxScoreAtMaxDps
+			out LexicographicScore bestLexScore,
+			out int maxScoreAtBestLex
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			int itemCount = snapshot.Items.Length;
@@ -1133,26 +1132,28 @@ namespace SephiriaOptimizer.Tests {
 			Array.Fill(slots, -1);
 			int[] rots = new int[itemCount];
 
-			long bestCenti = long.MinValue;
-			int bestScore = int.MinValue;
+			bool hasBest = false;
+			LexicographicScore localBestLex = default;
+			int localBestScore = int.MinValue;
 
 			void Recurse(int depth) {
 				if (depth == itemCount) {
-					int score = ObjectiveEvaluator.EvaluateWithMetrics(
+					LexicographicScore lex = ObjectiveEvaluator.EvaluateLexicographic(
 						snapshot,
 						slots,
 						rots,
-						out double dps,
+						out int score,
 						out int viol,
 						out _
 					);
 					if (viol > 0) {
 						return;
 					}
-					long centi = (long)Math.Round(dps * 100.0);
-					if (centi > bestCenti || (centi == bestCenti && score > bestScore)) {
-						bestCenti = centi;
-						bestScore = score;
+					int cmp = lex.CompareTo(localBestLex);
+					if (!hasBest || cmp > 0 || (cmp == 0 && score > localBestScore)) {
+						hasBest = true;
+						localBestLex = lex;
+						localBestScore = score;
 					}
 					return;
 				}
@@ -1173,8 +1174,8 @@ namespace SephiriaOptimizer.Tests {
 			}
 
 			Recurse(0);
-			maxCentiDps = bestCenti;
-			maxScoreAtMaxDps = bestScore;
+			bestLexScore = localBestLex;
+			maxScoreAtBestLex = localBestScore;
 		}
 
 		private static SlotItemSnapshot CreateAttackArtifact(

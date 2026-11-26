@@ -875,7 +875,7 @@ namespace SephiriaOptimizer.Tests {
 			Assert.True(tieResult.HasAlternativeCandidates);
 			Assert.Equal(1, tieResult.TopCandidates[0].Rank);
 			Assert.Equal("기본 추천", tieResult.TopCandidates[0].DiffSummary);
-			Assert.Equal(2, tieResult.BestSlotDetails[tieResult.BestItemToSlotIndex[1]].EffectiveLevel);
+			Assert.Equal(2, tieResult.BestSlotDetails[tieResult.BestItemToSlotIndex[0]].EffectiveLevel);
 			for (int i = 0; i + 1 < tieResult.TopCandidates.Count; i++) {
 				CandidateMetrics left = tieResult.TopCandidates[i].Metrics;
 				CandidateMetrics right = tieResult.TopCandidates[i + 1].Metrics;
