@@ -1145,6 +1145,10 @@ namespace SephiriaOptimizer.Models {
 
 		public bool ConsiderCompanionEmblemArtifacts { get; set; } = true;
 
+		public bool HasExplicitPriority(int instanceId) {
+			return InstancePriorities.ContainsKey(instanceId);
+		}
+
 		public ArtifactPriorityTier GetPriority(
 			int instanceId,
 			ArtifactPriorityTier defaultTier = ArtifactPriorityTier.Normal
@@ -1155,20 +1159,35 @@ namespace SephiriaOptimizer.Models {
 			return defaultTier;
 		}
 
-		public void CyclePriority(int instanceId) {
-			ArtifactPriorityTier current = GetPriority(instanceId);
+		public void SetPriority(int instanceId, ArtifactPriorityTier tier) {
+			InstancePriorities[instanceId] = tier;
+		}
+
+		public void ClearPriority(int instanceId) {
+			InstancePriorities.Remove(instanceId);
+		}
+
+		public ArtifactPriorityTier CyclePriority(int instanceId) {
+			return CyclePriority(instanceId, ArtifactPriorityTier.Normal);
+		}
+
+		public ArtifactPriorityTier CyclePriority(
+			int instanceId,
+			ArtifactPriorityTier currentDisplayedTier
+		) {
+			ArtifactPriorityTier current = InstancePriorities.TryGetValue(instanceId, out ArtifactPriorityTier saved)
+				? saved
+				: currentDisplayedTier;
 			ArtifactPriorityTier next = current switch {
-				ArtifactPriorityTier.Normal => ArtifactPriorityTier.Core,
 				ArtifactPriorityTier.Core => ArtifactPriorityTier.High,
-				ArtifactPriorityTier.High => ArtifactPriorityTier.Low,
+				ArtifactPriorityTier.High => ArtifactPriorityTier.Normal,
+				ArtifactPriorityTier.Normal => ArtifactPriorityTier.Low,
 				ArtifactPriorityTier.Low => ArtifactPriorityTier.Sacrifice,
-				_ => ArtifactPriorityTier.Normal
+				ArtifactPriorityTier.Sacrifice => ArtifactPriorityTier.Core,
+				_ => ArtifactPriorityTier.Core
 			};
-			if (next == ArtifactPriorityTier.Normal) {
-				InstancePriorities.Remove(instanceId);
-			} else {
-				InstancePriorities[instanceId] = next;
-			}
+			InstancePriorities[instanceId] = next;
+			return next;
 		}
 
 		public void ToggleChalcedonyCategory(string categoryKey) {

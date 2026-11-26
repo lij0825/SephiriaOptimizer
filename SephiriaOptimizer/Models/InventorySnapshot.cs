@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using SephiriaOptimizer.Solver;
 
@@ -14,6 +15,11 @@ namespace SephiriaOptimizer.Models {
 		public int UnlockedSlots { get; }
 		public SlotCoord[] Slots { get; }
 		public ulong[] MooreNeighborMasks { get; }
+		public ulong[] OrthogonalNeighborMasks { get; }
+		public ulong[] RowSlotMasks { get; }
+		public ulong[] ColSlotMasks { get; }
+		public sbyte[] HorizontalNeighborLeft { get; }
+		public sbyte[] HorizontalNeighborRight { get; }
 		public int[] BaseSlotLevel { get; }
 		public int[] BaseSlotDisable { get; }
 		public int[] BaseSlotIgnoreCriteria { get; }
@@ -38,6 +44,9 @@ namespace SephiriaOptimizer.Models {
 		public int[] ExtraMysticTier2Slots { get; }
 		public uint UserTargetCategoryMask { get; }
 		public int DependencyArtifactCount { get; }
+		public bool HasAnyUserPriority { get; }
+		public bool HasAnyCompanionEmblem { get; }
+		public bool HasUnplacedCandidates { get; }
 		public PlayerCombatBaseline CombatBaseline { get; }
 		public bool ConsiderCompanionEmblemArtifacts { get; }
 		public DpsBreakdown CurrentBreakdown { get; }
@@ -84,6 +93,40 @@ namespace SephiriaOptimizer.Models {
 				Array.Copy(mooreNeighborMasks, MooreNeighborMasks, UnlockedSlots);
 			} else {
 				MooreNeighborMasks = ComputeMooreNeighborMasks(Width, Height, UnlockedSlots);
+			}
+
+			OrthogonalNeighborMasks = new ulong[UnlockedSlots];
+			HorizontalNeighborLeft = new sbyte[UnlockedSlots];
+			HorizontalNeighborRight = new sbyte[UnlockedSlots];
+			RowSlotMasks = new ulong[Height];
+			ColSlotMasks = new ulong[Width];
+			for (int s = 0; s < UnlockedSlots; s++) {
+				int x = Slots[s].X;
+				int y = Slots[s].Y;
+				RowSlotMasks[y] |= 1UL << s;
+				ColSlotMasks[x] |= 1UL << s;
+
+				int left = CoordToSlotIndex(x - 1, y);
+				int right = CoordToSlotIndex(x + 1, y);
+				int up = CoordToSlotIndex(x, y - 1);
+				int down = CoordToSlotIndex(x, y + 1);
+				HorizontalNeighborLeft[s] = left >= 0 ? (sbyte)left : (sbyte)-1;
+				HorizontalNeighborRight[s] = right >= 0 ? (sbyte)right : (sbyte)-1;
+
+				ulong ortho = 0UL;
+				if (left >= 0) {
+					ortho |= 1UL << left;
+				}
+				if (right >= 0) {
+					ortho |= 1UL << right;
+				}
+				if (up >= 0) {
+					ortho |= 1UL << up;
+				}
+				if (down >= 0) {
+					ortho |= 1UL << down;
+				}
+				OrthogonalNeighborMasks[s] = ortho;
 			}
 
 			BaseSlotLevel = CopyOrAllocate(baseSlotLevel, UnlockedSlots);
@@ -145,12 +188,27 @@ namespace SephiriaOptimizer.Models {
 			Array.Fill(InitialSlotToItemIndex, -1);
 			InitialItemRotations = new int[Items.Length];
 			int depCount = 0;
+			bool anyUserPriority = preferredNeedleTargetInstanceId >= 0
+				|| preferredChalcedonyCategoryId >= 0
+				|| targetMask != 0u;
+			bool anyCompanionEmblem = false;
+			bool anyUnplaced = false;
 
 			for (int i = 0; i < Items.Length; i++) {
 				SlotItemSnapshot item = Items[i];
 				InitialItemRotations[i] = item.InitialRotation;
-				if (item.InitialSlotIndex >= 0 && item.InitialSlotIndex < UnlockedSlots) {
+				if (item.InitialSlotIndex >= 0
+					&& item.InitialSlotIndex < UnlockedSlots
+					&& InitialSlotToItemIndex[item.InitialSlotIndex] < 0) {
 					InitialSlotToItemIndex[item.InitialSlotIndex] = i;
+				} else {
+					anyUnplaced = true;
+				}
+				if (item.IsUserPriorityOverridden) {
+					anyUserPriority = true;
+				}
+				if (item.IsCompanionEmblemArtifact) {
+					anyCompanionEmblem = true;
 				}
 				if (item.Kind == SlotItemKind.Artifact
 					&& item.HasDependencyTarget
@@ -160,8 +218,98 @@ namespace SephiriaOptimizer.Models {
 				}
 			}
 			DependencyArtifactCount = depCount;
+			HasAnyUserPriority = anyUserPriority;
+			HasAnyCompanionEmblem = anyCompanionEmblem;
+			HasUnplacedCandidates = anyUnplaced;
 			ConsiderCompanionEmblemArtifacts = considerCompanionEmblemArtifacts;
 			CurrentBreakdown = DpsEstimator.CalculateCurrentBreakdown(this);
+		}
+
+		public InventorySnapshot WithUserSettings(
+			OptimizerUserSettings settings,
+			IReadOnlyCollection<int>? pinnedSlotIndices = null
+		) {
+			if (settings == null) {
+				throw new ArgumentNullException(nameof(settings));
+			}
+
+			SlotItemSnapshot[] updatedItems = new SlotItemSnapshot[Items.Length];
+			for (int i = 0; i < Items.Length; i++) {
+				SlotItemSnapshot src = Items[i];
+				bool hasExplicit = settings.HasExplicitPriority(src.InstanceId);
+				ArtifactPriorityTier nextTier = hasExplicit
+					? settings.GetPriority(src.InstanceId, src.PriorityTier)
+					: src.PriorityTier;
+				bool nextOverridden = hasExplicit;
+
+				if (!hasExplicit
+					&& settings.PreferredNeedleTargetInstanceId == src.InstanceId
+					&& nextTier < ArtifactPriorityTier.Core) {
+					nextTier = ArtifactPriorityTier.Core;
+					nextOverridden = true;
+				}
+
+				updatedItems[i] = src.WithPriorityOverride(nextTier, nextOverridden);
+			}
+
+			ComboCategoryInfo[] updatedCombos = new ComboCategoryInfo[ComboCategories.Length];
+			for (int i = 0; i < ComboCategories.Length; i++) {
+				ComboCategoryInfo srcCombo = ComboCategories[i];
+				bool isUserTarget = settings.TargetComboCategories.Contains(srcCombo.CategoryKey);
+				updatedCombos[i] = new ComboCategoryInfo(
+					srcCombo.CategoryId,
+					srcCombo.CategoryKey,
+					srcCombo.DisplayName,
+					srcCombo.StaticCount,
+					srcCombo.Breakpoints,
+					isUserTarget,
+					srcCombo.BreakpointStatBonuses,
+					srcCombo.BreakpointStatDeltas
+				);
+			}
+
+			int preferredChalcedonyId = -1;
+			if (!string.IsNullOrEmpty(settings.PreferredChalcedonyCategory)) {
+				preferredChalcedonyId = FindCategoryId(settings.PreferredChalcedonyCategory);
+			}
+
+			bool[] nextPinned = new bool[UnlockedSlots];
+			if (pinnedSlotIndices != null) {
+				foreach (int slotIdx in pinnedSlotIndices) {
+					if (slotIdx >= 0 && slotIdx < UnlockedSlots) {
+						nextPinned[slotIdx] = true;
+					}
+				}
+			} else {
+				Array.Copy(PinnedSlots, nextPinned, UnlockedSlots);
+			}
+
+			return new InventorySnapshot(
+				Width,
+				Height,
+				UnlockedSlots,
+				BaseSlotLevel,
+				BaseSlotDisable,
+				BaseSlotIgnoreCriteria,
+				BaseSlotMultiplyLevel,
+				nextPinned,
+				IsFullHpSatisfied,
+				GlobalActiveValue,
+				updatedItems,
+				updatedCombos,
+				TalentRules,
+				settings.PreferredNeedleTargetInstanceId,
+				preferredChalcedonyId,
+				MooreNeighborMasks,
+				MysticSlot0,
+				MysticSlot1,
+				MysticTier1Threshold,
+				MysticTier2Threshold,
+				ExtraMysticTier2Slots,
+				CombatBaseline,
+				ExtraMysticTier1Slots,
+				settings.ConsiderCompanionEmblemArtifacts
+			);
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]

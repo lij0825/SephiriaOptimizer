@@ -2,6 +2,78 @@ using System;
 using System.Collections.Generic;
 
 namespace SephiriaOptimizer.Solver {
+	public readonly struct LexicographicScore
+		: IComparable<LexicographicScore>, IEquatable<LexicographicScore> {
+		public long Tier1UserPriority { get; }
+		public long Tier2PenaltyOffset { get; }
+		public long Tier3SynergyAndAmplification { get; }
+		public long Tier4SlotEfficiency { get; }
+
+		public LexicographicScore(
+			long tier1UserPriority,
+			long tier2PenaltyOffset,
+			long tier3SynergyAndAmplification,
+			long tier4SlotEfficiency
+		) {
+			Tier1UserPriority = tier1UserPriority;
+			Tier2PenaltyOffset = tier2PenaltyOffset;
+			Tier3SynergyAndAmplification = tier3SynergyAndAmplification;
+			Tier4SlotEfficiency = tier4SlotEfficiency;
+		}
+
+		public int CompareTo(LexicographicScore other) {
+			int t1 = Tier1UserPriority.CompareTo(other.Tier1UserPriority);
+			if (t1 != 0) {
+				return t1;
+			}
+			int t2 = Tier2PenaltyOffset.CompareTo(other.Tier2PenaltyOffset);
+			if (t2 != 0) {
+				return t2;
+			}
+			int t3 = Tier3SynergyAndAmplification.CompareTo(other.Tier3SynergyAndAmplification);
+			if (t3 != 0) {
+				return t3;
+			}
+			return Tier4SlotEfficiency.CompareTo(other.Tier4SlotEfficiency);
+		}
+
+		public bool Equals(LexicographicScore other) {
+			return Tier1UserPriority == other.Tier1UserPriority
+				&& Tier2PenaltyOffset == other.Tier2PenaltyOffset
+				&& Tier3SynergyAndAmplification == other.Tier3SynergyAndAmplification
+				&& Tier4SlotEfficiency == other.Tier4SlotEfficiency;
+		}
+
+		public override bool Equals(object? obj) {
+			return obj is LexicographicScore other && Equals(other);
+		}
+
+		public override int GetHashCode() {
+			return HashCode.Combine(
+				Tier1UserPriority,
+				Tier2PenaltyOffset,
+				Tier3SynergyAndAmplification,
+				Tier4SlotEfficiency
+			);
+		}
+
+		public static bool operator ==(LexicographicScore left, LexicographicScore right) {
+			return left.Equals(right);
+		}
+
+		public static bool operator !=(LexicographicScore left, LexicographicScore right) {
+			return !left.Equals(right);
+		}
+
+		public static bool operator >(LexicographicScore left, LexicographicScore right) {
+			return left.CompareTo(right) > 0;
+		}
+
+		public static bool operator <(LexicographicScore left, LexicographicScore right) {
+			return left.CompareTo(right) < 0;
+		}
+	}
+
 	public readonly struct CandidateMetrics {
 		public int Score { get; }
 		public double ExactEstimatedDps { get; }
@@ -12,6 +84,7 @@ namespace SephiriaOptimizer.Solver {
 		public int RotateClickCount { get; }
 		public int ExecutionCost => SwapCount + RotateClickCount;
 		public ulong CanonicalHash { get; }
+		public LexicographicScore LexScore { get; }
 
 		public CandidateMetrics(
 			int score,
@@ -20,7 +93,8 @@ namespace SephiriaOptimizer.Solver {
 			int utilityEffectiveLevelSum,
 			int swapCount,
 			int rotateClickCount,
-			ulong canonicalHash
+			ulong canonicalHash,
+			LexicographicScore lexScore = default
 		) {
 			Score = score;
 			ExactEstimatedDps = Math.Max(0.0, exactEstimatedDps);
@@ -30,13 +104,15 @@ namespace SephiriaOptimizer.Solver {
 			SwapCount = Math.Max(0, swapCount);
 			RotateClickCount = Math.Max(0, rotateClickCount);
 			CanonicalHash = canonicalHash;
+			LexScore = lexScore.Equals(default) && (score != 0 || hardViolationCount > 0)
+				? new LexicographicScore(0L, -1_000_000L * Math.Max(0, hardViolationCount), score, 0L)
+				: lexScore;
 		}
 
 		public static int CompareLexicographical(in CandidateMetrics left, in CandidateMetrics right) {
-			long leftCentiDps = (long)Math.Round(left.ExactEstimatedDps * 100.0);
-			long rightCentiDps = (long)Math.Round(right.ExactEstimatedDps * 100.0);
-			if (leftCentiDps != rightCentiDps) {
-				return rightCentiDps.CompareTo(leftCentiDps);
+			int lexCmp = right.LexScore.CompareTo(left.LexScore);
+			if (lexCmp != 0) {
+				return lexCmp;
 			}
 
 			bool leftZeroViol = left.HardViolationCount == 0;
@@ -48,9 +124,6 @@ namespace SephiriaOptimizer.Solver {
 				return left.HardViolationCount.CompareTo(right.HardViolationCount);
 			}
 
-			if (left.UtilityEffectiveLevelSum != right.UtilityEffectiveLevelSum) {
-				return right.UtilityEffectiveLevelSum.CompareTo(left.UtilityEffectiveLevelSum);
-			}
 			if (left.Score != right.Score) {
 				return right.Score.CompareTo(left.Score);
 			}

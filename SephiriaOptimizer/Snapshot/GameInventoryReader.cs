@@ -325,13 +325,14 @@ namespace SephiriaOptimizer.Snapshot {
 						charm,
 						isDisabledByWeaponOrDual
 					);
-					ArtifactPriorityTier priorityTier = settings.GetPriority(
-						itemInstance.InstanceID,
-						defaultPriority
-					);
-					if (settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID
+					ArtifactPriorityTier priorityTier = isUserPriorityOverridden
+						? settings.GetPriority(itemInstance.InstanceID, defaultPriority)
+						: defaultPriority;
+					if (!isUserPriorityOverridden
+						&& settings.PreferredNeedleTargetInstanceId == itemInstance.InstanceID
 						&& priorityTier < ArtifactPriorityTier.Core) {
 						priorityTier = ArtifactPriorityTier.Core;
+						isUserPriorityOverridden = true;
 					}
 
 					int weight = ComputeArtifactWeight(entity, charm, customEntityWeights);
@@ -458,9 +459,18 @@ namespace SephiriaOptimizer.Snapshot {
 						unlockedSlots
 					);
 
+					bool tabletUserPriorityOverridden = settings.HasExplicitPriority(
+						itemInstance.InstanceID
+					);
+					ArtifactPriorityTier tabletPriorityTier = tabletUserPriorityOverridden
+						? settings.GetPriority(itemInstance.InstanceID, ArtifactPriorityTier.Normal)
+						: ArtifactPriorityTier.Normal;
+
 					string symmetryKey = isRotatable
-						? $"T:{entity.id}:R1:{conditionQuery}:{effectQuery}"
-						: $"T:{entity.id}:R0:{initialRotation}:{conditionQuery}:{effectQuery}";
+						? $"T:{entity.id}:R1:{conditionQuery}:{effectQuery}:"
+							+ $"{(int)tabletPriorityTier}:{(tabletUserPriorityOverridden ? 1 : 0)}"
+						: $"T:{entity.id}:R0:{initialRotation}:{conditionQuery}:{effectQuery}:"
+							+ $"{(int)tabletPriorityTier}:{(tabletUserPriorityOverridden ? 1 : 0)}";
 					int symmetryGroupId = GetOrAssignSymmetryGroup(
 						symmetryGroupMap,
 						symmetryKey,
@@ -492,7 +502,9 @@ namespace SephiriaOptimizer.Snapshot {
 						false,
 						Array.Empty<string>(),
 						placementRules,
-						symmetryGroupId
+						symmetryGroupId,
+						tabletPriorityTier,
+						isUserPriorityOverridden: tabletUserPriorityOverridden
 					));
 				} else {
 					string symmetryKey = $"O:{entity.id}";

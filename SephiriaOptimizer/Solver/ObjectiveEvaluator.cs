@@ -76,7 +76,8 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations
 		) {
-			return EvaluateInternal(snapshot, slotToItemIndex, itemRotations, out _, out _, out _);
+			EvaluateLexicographic(snapshot, slotToItemIndex, itemRotations, out int scalarScore, out _, out _);
+			return scalarScore;
 		}
 
 		public static int CalculateEstimatedDummyDps(
@@ -84,8 +85,8 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations
 		) {
-			EvaluateInternal(snapshot, slotToItemIndex, itemRotations, out double exactDps, out _, out _);
-			return Math.Max(0, (int)Math.Round(exactDps));
+			DpsBreakdown breakdown = EvaluateDpsBreakdown(snapshot, slotToItemIndex, itemRotations);
+			return Math.Max(0, (int)Math.Round(breakdown.TotalEstimatedDps));
 		}
 
 		public static int EvaluateWithDps(
@@ -94,8 +95,9 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> itemRotations,
 			out int estimatedDps
 		) {
-			int score = EvaluateInternal(snapshot, slotToItemIndex, itemRotations, out double exactDps, out _, out _);
-			estimatedDps = Math.Max(0, (int)Math.Round(exactDps));
+			EvaluateLexicographic(snapshot, slotToItemIndex, itemRotations, out int score, out _, out _);
+			DpsBreakdown breakdown = EvaluateDpsBreakdown(snapshot, slotToItemIndex, itemRotations);
+			estimatedDps = Math.Max(0, (int)Math.Round(breakdown.TotalEstimatedDps));
 			return score;
 		}
 
@@ -107,30 +109,32 @@ namespace SephiriaOptimizer.Solver {
 			out int hardViolationCount,
 			out int utilityEffectiveLevelSum
 		) {
-			return EvaluateInternal(
+			EvaluateLexicographic(
 				snapshot,
 				slotToItemIndex,
 				itemRotations,
-				out exactEstimatedDps,
+				out int score,
 				out hardViolationCount,
 				out utilityEffectiveLevelSum
 			);
+			exactEstimatedDps = EvaluateDpsBreakdown(snapshot, slotToItemIndex, itemRotations).TotalEstimatedDps;
+			return score;
 		}
 
-		private static int EvaluateInternal(
+		public static LexicographicScore EvaluateLexicographic(
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> slotToItemIndex,
 			ReadOnlySpan<int> itemRotations,
-			out double exactEstimatedDps,
+			out int scalarScore,
 			out int hardViolationCount,
 			out int utilityEffectiveLevelSum
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			if (unlockedSlots <= 0) {
-				exactEstimatedDps = 0.0;
+				scalarScore = 0;
 				hardViolationCount = 0;
 				utilityEffectiveLevelSum = 0;
-				return 0;
+				return default;
 			}
 
 			Span<int> tabletDeltaBuf = stackalloc int[InventorySnapshot.MaxSupportedSlots];
@@ -152,6 +156,7 @@ namespace SephiriaOptimizer.Solver {
 			Span<byte> isActiveBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<byte> naturalCriteriaBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 			Span<uint> categoryMaskBuf = stackalloc uint[InventorySnapshot.MaxSupportedSlots];
+			Span<byte> tabletCondMetBuf = stackalloc byte[InventorySnapshot.MaxSupportedSlots];
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int permLvl = snapshot.BaseSlotLevel[s];
@@ -179,35 +184,54 @@ namespace SephiriaOptimizer.Solver {
 				isActiveBuf[s] = 0;
 				naturalCriteriaBuf[s] = 0;
 				categoryMaskBuf[s] = 0u;
+				tabletCondMetBuf[s] = 0;
 			}
 
 			SlotItemSnapshot[] items = snapshot.Items;
+			int trackedItemCount = Math.Min(items.Length, 256);
+			Span<sbyte> itemPlacedSlotBuf = stackalloc sbyte[256];
+			for (int i = 0; i < trackedItemCount; i++) {
+				itemPlacedSlotBuf[i] = -1;
+			}
+
 			TalentRuleSnapshot talentRules = snapshot.TalentRules;
 			bool hasEngravingTalent = talentRules.TabletEngravingCount > 0;
-			int tabletPlacementScore = 0;
 			hardViolationCount = 0;
 			utilityEffectiveLevelSum = 0;
+
+			int offsetPenaltyCount = 0;
+			long tier3TabletScore = 0L;
+			long tier4WasteScore = 0L;
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
 				if (itemIdx < 0) {
 					continue;
 				}
+				if (itemIdx < trackedItemCount) {
+					itemPlacedSlotBuf[itemIdx] = (sbyte)s;
+				}
 				SlotItemSnapshot item = items[itemIdx];
 				if (item.Kind != SlotItemKind.StoneTablet) {
 					continue;
 				}
 
-				int rotation = itemRotations[itemIdx] & 3;
+				int rotation = itemIdx < itemRotations.Length ? (itemRotations[itemIdx] & 3) : 0;
 				TabletPlacementRule rule = item.GetPlacementRule(s, rotation);
 				if (!IsTabletConditionMet(snapshot, slotToItemIndex, s, rule)) {
-					tabletPlacementScore -= UnmetTabletConditionPenalty;
-					hardViolationCount++;
+					if (item.PriorityTier != ArtifactPriorityTier.Sacrifice) {
+						hardViolationCount++;
+					}
 					continue;
 				}
 
+				tabletCondMetBuf[s] = 1;
+				if (rule.Conditions.Length > 0) {
+					tier3TabletScore += 120L;
+				}
 				PrecomputedEffect[] effects = rule.Effects;
 				int outOfBoundsPenalties = 0;
+
 				for (int e = 0; e < effects.Length; e++) {
 					PrecomputedEffect eff = effects[e];
 					int targetSlot = eff.TargetSlotIndex;
@@ -226,9 +250,10 @@ namespace SephiriaOptimizer.Solver {
 									negLevelSumBuf[targetSlot] += -eff.LevelParam;
 								}
 							} else if (eff.LevelParam > 0) {
-								tabletPlacementScore -= eff.LevelParam * WastedPositiveOutOfBoundsPenalty;
+								tier4WasteScore -= eff.LevelParam * 220L;
 							} else if (eff.LevelParam < 0) {
-								tabletPlacementScore += (-eff.LevelParam) * NeutralizedNegativeLevelBonus;
+								offsetPenaltyCount++;
+								tier4WasteScore += (-eff.LevelParam) * (long)NeutralizedNegativeLevelBonus;
 								outOfBoundsPenalties++;
 							}
 							break;
@@ -238,7 +263,8 @@ namespace SephiriaOptimizer.Solver {
 								disableBuf[targetSlot]++;
 								negativePenaltyBuf[targetSlot] += 2;
 							} else {
-								tabletPlacementScore += NeutralizedDisableBonus;
+								offsetPenaltyCount++;
+								tier4WasteScore += NeutralizedDisableBonus;
 								outOfBoundsPenalties++;
 							}
 							break;
@@ -251,7 +277,7 @@ namespace SephiriaOptimizer.Solver {
 									otherPosBuffBuf[targetSlot]++;
 								}
 							} else {
-								tabletPlacementScore -= WastedPositiveOutOfBoundsPenalty;
+								tier4WasteScore -= 180L;
 							}
 							break;
 						}
@@ -259,14 +285,14 @@ namespace SephiriaOptimizer.Solver {
 							if (targetSlot >= 0 && targetSlot < unlockedSlots) {
 								mulBuf[targetSlot] += eff.LevelParam;
 							} else if (eff.LevelParam > 1) {
-								tabletPlacementScore -= (eff.LevelParam - 1) * WastedPositiveOutOfBoundsPenalty;
+								tier4WasteScore -= (eff.LevelParam - 1) * 160L;
 							}
 							break;
 						}
 					}
 				}
 				if (hasEngravingTalent && outOfBoundsPenalties > 0) {
-					tabletPlacementScore += outOfBoundsPenalties * EngravingOutOfBoundsBonus;
+					tier4WasteScore += outOfBoundsPenalties * (long)EngravingOutOfBoundsBonus;
 				}
 			}
 
@@ -378,9 +404,8 @@ namespace SephiriaOptimizer.Solver {
 					}
 					SlotItemSnapshot item = items[slotToItemIndex[s]];
 					if (item.IsWhitePaperCharm) {
-						SlotCoord coord = snapshot.Slots[s];
-						int leftSlot = snapshot.CoordToSlotIndex(coord.X - 1, coord.Y);
-						int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
+						int leftSlot = snapshot.HorizontalNeighborLeft[s];
+						int rightSlot = snapshot.HorizontalNeighborRight[s];
 						uint leftMask = ResolveWhitePaperNeighborMask(
 							snapshot,
 							slotToItemIndex,
@@ -476,7 +501,9 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			int totalScore = tabletPlacementScore;
+			int residualEnchantErosion = 0;
+			int emptyOrExcludedPlacedSlots = 0;
+			long tier3ArtifactScore = 0L;
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int itemIdx = slotToItemIndex[s];
@@ -486,16 +513,16 @@ namespace SephiriaOptimizer.Solver {
 				int slotDelta = tabletDeltaBuf[s];
 
 				if (itemIdx < 0) {
+					emptyOrExcludedPlacedSlots++;
 					int scaledSlotLevel = totalMul != 0 ? (slotDelta * totalMul) : slotDelta;
 					displayedLevelBuf[s] = scaledSlotLevel;
 					if (baseMul > 1 && slotDelta == 0) {
-						totalScore -= (baseMul - 1) * WastedMultiplierPenalty;
+						tier4WasteScore -= (baseMul - 1) * (long)WastedMultiplierPenalty;
 					}
 					if (totalMul != 0 && slotDelta != 0) {
 						int extraScale = slotDelta * (totalMul - 1);
 						if (extraScale > 0) {
 							positiveBuffBuf[s] += extraScale;
-							otherPosBuffBuf[s] += extraScale;
 						} else if (extraScale < 0) {
 							negativePenaltyBuf[s] += -extraScale;
 						}
@@ -504,9 +531,10 @@ namespace SephiriaOptimizer.Solver {
 					int negPen = negativePenaltyBuf[s];
 					if (posBuff > 0) {
 						int wastedPositive = Math.Max(scaledSlotLevel, posBuff);
-						totalScore -= wastedPositive * WastedPositiveOnEmptySlotPenalty;
+						tier4WasteScore -= wastedPositive * (long)WastedPositiveOnEmptySlotPenalty;
 					} else if (posBuff == 0 && negPen > 0) {
-						totalScore += negPen * NeutralizedNegativeLevelBonus;
+						offsetPenaltyCount++;
+						tier4WasteScore += negPen * (long)NeutralizedNegativeLevelBonus;
 					}
 					continue;
 				}
@@ -516,7 +544,7 @@ namespace SephiriaOptimizer.Solver {
 					int scaledSlotLevel = totalMul != 0 ? (slotDelta * totalMul) : slotDelta;
 					displayedLevelBuf[s] = scaledSlotLevel;
 					if (baseMul > 1 && slotDelta == 0) {
-						totalScore -= (baseMul - 1) * WastedMultiplierPenalty;
+						tier4WasteScore -= (baseMul - 1) * (long)WastedMultiplierPenalty;
 					}
 					if (totalMul != 0 && slotDelta != 0) {
 						int extraScale = slotDelta * (totalMul - 1);
@@ -530,11 +558,10 @@ namespace SephiriaOptimizer.Solver {
 					int otherPos = otherPosBuffBuf[s];
 					int negPen = negativePenaltyBuf[s];
 					if (otherPos > 0) {
-						totalScore -= otherPos * TabletOnBuffedSlotTieBreakerPenalty;
-					} else if (positiveBuffBuf[s] > 0) {
-						totalScore -= positiveBuffBuf[s] * WastedPositiveOnEmptySlotPenalty;
+						tier4WasteScore -= otherPos * (long)TabletOnBuffedSlotTieBreakerPenalty;
 					} else if (negPen > 0) {
-						totalScore += negPen * NeutralizedNegativeLevelBonus;
+						offsetPenaltyCount++;
+						tier4WasteScore += negPen * (long)NeutralizedNegativeLevelBonus;
 					}
 					continue;
 				}
@@ -544,7 +571,7 @@ namespace SephiriaOptimizer.Solver {
 				displayedLevelBuf[s] = displayedLevel;
 				int slotLevel = displayedLevel - item.BaseLevel;
 				if (baseMul > 1 && preMul == 0) {
-					totalScore -= (baseMul - 1) * WastedMultiplierPenalty;
+					tier4WasteScore -= (baseMul - 1) * (long)WastedMultiplierPenalty;
 				}
 				if (totalMul != 0 && preMul != 0) {
 					int extraScale = preMul * (totalMul - 1);
@@ -556,18 +583,26 @@ namespace SephiriaOptimizer.Solver {
 				}
 
 				bool isExcludedCompanion = snapshot.IsExcludedCompanionEmblem(item);
-				bool isNonPriorityOrDisabled = item.PriorityTier == ArtifactPriorityTier.Sacrifice
+				bool absorbsPenalty = item.PriorityTier == ArtifactPriorityTier.Sacrifice
 					|| item.IsDisabledByWeaponOrDual
 					|| isExcludedCompanion;
-				bool absorbsPenalty = isNonPriorityOrDisabled;
+
+				if (isExcludedCompanion) {
+					emptyOrExcludedPlacedSlots++;
+					if (item.InitialSlotIndex < 0) {
+						hardViolationCount++;
+					}
+				}
+
 				if (absorbsPenalty) {
 					int posBuff = positiveBuffBuf[s];
 					int negPen = negativePenaltyBuf[s];
 					if (posBuff > 0) {
 						int wastedPositive = Math.Max(slotLevel, posBuff);
-						totalScore -= wastedPositive * WastedPositiveOnEmptySlotPenalty;
+						tier4WasteScore -= wastedPositive * (long)WastedPositiveOnEmptySlotPenalty;
 					} else if (posBuff == 0 && negPen > 0) {
-						totalScore += negPen * NeutralizedNegativeLevelBonus;
+						offsetPenaltyCount++;
+						tier4WasteScore += negPen * (long)NeutralizedNegativeLevelBonus;
 					}
 				}
 
@@ -586,37 +621,9 @@ namespace SephiriaOptimizer.Solver {
 					if (rawPosLevels > 0 && rawNegLevels > 0) {
 						int effMul = totalMul != 0 ? Math.Abs(totalMul) : 1;
 						int rawCanceled = Math.Min(rawPosLevels, rawNegLevels);
-						int canceledPositiveBuff = rawCanceled * effMul;
-						int positiveMul = totalMul > 0 ? totalMul : 1;
-						int unpenalizedPreMul = item.BaseLevel + rawPosLevels;
-						int unpenalizedEffective = Math.Clamp(
-							unpenalizedPreMul * positiveMul,
-							0,
-							item.MaxLevel
-						);
-						int actualEffective = !isDisabled ? Math.Clamp(displayedLevel, 0, item.MaxLevel) : 0;
-						int lostEffectiveLevels = item.MaxLevel > 0
-							? Math.Max(0, unpenalizedEffective - actualEffective)
-							: 0;
-
-						if (!isDisabled && item.MaxLevel > 0 && lostEffectiveLevels == 0) {
-							totalScore -= canceledPositiveBuff * OvercappedPlusMinusTieBreakerPenalty;
-						} else {
-							int collisionPenalty = canceledPositiveBuff * TabletPlusMinusCollisionPenalty;
-							if (slotLevel > 0) {
-								collisionPenalty += (rawNegLevels * effMul) * TabletMinusOnNetPositiveSlotPenalty;
-							}
-							if (lostEffectiveLevels > 0) {
-								collisionPenalty += (int)Math.Round(
-									lostEffectiveLevels
-									* TabletCollisionEffectiveLevelLossPenalty
-									* GetNormalizedWeight(item)
-								);
-							}
-							totalScore -= collisionPenalty;
-						}
+						tier4WasteScore -= rawCanceled * effMul * 35L;
 					} else if (disableBuf[s] > 0 && positiveBuffBuf[s] > 0) {
-						totalScore -= positiveBuffBuf[s] * TabletPlusMinusCollisionPenalty;
+						tier4WasteScore -= positiveBuffBuf[s] * 120L;
 					}
 				}
 
@@ -626,10 +633,7 @@ namespace SephiriaOptimizer.Solver {
 					categoryMaskBuf[s] = 0u;
 					if (!absorbsPenalty) {
 						hardViolationCount++;
-						double weight = GetNormalizedWeight(item);
-						int absDisplayed = Math.Abs(displayedLevel);
-						int rawPenalty = DeactivationBasePenalty + (absDisplayed * NegativeLevelExtraPenalty);
-						totalScore -= (int)Math.Round(rawPenalty * weight);
+						residualEnchantErosion += Math.Max(1, Math.Abs(displayedLevel));
 					}
 					continue;
 				}
@@ -639,40 +643,61 @@ namespace SephiriaOptimizer.Solver {
 				effectiveLevelBuf[s] = effectiveLevel;
 
 				if (absorbsPenalty) {
-					totalScore += SacrificeActiveTieBreakerScore;
+					tier4WasteScore += SacrificeActiveTieBreakerScore;
 					continue;
+				}
+
+				if (negLevelSumBuf[s] > 0 || (item.ConstraintType != ArtifactConstraintType.None && criteriaIgnored)) {
+					if (effectiveLevel >= Math.Min(item.MaxLevel, Math.Max(0, item.BaseLevel))) {
+						offsetPenaltyCount++;
+					}
+				}
+				if (item.BaseLevel > 0 && effectiveLevel < item.BaseLevel) {
+					residualEnchantErosion += item.BaseLevel - effectiveLevel;
 				}
 
 				if (!item.IsAttackableCharm) {
 					utilityEffectiveLevelSum += effectiveLevel;
 				}
 
-				double artifactWeight = GetNormalizedWeight(item);
-				int levelScore = item.MaxLevel > 0 ? (effectiveLevel * EffectiveLevelScoreMultiplier) : 0;
-				int maxBonus = (item.MaxLevel > 0 && effectiveLevel == item.MaxLevel) ? MaxLevelReachedBonus : 0;
-				int ignoreBonus = 0;
+				double defaultFactor = GetDefaultTierFactor(item);
+				long levelPts = item.MaxLevel > 0 ? (effectiveLevel * 210L) : 0L;
+				long maxBonus = (item.MaxLevel > 0 && effectiveLevel == item.MaxLevel) ? 65L : 0L;
+				long ignoreBonus = 0L;
 				if (item.ConstraintType != ArtifactConstraintType.None && criteriaIgnored) {
-					ignoreBonus = naturalCriteriaMet
-						? (IgnoreConstraintSynergyBonus / 2)
-						: IgnoreConstraintSynergyBonus;
+					ignoreBonus = naturalCriteriaMet ? 45L : 95L;
 				}
 
-				int artifactScore = (int)Math.Round(
-					(BaseActiveArtifactScore + levelScore + maxBonus + ignoreBonus) * artifactWeight
-				);
-				if (slotLevel < 0) {
-					artifactScore -= (-slotLevel) * 140;
+				tier3ArtifactScore += (long)Math.Round((220L + levelPts + maxBonus + ignoreBonus) * defaultFactor);
+				if (totalMul > 1 && preMul > 0 && effectiveLevel > item.BaseLevel) {
+					tier3ArtifactScore += (totalMul - 1) * 45L;
 				}
 				if (displayedLevel > item.MaxLevel && slotLevel > 0) {
 					int overflowLevels = Math.Min(displayedLevel - item.MaxLevel, slotLevel);
-					artifactScore += overflowLevels * MaxLevelOverflowTieBreakerBonus;
+					tier4WasteScore += overflowLevels * (long)MaxLevelOverflowTieBreakerBonus;
 				}
-
-				totalScore += artifactScore;
 			}
 
+			int eligibleUnplacedCount = 0;
+			for (int i = 0; i < trackedItemCount; i++) {
+				if (itemPlacedSlotBuf[i] >= 0) {
+					continue;
+				}
+				SlotItemSnapshot item = items[i];
+				if (item.PriorityTier == ArtifactPriorityTier.Sacrifice
+					|| item.IsDisabledByWeaponOrDual
+					|| snapshot.IsExcludedCompanionEmblem(item)) {
+					continue;
+				}
+				eligibleUnplacedCount++;
+			}
+			if (snapshot.HasUnplacedCandidates && eligibleUnplacedCount > 0 && emptyOrExcludedPlacedSlots > 0) {
+				hardViolationCount += Math.Min(eligibleUnplacedCount, emptyOrExcludedPlacedSlots);
+			}
+
+			long tier3SynergyScore = tier3TabletScore + tier3ArtifactScore;
 			if (snapshot.DependencyArtifactCount > 0 && unlockedSlots > snapshot.Width) {
-				totalScore -= EvaluateBottomRowBlockedAttackablePenalty(snapshot, slotToItemIndex);
+				tier3SynergyScore -= EvaluateBottomRowBlockedAttackablePenalty(snapshot, slotToItemIndex);
 			}
 
 			for (int s = 0; s < unlockedSlots; s++) {
@@ -688,16 +713,9 @@ namespace SephiriaOptimizer.Solver {
 				if (item.IsElementalByRowCharm && isActiveBuf[s] != 0) {
 					int assignedCatId = chalcedonyCatBuf[s];
 					if (assignedCatId >= 0) {
-						if (snapshot.PreferredChalcedonyCategoryId >= 0) {
-							if (assignedCatId == snapshot.PreferredChalcedonyCategoryId) {
-								totalScore += ChalcedonyTargetMatchBonus;
-							} else {
-								totalScore -= ChalcedonyTargetMismatchPenalty;
-							}
-						}
 						int elemBonus = item.GetRowElementalBonus(effectiveLevelBuf[s]);
 						int statAffinity = GetElementalCategoryAffinity(snapshot, assignedCatId);
-						totalScore += elemBonus * (15 + statAffinity);
+						tier3SynergyScore += 140L + (elemBonus * (22L + statAffinity));
 					}
 				}
 
@@ -707,7 +725,7 @@ namespace SephiriaOptimizer.Solver {
 
 				if (item.HasDependencyTarget && !isSacrificeOrExcluded) {
 					if (isActiveBuf[s] == 0) {
-						totalScore -= UnlinkedGoldenNeedlePenalty;
+						tier3SynergyScore -= 320L;
 					} else {
 						ulong rootsMask = needleRootsMaskBuf[s];
 						ulong bypassMask = needleBypassMaskBuf[s];
@@ -719,29 +737,27 @@ namespace SephiriaOptimizer.Solver {
 								continue;
 							}
 							SlotItemSnapshot rootItem = items[slotToItemIndex[rootSlot]];
-							double rootWeight = GetNeedleRootWeight(snapshot, rootItem);
-							if (rootWeight <= 0.0) {
+							if (snapshot.IsExcludedCompanionEmblem(rootItem)
+								|| rootItem.PriorityTier == ArtifactPriorityTier.Sacrifice) {
 								continue;
 							}
 							linkedRootCount++;
-							int needleLevel = effectiveLevelBuf[s];
-							int rootLevel = effectiveLevelBuf[rootSlot];
-							int fixedLinkBonus = (int)Math.Round(GoldenNeedleLinkBaseBonus * rootWeight);
-							double ampFactor = item.IsCompassBreakthrough
-								? 0.65
-								: (1.0 + (0.25 * (needleLevel + 1)));
-							double multiplicativeAmp = ampFactor
-								* (GoldenNeedleRootLevelFactor * rootLevel)
-								* rootWeight;
+							int needleLv = effectiveLevelBuf[s];
+							int rootLv = effectiveLevelBuf[rootSlot];
 							bool bypassRarity = (bypassMask & (1UL << rootSlot)) != 0UL;
-							if (item.HasDependencyCondition
-								&& (bypassRarity || rootItem.RarityTier <= item.DependencyMaxRarity)) {
-								multiplicativeAmp += 35.0 * (needleLevel + 1);
+							int ampPct = item.IsCompassBreakthrough
+								? 20
+								: item.GetNeedleBonusPercent(needleLv, rootItem.RarityTier, bypassRarity);
+							double rootFactor = GetDefaultTierFactor(rootItem);
+							if (snapshot.PreferredNeedleTargetInstanceId == rootItem.InstanceId) {
+								rootFactor += 0.25;
 							}
-							totalScore += fixedLinkBonus + (int)Math.Round(multiplicativeAmp);
+							tier3SynergyScore += 320L + (long)Math.Round(
+								ampPct * (4.5 + (2.5 * rootLv)) * rootFactor
+							);
 						}
 						if (linkedRootCount == 0) {
-							totalScore -= UnlinkedGoldenNeedlePenalty;
+							tier3SynergyScore -= 280L;
 						}
 					}
 				}
@@ -749,17 +765,44 @@ namespace SephiriaOptimizer.Solver {
 				if (item.IsWhitePaperCharm && !isSacrificeOrExcluded) {
 					uint copiedMask = whitePaperCopiedBuf[s];
 					if (isActiveBuf[s] != 0 && copiedMask != 0u) {
+						int copiedTags = BitOperations.PopCount(copiedMask);
 						bool copiedTargetTag = (copiedMask & snapshot.UserTargetCategoryMask) != 0u;
-						totalScore += copiedTargetTag
-							? WhitePaperTargetCopiedBonus
-							: WhitePaperGeneralCopiedBonus;
+						tier3SynergyScore += copiedTags * (copiedTargetTag ? 380L : 220L);
 					} else {
-						totalScore -= WhitePaperWastedPenalty;
+						tier4WasteScore -= WhitePaperWastedPenalty;
 					}
 				}
 			}
 
-			totalScore += EvaluateComboCategories(snapshot, dynamicComboBonusCounts);
+			int dynMysticCount = snapshot.MysticCategoryId >= 0
+				? dynamicComboBonusCounts[snapshot.MysticCategoryId]
+				: 0;
+			if (dynMysticCount > 0 && mysticTagCount >= snapshot.MysticTier1Threshold) {
+				tier3SynergyScore += 360L;
+			}
+			if (dynMysticCount > 0 && mysticTagCount >= snapshot.MysticTier2Threshold) {
+				tier3SynergyScore += 720L;
+			}
+			tier3SynergyScore += EvaluateComboCategories(snapshot, dynamicComboBonusCounts);
+
+			uint activeChaosRowsMask = 0u;
+			if (snapshot.ConsiderCompanionEmblemArtifacts) {
+				for (int s = 0; s < unlockedSlots; s++) {
+					int itemIdx = slotToItemIndex[s];
+					if (itemIdx < 0 || isActiveBuf[s] == 0) {
+						continue;
+					}
+					SlotItemSnapshot item = items[itemIdx];
+					if (item.IsCompanionChaosCharm
+						&& item.PriorityTier != ArtifactPriorityTier.Sacrifice
+						&& !snapshot.IsExcludedCompanionEmblem(item)) {
+						int yRow = snapshot.Slots[s].Y;
+						if ((uint)yRow < 32u) {
+							activeChaosRowsMask |= 1u << yRow;
+						}
+					}
+				}
+			}
 
 			ulong[] mooreNeighborMasks = snapshot.MooreNeighborMasks;
 			for (int s = 0; s < unlockedSlots; s++) {
@@ -768,12 +811,14 @@ namespace SephiriaOptimizer.Solver {
 					continue;
 				}
 				SlotItemSnapshot item = items[itemIdx];
-				if (item.Kind != SlotItemKind.Artifact) {
+				if (item.Kind != SlotItemKind.Artifact
+					|| item.PriorityTier == ArtifactPriorityTier.Sacrifice
+					|| snapshot.IsExcludedCompanionEmblem(item)) {
 					continue;
 				}
 
-				double weight = snapshot.IsExcludedCompanionEmblem(item) ? 0.0 : GetNormalizedWeight(item);
-				if (item.IsCrystalOfHarmony && weight > 0.0) {
+				double defaultFactor = GetDefaultTierFactor(item);
+				if (item.IsCrystalOfHarmony) {
 					ulong neighborMask = mooreNeighborMasks[s];
 					int neighborSlotCount = BitOperations.PopCount(neighborMask);
 					int sumNeighborLevels = 0;
@@ -788,52 +833,253 @@ namespace SephiriaOptimizer.Solver {
 					}
 					int crystalLv = effectiveLevelBuf[s];
 					float ratePerLevel = item.GetCrystalRatePerLevel(crystalLv);
-					int harmonyAmpScore = (int)Math.Round(
-						sumNeighborLevels * ratePerLevel * CrystalNeighborLevelFactor * weight
-					);
-					int centerPlacementBonus = neighborSlotCount * CrystalNeighborSlotBonus;
-					totalScore += harmonyAmpScore + centerPlacementBonus;
+					int flooredHarmonyPct = (int)Math.Floor(sumNeighborLevels * (double)ratePerLevel);
+					tier3SynergyScore += (long)Math.Round(flooredHarmonyPct * 55.0 * defaultFactor);
+					tier3SynergyScore += neighborSlotCount * (long)CrystalNeighborSlotBonus;
 				}
 
-				if (weight > 0.0) {
-					int posSynergy = EvaluatePositionSynergy(snapshot, slotToItemIndex, s, item);
-					if (posSynergy > 0) {
-						totalScore += (int)Math.Round(posSynergy * weight);
+				if (snapshot.ConsiderCompanionEmblemArtifacts && item.IsCompanionCharm) {
+					int yRow = snapshot.Slots[s].Y;
+					if ((uint)yRow < 32u && (activeChaosRowsMask & (1u << yRow)) != 0u) {
+						tier3SynergyScore += 420L + (effectiveLevelBuf[s] * 260L);
+					}
+				}
+
+				int posSynergy = EvaluatePositionSynergy(snapshot, slotToItemIndex, s, item, effectiveLevelBuf[s]);
+				if (posSynergy > 0) {
+					tier3SynergyScore += (long)Math.Round(posSynergy * defaultFactor);
+				}
+			}
+
+			if (talentRules.ArrangementBonusStat > 0 && talentRules.ArrangementPatterns.Length > 0) {
+				tier3SynergyScore += EvaluateArrangementPatterns(snapshot, slotToItemIndex, out _);
+			}
+
+			long tier1PriorityScore = ComputeTier1UserPriorityScore(
+				snapshot,
+				slotToItemIndex,
+				itemPlacedSlotBuf,
+				trackedItemCount,
+				isActiveBuf,
+				effectiveLevelBuf,
+				needleRootBuf,
+				chalcedonyCatBuf,
+				whitePaperCopiedBuf,
+				dynamicComboBonusCounts,
+				tabletCondMetBuf,
+				positiveBuffBuf,
+				activeChaosRowsMask,
+				mooreNeighborMasks,
+				hardViolationCount
+			);
+
+			long tier2PenaltyOffset = (-1_000_000L * hardViolationCount)
+				- (5_000L * residualEnchantErosion)
+				+ (50L * offsetPenaltyCount);
+
+			long tier1Scalar = 0L;
+			if (tier1PriorityScore != 0L) {
+				tier1Scalar = ((tier1PriorityScore / 1_000_000_000_000L) * 50_000L)
+					+ (((tier1PriorityScore / 1_000_000L) % 1_000_000L) * 20L)
+					+ (((tier1PriorityScore / 1_000L) % 1_000L) * 10L)
+					+ (tier1PriorityScore % 1_000L);
+			}
+			long rawScalar = tier1Scalar
+				- ((long)DeactivationBasePenalty * hardViolationCount)
+				- ((long)NegativeLevelExtraPenalty * residualEnchantErosion)
+				+ Math.Clamp(tier3SynergyScore, -100_000_000L, 100_000_000L)
+				+ Math.Clamp(tier4WasteScore, -50_000_000L, 50_000_000L);
+			scalarScore = (int)Math.Clamp(rawScalar, int.MinValue + 1, int.MaxValue - 1);
+
+			return new LexicographicScore(
+				tier1PriorityScore,
+				tier2PenaltyOffset,
+				tier3SynergyScore,
+				tier4WasteScore
+			);
+		}
+
+		private static long ComputeTier1UserPriorityScore(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> slotToItemIndex,
+			ReadOnlySpan<sbyte> itemPlacedSlotBuf,
+			int trackedItemCount,
+			ReadOnlySpan<byte> isActiveBuf,
+			ReadOnlySpan<int> effectiveLevelBuf,
+			ReadOnlySpan<int> needleRootBuf,
+			ReadOnlySpan<int> chalcedonyCatBuf,
+			ReadOnlySpan<uint> whitePaperCopiedBuf,
+			ReadOnlySpan<int> dynamicComboBonusCounts,
+			ReadOnlySpan<byte> tabletCondMetBuf,
+			ReadOnlySpan<int> positiveBuffBuf,
+			uint activeChaosRowsMask,
+			ulong[] mooreNeighborMasks,
+			int hardViolationCount
+		) {
+			if (!snapshot.HasAnyUserPriority) {
+				return 0L;
+			}
+
+			SlotItemSnapshot[] items = snapshot.Items;
+			int unlockedSlots = snapshot.UnlockedSlots;
+			long coreBand = 0L;
+			long highAndTargetBand = 0L;
+			long normalBand = 0L;
+			long lowBand = 0L;
+
+			for (int i = 0; i < trackedItemCount; i++) {
+				SlotItemSnapshot item = items[i];
+				bool isTargetNeedle = snapshot.PreferredNeedleTargetInstanceId >= 0
+					&& snapshot.PreferredNeedleTargetInstanceId == item.InstanceId;
+				if (!item.IsUserPriorityOverridden && (!isTargetNeedle || hardViolationCount > 0)) {
+					continue;
+				}
+
+				int placedSlot = itemPlacedSlotBuf[i];
+				int unitScore = 0;
+
+				if (item.Kind == SlotItemKind.Artifact) {
+					if (item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+						unitScore = (placedSlot >= 0 && isActiveBuf[placedSlot] == 0) ? 40 : 0;
+					} else if (placedSlot < 0 || isActiveBuf[placedSlot] == 0) {
+						unitScore = placedSlot < 0 ? -2200 : -2000;
+					} else {
+						int effLv = effectiveLevelBuf[placedSlot];
+						int lvPts = item.MaxLevel > 0
+							? Math.Clamp(((effLv * 450) / item.MaxLevel) + (effLv * 25), 0, 600)
+							: 200;
+						int maxCap = (item.MaxLevel > 0 && effLv == item.MaxLevel) ? 100 : 0;
+						int synPts = 0;
+						for (int nSlot = 0; nSlot < unlockedSlots; nSlot++) {
+							if (needleRootBuf[nSlot] == placedSlot && isActiveBuf[nSlot] != 0) {
+								synPts += 85;
+							}
+						}
+						if (item.IsCompanionCharm) {
+							int yRow = snapshot.Slots[placedSlot].Y;
+							if ((uint)yRow < 32u && (activeChaosRowsMask & (1u << yRow)) != 0u) {
+								synPts += 80;
+							}
+						}
+						if (item.IsCrystalOfHarmony) {
+							synPts += BitOperations.PopCount(mooreNeighborMasks[placedSlot]) * 10;
+						}
+						if (item.IsWhitePaperCharm && whitePaperCopiedBuf[placedSlot] != 0u) {
+							synPts += 90;
+						}
+						if (item.IsElementalByRowCharm
+							&& snapshot.PreferredChalcedonyCategoryId >= 0
+							&& chalcedonyCatBuf[placedSlot] == snapshot.PreferredChalcedonyCategoryId) {
+							synPts += 110;
+						}
+						if (item.HasDependencyTarget && needleRootBuf[placedSlot] >= 0) {
+							synPts += 90;
+						}
+						unitScore = 1000 + Math.Min(950, lvPts + maxCap + synPts);
+					}
+				} else if (item.Kind == SlotItemKind.StoneTablet) {
+					if (placedSlot < 0 || tabletCondMetBuf[placedSlot] == 0) {
+						unitScore = -2000;
+					} else {
+						unitScore = 1000 + Math.Min(950, positiveBuffBuf[placedSlot] * 120);
+					}
+				}
+
+				if (!item.IsUserPriorityOverridden && isTargetNeedle) {
+					highAndTargetBand += unitScore;
+					continue;
+				}
+
+				switch (item.PriorityTier) {
+					case ArtifactPriorityTier.Core:
+						coreBand += unitScore;
+						break;
+					case ArtifactPriorityTier.High:
+						highAndTargetBand += unitScore;
+						break;
+					case ArtifactPriorityTier.Normal:
+						normalBand += unitScore / 10;
+						break;
+					case ArtifactPriorityTier.Low:
+						lowBand += unitScore / 100;
+						break;
+					case ArtifactPriorityTier.Sacrifice:
+						lowBand += unitScore / 20;
+						break;
+				}
+			}
+
+			if (snapshot.PreferredNeedleTargetInstanceId >= 0 && hardViolationCount == 0) {
+				for (int s = 0; s < unlockedSlots; s++) {
+					int itemIdx = slotToItemIndex[s];
+					if (itemIdx < 0 || isActiveBuf[s] == 0) {
+						continue;
+					}
+					int rSlot = needleRootBuf[s];
+					if (rSlot >= 0 && isActiveBuf[rSlot] != 0) {
+						int rItemIdx = slotToItemIndex[rSlot];
+						if (rItemIdx >= 0 && items[rItemIdx].InstanceId == snapshot.PreferredNeedleTargetInstanceId) {
+							highAndTargetBand += 350 + (effectiveLevelBuf[s] * 80);
+						}
 					}
 				}
 			}
 
-			CombatStatDelta matchedArrangementDelta = CombatStatDelta.Zero;
-			if (talentRules.ArrangementBonusStat > 0 && talentRules.ArrangementPatterns.Length > 0) {
-				totalScore += EvaluateArrangementPatterns(
-					snapshot,
-					slotToItemIndex,
-					out matchedArrangementDelta
-				);
+			if (snapshot.PreferredChalcedonyCategoryId >= 0) {
+				for (int s = 0; s < unlockedSlots; s++) {
+					int itemIdx = slotToItemIndex[s];
+					if (itemIdx < 0 || isActiveBuf[s] == 0 || !items[itemIdx].IsElementalByRowCharm) {
+						continue;
+					}
+					if (chalcedonyCatBuf[s] == snapshot.PreferredChalcedonyCategoryId) {
+						highAndTargetBand += 450 + (effectiveLevelBuf[s] * 80);
+					} else {
+						highAndTargetBand -= 450;
+					}
+				}
 			}
 
-			exactEstimatedDps = ComputeDpsBreakdownFromState(
-				snapshot,
-				slotToItemIndex,
-				isActiveBuf,
-				displayedLevelBuf,
-				effectiveLevelBuf,
-				needleRootsMaskBuf,
-				needleBypassMaskBuf,
-				chalcedonyCatBuf,
-				dynamicComboBonusCounts,
-				in matchedArrangementDelta,
-				out double baseWeaponOnlyExactDps
-			).TotalEstimatedDps;
-
-			if (Math.Abs(exactEstimatedDps - baseWeaponOnlyExactDps) > 1e-6) {
-				double dpsGainRatio = (exactEstimatedDps - baseWeaponOnlyExactDps)
-					/ Math.Max(100.0, baseWeaponOnlyExactDps);
-				double rawDpsScore = Math.Round(dpsGainRatio * DpsGainScoreMultiplier);
-				totalScore += (int)Math.Clamp(rawDpsScore, -500_000_000.0, 500_000_000.0);
+			if (snapshot.UserTargetCategoryMask != 0u) {
+				ComboCategoryInfo[] categories = snapshot.ComboCategories;
+				for (int i = 0; i < categories.Length; i++) {
+					ComboCategoryInfo info = categories[i];
+					if (!info.IsUserTarget) {
+						continue;
+					}
+					int catId = info.CategoryId;
+					int dynAdded = (catId >= 0 && catId < InventorySnapshot.MaxSupportedCategories)
+						? dynamicComboBonusCounts[catId]
+						: 0;
+					int totalCount = info.StaticCount + dynAdded;
+					highAndTargetBand += Math.Min(400, dynAdded * 75);
+					int[] bps = info.Breakpoints;
+					for (int b = 0; b < bps.Length; b++) {
+						if (totalCount >= bps[b]) {
+							highAndTargetBand += 350;
+						}
+					}
+				}
 			}
 
-			return totalScore;
+			return (coreBand * 10_000_000_000_000L)
+				+ (highAndTargetBand * 10_000_000L)
+				+ (normalBand * 20L)
+				+ lowBand;
+		}
+
+		[MethodImpl(MethodImplOptions.AggressiveInlining)]
+		private static double GetDefaultTierFactor(SlotItemSnapshot item) {
+			if (item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
+				return 0.0;
+			}
+			int clampedCustom = Math.Clamp(item.CustomWeight, 1, 24);
+			double baseTier = item.PriorityTier switch {
+				ArtifactPriorityTier.Core => 1.38,
+				ArtifactPriorityTier.High => 1.22,
+				ArtifactPriorityTier.Low => 0.80,
+				_ => 1.00
+			};
+			return baseTier + (0.008 * clampedCustom);
 		}
 
 		internal static DpsBreakdown EvaluateDpsBreakdown(
@@ -2768,7 +3014,10 @@ namespace SephiriaOptimizer.Solver {
 						int tierBonus = info.IsUserTarget
 							? TargetComboBreakpointBonus
 							: ComboBreakpointReachedBonus;
-						comboScore += tierBonus;
+						float statVal = b < info.BreakpointStatBonuses.Length
+							? info.BreakpointStatBonuses[b]
+							: 0f;
+						comboScore += tierBonus + (int)Math.Round(statVal * 15f);
 					}
 				}
 
@@ -2780,12 +3029,12 @@ namespace SephiriaOptimizer.Solver {
 					&& info.HighestBreakpoint > 0
 					&& totalCount > info.HighestBreakpoint) {
 					int surplus = totalCount - info.HighestBreakpoint;
-					comboScore += surplus * Math.Clamp(talent.UnlimitedComboStat, 1, 4) * 35;
+					comboScore += surplus * Math.Clamp(talent.UnlimitedComboStat, 1, 4) * 55;
 				}
 			}
 
 			if (talent.ComboBonusDamageStat > 0 && activeComboTypes > 0) {
-				comboScore += activeComboTypes * Math.Clamp(talent.ComboBonusDamageStat, 1, 4) * 25;
+				comboScore += activeComboTypes * Math.Clamp(talent.ComboBonusDamageStat, 1, 4) * 35;
 			}
 
 			return comboScore;
@@ -2910,18 +3159,19 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			ReadOnlySpan<int> slotToItemIndex,
 			int slotIndex,
-			SlotItemSnapshot item
+			SlotItemSnapshot item,
+			int effectiveLevel
 		) {
 			SlotCoord coord = snapshot.Slots[slotIndex];
 			SlotItemSnapshot[] items = snapshot.Items;
 			int synergy = 0;
 
 			if (item.WantsRightSideMagicBook) {
-				int rightSlot = snapshot.CoordToSlotIndex(coord.X + 1, coord.Y);
+				int rightSlot = snapshot.HorizontalNeighborRight[slotIndex];
 				if (rightSlot >= 0) {
 					int rightItem = slotToItemIndex[rightSlot];
 					if (rightItem >= 0 && items[rightItem].IsMagicBook) {
-						synergy += ConnectedCharmSynergyBonus;
+						synergy += 240;
 					}
 				}
 			}
@@ -2931,22 +3181,21 @@ namespace SephiriaOptimizer.Solver {
 					return 0;
 				}
 				int sameRowCompanions = 0;
-				for (int x = 0; x < snapshot.Width; x++) {
-					if (x == coord.X) {
-						continue;
-					}
-					int rSlot = snapshot.CoordToSlotIndex(x, coord.Y);
-					if (rSlot >= 0) {
-						int rItem = slotToItemIndex[rSlot];
-						if (rItem >= 0
-							&& items[rItem].IsCompanionCharm
-							&& items[rItem].PriorityTier != ArtifactPriorityTier.Sacrifice
-							&& !snapshot.IsExcludedCompanionEmblem(items[rItem])) {
-							sameRowCompanions++;
-						}
+				ulong rowMask = snapshot.RowSlotMasks[coord.Y] & ~(1UL << slotIndex);
+				while (rowMask != 0UL) {
+					int rSlot = BitOperations.TrailingZeroCount(rowMask);
+					rowMask &= rowMask - 1UL;
+					int rItem = slotToItemIndex[rSlot];
+					if (rItem >= 0
+						&& items[rItem].IsCompanionCharm
+						&& items[rItem].PriorityTier != ArtifactPriorityTier.Sacrifice
+						&& !snapshot.IsExcludedCompanionEmblem(items[rItem])) {
+						sameRowCompanions++;
 					}
 				}
-				synergy += sameRowCompanions * 120;
+				if (sameRowCompanions > 0) {
+					synergy += 240 + (effectiveLevel * 120) + (sameRowCompanions * 140);
+				}
 			}
 
 			if (item.IsPlanetModuleCharm) {
@@ -2960,12 +3209,14 @@ namespace SephiriaOptimizer.Solver {
 						nearPlanets++;
 					}
 				}
-				synergy += nearPlanets * 55;
+				synergy += nearPlanets * 95;
 			}
 
 			if (item.IsNearMagicBulletCharm) {
 				int sameColBooks = 0;
-				for (int y = 0; y < snapshot.Height; y++) {
+				int minY = Math.Max(0, coord.Y - 5);
+				int maxY = Math.Min(snapshot.Height - 1, coord.Y + 5);
+				for (int y = minY; y <= maxY; y++) {
 					if (y == coord.Y) {
 						continue;
 					}
@@ -2977,7 +3228,7 @@ namespace SephiriaOptimizer.Solver {
 						}
 					}
 				}
-				synergy += sameColBooks * 40;
+				synergy += sameColBooks * (110 + (effectiveLevel * 25));
 			}
 
 			if (item.IsWoodenBoxCharm) {
@@ -2989,7 +3240,7 @@ namespace SephiriaOptimizer.Solver {
 						topCharms++;
 					}
 				}
-				synergy += topCharms * 20;
+				synergy += topCharms * (28 + (effectiveLevel * 12));
 			}
 
 			if (item.IsFireIcePositionCharm) {
@@ -2997,18 +3248,14 @@ namespace SephiriaOptimizer.Solver {
 				float iceStat = snapshot.TalentRules.IceDamageStat;
 				if (snapshot.CombatBaseline.HasDetailedWeaponProfile) {
 					WeaponCombatProfile wp = snapshot.CombatBaseline.WeaponProfile;
-					fireStat += wp.BaseFireStat
-						+ (wp.FormulaMode == WeaponElementalFormulaMode.SingleFire ? 20f : 0f)
-						+ wp.AddOnHitFirePct;
-					iceStat += wp.BaseIceStat
-						+ (wp.FormulaMode == WeaponElementalFormulaMode.SingleIce ? 20f : 0f)
-						+ wp.AddOnHitIcePct;
+					fireStat += wp.BaseFireStat + wp.AddOnHitFirePct;
+					iceStat += wp.BaseIceStat + wp.AddOnHitIcePct;
 				}
-				bool isLeftHalf = coord.X < (snapshot.Width / 2);
+				bool isLeftHalf = coord.X <= 2 && coord.X < Math.Max(1, snapshot.Width / 2);
 				if (fireStat > iceStat && isLeftHalf) {
-					synergy += 50;
+					synergy += 80 + (effectiveLevel * 15);
 				} else if (iceStat > fireStat && !isLeftHalf) {
-					synergy += 50;
+					synergy += 80 + (effectiveLevel * 15);
 				}
 			}
 
