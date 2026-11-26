@@ -9,35 +9,33 @@ namespace SephiriaOptimizer.Solver {
 	public sealed class OptimizationSolver {
 		public const int SmallScaleMaxSlots = 12;
 		public const int SmallScaleMaxItems = 10;
-		public const int MaxBranchNodes = 150_000;
+		public const int MaxBranchNodes = 180_000;
 		public const int LahcHistoryLength = 256;
-		public const int InitialLahcMargin = 1800;
-		public const int ReheatMargin = 2200;
-		public const int DefaultTimeBudgetMs = 370;
+		public const int InitialLahcMargin = 2400;
+		public const int ReheatMargin = 2600;
+		public const int DefaultTimeBudgetMs = 1350;
+		public const int MaxAllowedBudgetMs = 1850;
 		public const int MaxEliteCandidates = 3;
-		private const int MultiStartCount = 4;
+		private const int MultiStartCount = 5;
 		private const int MaxPolishPasses = 12;
-		private const int TargetedCycleSlotCap = 18;
+		private const int TargetedCycleSlotCap = 20;
 		private const int BeamWidth = 8;
-		private const int TabuHistoryLength = 24;
-		private const double DpsTieEpsilon = 0.005;
+		private const int TabuHistoryLength = 48;
 
 		private readonly struct SearchStateMetrics {
+			public readonly LexicographicScore LexScore;
 			public readonly int Score;
-			public readonly double ExactEstimatedDps;
-			public readonly long CentiDps;
 			public readonly int HardViolationCount;
 			public readonly int UtilityEffectiveLevelSum;
 
 			public SearchStateMetrics(
+				LexicographicScore lexScore,
 				int score,
-				double exactEstimatedDps,
 				int hardViolationCount,
 				int utilityEffectiveLevelSum
 			) {
+				LexScore = lexScore;
 				Score = score;
-				ExactEstimatedDps = exactEstimatedDps;
-				CentiDps = (long)Math.Round(exactEstimatedDps * 100.0);
 				HardViolationCount = hardViolationCount;
 				UtilityEffectiveLevelSum = utilityEffectiveLevelSum;
 			}
@@ -50,22 +48,23 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> itemRotations,
 			ref int evaluations
 		) {
-			int score = ObjectiveEvaluator.EvaluateWithMetrics(
+			LexicographicScore lex = ObjectiveEvaluator.EvaluateLexicographic(
 				snapshot,
 				slotToItemIndex,
 				itemRotations,
-				out double exactDps,
+				out int score,
 				out int hardViolations,
 				out int utilitySum
 			);
 			evaluations++;
-			return new SearchStateMetrics(score, exactDps, hardViolations, utilitySum);
+			return new SearchStateMetrics(lex, score, hardViolations, utilitySum);
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static int CompareSearchStates(in SearchStateMetrics left, in SearchStateMetrics right) {
-			if (left.CentiDps != right.CentiDps) {
-				return left.CentiDps > right.CentiDps ? 1 : -1;
+			int lexCmp = left.LexScore.CompareTo(right.LexScore);
+			if (lexCmp != 0) {
+				return lexCmp;
 			}
 			bool leftFeasible = left.HardViolationCount == 0;
 			bool rightFeasible = right.HardViolationCount == 0;
@@ -75,9 +74,6 @@ namespace SephiriaOptimizer.Solver {
 			if (left.HardViolationCount != right.HardViolationCount) {
 				return left.HardViolationCount < right.HardViolationCount ? 1 : -1;
 			}
-			if (left.UtilityEffectiveLevelSum != right.UtilityEffectiveLevelSum) {
-				return left.UtilityEffectiveLevelSum > right.UtilityEffectiveLevelSum ? 1 : -1;
-			}
 			if (left.Score != right.Score) {
 				return left.Score > right.Score ? 1 : -1;
 			}
@@ -85,16 +81,18 @@ namespace SephiriaOptimizer.Solver {
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
-		private static double ComputeAnnealingEnergy(InventorySnapshot snapshot, in SearchStateMetrics metrics) {
-			double baseRef = snapshot.CombatBaseline.HasDetailedWeaponProfile
-				? snapshot.CombatBaseline.BaseWeaponDps
-				: snapshot.CombatBaseline.ComputeBaseWeaponRawDps();
-			double normBase = Math.Max(100.0, baseRef);
-			double dpsTerm = ((metrics.ExactEstimatedDps - baseRef) / normBase)
-				* ObjectiveEvaluator.DpsGainScoreMultiplier;
-			double violPenalty = metrics.HardViolationCount * 20000.0;
-			double utilTerm = metrics.UtilityEffectiveLevelSum * 200.0;
-			return (dpsTerm * 1.5) - violPenalty + utilTerm + (metrics.Score * 0.5);
+		private static double ComputeAnnealingEnergy(in SearchStateMetrics metrics) {
+			long t1 = metrics.LexScore.Tier1UserPriority;
+			long coreUnits = t1 / 10_000_000_000_000L;
+			long remAfterCore = t1 - (coreUnits * 10_000_000_000_000L);
+			long highUnits = remAfterCore / 10_000_000L;
+			long lowNormUnits = remAfterCore - (highUnits * 10_000_000L);
+			double tier1Energy = (coreUnits * 500_000.0) + (highUnits * 5_000.0) + (lowNormUnits * 2.0);
+			double tier2Energy = -(metrics.HardViolationCount * 3500.0)
+				+ ((metrics.LexScore.Tier2PenaltyOffset % 1_000_000L) * 0.25);
+			double tier3Energy = metrics.LexScore.Tier3SynergyAndAmplification;
+			double tier4Energy = metrics.LexScore.Tier4SlotEfficiency * 0.1;
+			return tier1Energy + tier2Energy + tier3Energy + tier4Energy;
 		}
 
 		private sealed class EliteCandidatePool {
@@ -132,19 +130,13 @@ namespace SephiriaOptimizer.Solver {
 				rotationsPool[index].AsSpan(0, itemCount).CopyTo(destRotations);
 			}
 
-			public void CopyBestTo(int[] destSlots, int[] destRotations, out int bestScore) {
-				slotsPool[0].AsSpan(0, unlockedSlots).CopyTo(destSlots);
-				rotationsPool[0].AsSpan(0, itemCount).CopyTo(destRotations);
-				bestScore = metricsPool[0].Score;
-			}
-
 			public void CopyBestTo(int[] destSlots, int[] destRotations, out SearchStateMetrics bestMetrics) {
 				slotsPool[0].AsSpan(0, unlockedSlots).CopyTo(destSlots);
 				rotationsPool[0].AsSpan(0, itemCount).CopyTo(destRotations);
 				CandidateMetrics top = metricsPool[0];
 				bestMetrics = new SearchStateMetrics(
+					top.LexScore,
 					top.Score,
-					top.ExactEstimatedDps,
 					top.HardViolationCount,
 					top.UtilityEffectiveLevelSum
 				);
@@ -156,28 +148,8 @@ namespace SephiriaOptimizer.Solver {
 				ReadOnlySpan<int> initialRotations,
 				ReadOnlySpan<int> candSlots,
 				ReadOnlySpan<int> candRotations,
-				int fastScore,
-				ref int evaluations,
-				bool countEval = false,
-				bool forceEval = false
+				in SearchStateMetrics evaluated
 			) {
-				if (count >= capacity && !forceEval && fastScore < metricsPool[count - 1].Score - 5000) {
-					return false;
-				}
-
-				int score = ObjectiveEvaluator.EvaluateWithMetrics(
-					snapshot,
-					candSlots,
-					candRotations,
-					out double exactDps,
-					out int hardViolations,
-					out int utilitySum
-				);
-				if (countEval) {
-					evaluations++;
-				}
-
-				SearchStateMetrics evaluated = new SearchStateMetrics(score, exactDps, hardViolations, utilitySum);
 				return TryOfferEvaluated(
 					snapshot,
 					initialSlots,
@@ -196,19 +168,19 @@ namespace SephiriaOptimizer.Solver {
 				ReadOnlySpan<int> candRotations,
 				in SearchStateMetrics metrics
 			) {
+				if (count > 0 && metricsPool[0].LexScore.Tier1UserPriority > metrics.LexScore.Tier1UserPriority) {
+					return false;
+				}
 				if (count > 0
 					&& metricsPool[0].HardViolationCount == 0
 					&& metrics.HardViolationCount > 0
-					&& metrics.ExactEstimatedDps <= metricsPool[0].ExactEstimatedDps + DpsTieEpsilon) {
+					&& metrics.LexScore.Tier1UserPriority <= metricsPool[0].LexScore.Tier1UserPriority) {
 					return false;
 				}
 
 				if (count >= capacity) {
 					CandidateMetrics worst = metricsPool[count - 1];
-					long worstCenti = (long)Math.Round(worst.ExactEstimatedDps * 100.0);
-					if (metrics.CentiDps < worstCenti
-						&& (metrics.HardViolationCount > worst.HardViolationCount
-							|| metrics.Score < worst.Score - 200)) {
+					if (metrics.LexScore.CompareTo(worst.LexScore) < 0 && metrics.Score < worst.Score - 200) {
 						return false;
 					}
 				}
@@ -229,12 +201,13 @@ namespace SephiriaOptimizer.Solver {
 				);
 				CandidateMetrics candidateMetrics = new CandidateMetrics(
 					metrics.Score,
-					metrics.ExactEstimatedDps,
+					0.0,
 					metrics.HardViolationCount,
 					metrics.UtilityEffectiveLevelSum,
 					swapCount,
 					rotateClickCount,
-					canonicalHash
+					canonicalHash,
+					metrics.LexScore
 				);
 
 				for (int i = 0; i < count; i++) {
@@ -345,6 +318,7 @@ namespace SephiriaOptimizer.Solver {
 
 		public OptimizationResult Solve(InventorySnapshot snapshot, int timeBudgetMs = DefaultTimeBudgetMs) {
 			Stopwatch stopwatch = Stopwatch.StartNew();
+			int effectiveBudgetMs = Math.Clamp(timeBudgetMs, 20, MaxAllowedBudgetMs);
 			int unlockedSlots = snapshot.UnlockedSlots;
 			int itemCount = snapshot.Items.Length;
 
@@ -353,28 +327,27 @@ namespace SephiriaOptimizer.Solver {
 			int[] initialRotations = new int[itemCount];
 			Array.Copy(snapshot.InitialItemRotations, initialRotations, itemCount);
 
-			int initialScore = ObjectiveEvaluator.EvaluateWithMetrics(
+			LexicographicScore initialLex = ObjectiveEvaluator.EvaluateLexicographic(
 				snapshot,
 				initialSlots,
 				initialRotations,
-				out double initialExactDps,
+				out int initialScore,
 				out int initialViolations,
 				out int initialUtilitySum
 			);
 			SearchStateMetrics initialMetrics = new SearchStateMetrics(
+				initialLex,
 				initialScore,
-				initialExactDps,
 				initialViolations,
 				initialUtilitySum
 			);
-			int initialEstimatedDps = Math.Max(0, (int)Math.Round(initialExactDps));
 			SlotEvaluationDetail[] initialDetails = ObjectiveEvaluator.EvaluateDetailed(
 				snapshot,
 				initialSlots,
 				initialRotations
 			);
-
 			DpsBreakdown currentBreakdown = snapshot.CurrentBreakdown;
+			int initialEstimatedDps = Math.Max(0, (int)Math.Round(currentBreakdown.TotalEstimatedDps));
 
 			if (unlockedSlots <= 1 || itemCount == 0) {
 				int[] initialItemSlots = BuildItemToSlotMap(initialSlots, itemCount);
@@ -385,12 +358,13 @@ namespace SephiriaOptimizer.Solver {
 				);
 				CandidateMetrics initMetrics = new CandidateMetrics(
 					initialScore,
-					initialExactDps,
+					currentBreakdown.TotalEstimatedDps,
 					initialViolations,
 					initialUtilitySum,
 					0,
 					0,
-					initHash
+					initHash,
+					initialLex
 				);
 				OptimizationCandidate singleCandidate = new OptimizationCandidate(
 					1,
@@ -433,6 +407,13 @@ namespace SephiriaOptimizer.Solver {
 				in initialMetrics
 			);
 
+			int unpinnedItemCount = CountUnpinnedItems(snapshot);
+			int unpinnedSlotCount = CountUnpinnedSlots(snapshot);
+			bool isSmallScale = unlockedSlots <= SmallScaleMaxSlots
+				&& unpinnedItemCount <= SmallScaleMaxItems
+				&& unpinnedItemCount <= unpinnedSlotCount;
+			bool usedExactBranchAndBound = false;
+
 			int[][] seedSlots = new int[MultiStartCount][];
 			int[][] seedRotations = new int[MultiStartCount][];
 			SearchStateMetrics[] seedMetrics = new SearchStateMetrics[MultiStartCount];
@@ -442,33 +423,43 @@ namespace SephiriaOptimizer.Solver {
 				seedRotations[i] = new int[itemCount];
 			}
 			int seedCount = 0;
-
-			RunMultiStartSeedSynthesis(
-				snapshot,
-				stopwatch,
-				timeBudgetMs,
-				initialSlots,
-				initialRotations,
-				in initialMetrics,
-				elitePool,
-				seedSlots,
-				seedRotations,
-				seedMetrics,
-				seedHashes,
-				ref seedCount,
-				ref evaluations
-			);
-
 			int[] bestSlots = new int[unlockedSlots];
 			int[] bestRotations = new int[itemCount];
-			elitePool.CopyBestTo(bestSlots, bestRotations, out SearchStateMetrics bestMetrics);
-			int bestScore = bestMetrics.Score;
-
-			bool isSmallScale = unlockedSlots <= SmallScaleMaxSlots && itemCount <= SmallScaleMaxItems;
-			bool usedExactBranchAndBound = false;
+			SearchStateMetrics bestMetrics;
 
 			if (isSmallScale) {
-				int branchBudgetMs = Math.Max(60, (timeBudgetMs * 58) / 100);
+				Span<int> quickSeedSlots = stackalloc int[unlockedSlots];
+				Span<int> quickSeedRots = stackalloc int[itemCount];
+				BuildDomainFirstSynergySeed(snapshot, initialSlots, initialRotations, quickSeedSlots, quickSeedRots);
+				RunArtifactOnlyLocalPolish(snapshot, quickSeedSlots, quickSeedRots, ref evaluations);
+				SearchStateMetrics quickSeedMetrics = EvaluateSearchState(
+					snapshot,
+					quickSeedSlots,
+					quickSeedRots,
+					ref evaluations
+				);
+				elitePool.TryOfferEvaluated(
+					snapshot,
+					initialSlots,
+					initialRotations,
+					quickSeedSlots,
+					quickSeedRots,
+					in quickSeedMetrics
+				);
+				RegisterDistinctSeed(
+					snapshot,
+					quickSeedSlots,
+					quickSeedRots,
+					in quickSeedMetrics,
+					seedSlots,
+					seedRotations,
+					seedMetrics,
+					seedHashes,
+					ref seedCount
+				);
+				elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
+
+				int branchBudgetMs = Math.Max(120, (effectiveBudgetMs * 85) / 100);
 				bool limitExceeded = SolveBranchAndBound(
 					snapshot,
 					stopwatch,
@@ -483,14 +474,48 @@ namespace SephiriaOptimizer.Solver {
 				);
 				usedExactBranchAndBound = !limitExceeded;
 				elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
-				bestScore = bestMetrics.Score;
+				if (limitExceeded) {
+					RunMultiStartSeedSynthesis(
+						snapshot,
+						stopwatch,
+						effectiveBudgetMs,
+						initialSlots,
+						initialRotations,
+						in initialMetrics,
+						elitePool,
+						seedSlots,
+						seedRotations,
+						seedMetrics,
+						seedHashes,
+						ref seedCount,
+						ref evaluations
+					);
+					elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
+				}
+			} else {
+				RunMultiStartSeedSynthesis(
+					snapshot,
+					stopwatch,
+					effectiveBudgetMs,
+					initialSlots,
+					initialRotations,
+					in initialMetrics,
+					elitePool,
+					seedSlots,
+					seedRotations,
+					seedMetrics,
+					seedHashes,
+					ref seedCount,
+					ref evaluations
+				);
+				elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
 			}
 
+			int polishReserveMs = Math.Max(70, Math.Min(210, (effectiveBudgetMs * 22) / 100));
 			if (!isSmallScale || !usedExactBranchAndBound) {
-				int polishReserveMs = Math.Max(65, Math.Min(160, (timeBudgetMs * 28) / 100));
 				int remainingSaBudgetMs = Math.Max(
-					50,
-					timeBudgetMs - (int)stopwatch.ElapsedMilliseconds - polishReserveMs
+					35,
+					effectiveBudgetMs - (int)stopwatch.ElapsedMilliseconds - polishReserveMs
 				);
 				SolveMultiStartSimulatedAnnealing(
 					snapshot,
@@ -509,12 +534,14 @@ namespace SephiriaOptimizer.Solver {
 					ref evaluations
 				);
 				elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
-				bestScore = bestMetrics.Score;
 			}
 
-			if (HasAnyStoneTablet(snapshot)) {
-				RunTabletCollisionRepairPass(
+			int polishDeadlineMs = effectiveBudgetMs - 40;
+			if (stopwatch.ElapsedMilliseconds < polishDeadlineMs) {
+				RunChainedPenaltyRepair(
 					snapshot,
+					stopwatch,
+					polishDeadlineMs,
 					bestSlots,
 					bestRotations,
 					ref bestMetrics,
@@ -523,17 +550,15 @@ namespace SephiriaOptimizer.Solver {
 					initialSlots,
 					initialRotations
 				);
-				bestScore = bestMetrics.Score;
 			}
 
-			int polishDeadlineMs = Math.Max(timeBudgetMs + 240, 520);
 			RunExhaustiveMultiPassPolish(
 				snapshot,
 				stopwatch,
 				polishDeadlineMs,
 				bestSlots,
 				bestRotations,
-				ref bestScore,
+				ref bestMetrics,
 				ref evaluations,
 				elitePool,
 				initialSlots,
@@ -545,15 +570,24 @@ namespace SephiriaOptimizer.Solver {
 			int[] altSlotArr = new int[unlockedSlots];
 			int[] altRotArr = new int[itemCount];
 			for (int e = 1; e < eliteSnapCount; e++) {
+				if (stopwatch.ElapsedMilliseconds >= polishDeadlineMs) {
+					break;
+				}
 				elitePool.CopyTo(e, altSlotArr, altRotArr);
-				int altScore = elitePool.GetMetrics(e).Score;
+				CandidateMetrics altCand = elitePool.GetMetrics(e);
+				SearchStateMetrics altMetrics = new SearchStateMetrics(
+					altCand.LexScore,
+					altCand.Score,
+					altCand.HardViolationCount,
+					altCand.UtilityEffectiveLevelSum
+				);
 				RunExhaustiveMultiPassPolish(
 					snapshot,
 					stopwatch,
 					polishDeadlineMs,
 					altSlotArr,
 					altRotArr,
-					ref altScore,
+					ref altMetrics,
 					ref evaluations,
 					elitePool,
 					initialSlots,
@@ -563,10 +597,11 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			elitePool.CopyBestTo(bestSlots, bestRotations, out bestMetrics);
-			bestScore = bestMetrics.Score;
-			if (HasAnyStoneTablet(snapshot)) {
-				RunTabletCollisionRepairPass(
+			if (bestMetrics.HardViolationCount > 0 && stopwatch.ElapsedMilliseconds < polishDeadlineMs) {
+				RunChainedPenaltyRepair(
 					snapshot,
+					stopwatch,
+					polishDeadlineMs,
 					bestSlots,
 					bestRotations,
 					ref bestMetrics,
@@ -575,7 +610,6 @@ namespace SephiriaOptimizer.Solver {
 					initialSlots,
 					initialRotations
 				);
-				bestScore = bestMetrics.Score;
 			}
 
 			ExploreEqualOptimaAndMinimizeCost(
@@ -614,6 +648,29 @@ namespace SephiriaOptimizer.Solver {
 				bestCandidate.Breakdown,
 				topCandidates
 			);
+		}
+
+		private static int CountUnpinnedItems(InventorySnapshot snapshot) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+			int count = 0;
+			for (int i = 0; i < items.Length; i++) {
+				int initSlot = items[i].InitialSlotIndex;
+				if (initSlot < 0 || initSlot >= unlockedSlots || !snapshot.PinnedSlots[initSlot]) {
+					count++;
+				}
+			}
+			return count;
+		}
+
+		private static int CountUnpinnedSlots(InventorySnapshot snapshot) {
+			int count = 0;
+			for (int s = 0; s < snapshot.UnlockedSlots; s++) {
+				if (!snapshot.PinnedSlots[s]) {
+					count++;
+				}
+			}
+			return count;
 		}
 
 		private static bool SolveBranchAndBound(
@@ -782,7 +839,8 @@ namespace SephiriaOptimizer.Solver {
 					workingRotations,
 					ref evaluations
 				);
-				if (metrics.CentiDps >= bestMetrics.CentiDps - 5 || metrics.Score >= bestMetrics.Score - 200) {
+				if (metrics.LexScore.Tier1UserPriority >= bestMetrics.LexScore.Tier1UserPriority
+					&& (metrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0 || metrics.Score >= bestMetrics.Score - 200)) {
 					elitePool.TryOfferEvaluated(
 						snapshot,
 						initialSlots,
@@ -800,7 +858,9 @@ namespace SephiriaOptimizer.Solver {
 				return;
 			}
 
-			if (depth > 0 && (suffixRemTablets[depth] == 0 || unpinnedItemCount - depth <= 6)) {
+			if (depth > 0
+				&& unpinnedItemCount - depth >= 2
+				&& (suffixRemTablets[depth] == 0 || unpinnedItemCount - depth <= 4)) {
 				ComputeSoundSubtreeUpperBounds(
 					snapshot,
 					hasConditionalTablet,
@@ -811,16 +871,15 @@ namespace SephiriaOptimizer.Solver {
 					suffixRemPosDelta[depth],
 					suffixRemPosMul[depth],
 					suffixRemHasIgnore[depth] != 0,
-					out double ubDps,
-					out int ubScore
+					out long ubTier1Priority,
+					out long ubTier3Score
 				);
-				long ubCentiDps = (long)Math.Round(ubDps * 100.0);
-				if (ubCentiDps < bestMetrics.CentiDps) {
+				if (ubTier1Priority < bestMetrics.LexScore.Tier1UserPriority) {
 					return;
 				}
-				if (ubCentiDps == bestMetrics.CentiDps
+				if (ubTier1Priority == bestMetrics.LexScore.Tier1UserPriority
 					&& bestMetrics.HardViolationCount == 0
-					&& ubScore < bestMetrics.Score) {
+					&& ubTier3Score < bestMetrics.LexScore.Tier3SynergyAndAmplification) {
 					return;
 				}
 			}
@@ -1030,7 +1089,7 @@ namespace SephiriaOptimizer.Solver {
 			Span<double> energyHistory = stackalloc double[LahcHistoryLength];
 			Span<ulong> tabuHashes = stackalloc ulong[TabuHistoryLength];
 
-			double bestEnergy = ComputeAnnealingEnergy(snapshot, in bestMetrics);
+			double bestEnergy = ComputeAnnealingEnergy(in bestMetrics);
 
 			long totalStartTicks = stopwatch.ElapsedTicks;
 			long totalDeadlineTicks = totalStartTicks + ((long)Math.Max(20, totalSaBudgetMs) * Stopwatch.Frequency / 1000L);
@@ -1076,8 +1135,9 @@ namespace SephiriaOptimizer.Solver {
 				if (startIdx > 0 && startIdx - 1 < seedCount) {
 					seedMetrics[startIdx - 1] = currentMetrics;
 				}
-				if (currentMetrics.CentiDps >= bestMetrics.CentiDps - 5
-					|| currentMetrics.Score >= bestMetrics.Score - 200) {
+				if (currentMetrics.LexScore.Tier1UserPriority >= bestMetrics.LexScore.Tier1UserPriority
+					&& (currentMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+						|| currentMetrics.Score >= bestMetrics.Score - 200)) {
 					elitePool.TryOfferEvaluated(
 						snapshot,
 						initialSlots,
@@ -1089,12 +1149,12 @@ namespace SephiriaOptimizer.Solver {
 				}
 				if (CompareSearchStates(in currentMetrics, in bestMetrics) > 0) {
 					bestMetrics = currentMetrics;
-					bestEnergy = ComputeAnnealingEnergy(snapshot, in bestMetrics);
+					bestEnergy = ComputeAnnealingEnergy(in bestMetrics);
 					currentSlots.CopyTo(bestSlots);
 					currentRotations.CopyTo(bestRotations);
 				}
 
-				double currentEnergy = ComputeAnnealingEnergy(snapshot, in currentMetrics);
+				double currentEnergy = ComputeAnnealingEnergy(in currentMetrics);
 				energyHistory.Fill(currentEnergy - InitialLahcMargin);
 				tabuHashes.Clear();
 				int tabuHead = 0;
@@ -1104,7 +1164,7 @@ namespace SephiriaOptimizer.Solver {
 				const double minimumTemperature = 15.0;
 				const double coolingFactor = 0.9960;
 				const double reheatTemperature = 1350.0;
-				const int stagnationLimit = 1100;
+				const int stagnationLimit = 1000;
 
 				double temperature = initialTemperature;
 				int iterationsSinceImprovement = 0;
@@ -1117,12 +1177,13 @@ namespace SephiriaOptimizer.Solver {
 				bool hasArrangementMoves = snapshot.TalentRules.ArrangementBonusStat > 0
 					&& snapshot.TalentRules.ArrangementPatterns.Length > 0
 					&& movableSlotCount >= 2;
+				bool hasUnplacedCandidates = itemCount > unlockedSlots || snapshot.HasUnplacedCandidates;
 
 				while (stopwatch.ElapsedTicks < startDeadlineTicks) {
 					for (int step = 0; step < 64; step++) {
 						uint mutationRoll = NextRandomUInt(ref rngState) % 100u;
 
-						if (rotatableTabletCount > 0 && (movableSlotCount <= 1 || mutationRoll < 10u)) {
+						if (rotatableTabletCount > 0 && (movableSlotCount <= 1 || mutationRoll < 9u)) {
 							int randIdx = (int)(NextRandomUInt(ref rngState) % (uint)rotatableTabletCount);
 							int tabletIdx = rotatableTablets[randIdx];
 							int oldRotation = currentRotations[tabletIdx];
@@ -1163,7 +1224,58 @@ namespace SephiriaOptimizer.Solver {
 								currentRotations[tabletIdx] = oldRotation;
 								iterationsSinceImprovement++;
 							}
-						} else if (hasNeedleMoves && mutationRoll >= 10u && mutationRoll < 21u) {
+						} else if (hasUnplacedCandidates && mutationRoll >= 9u && mutationRoll < 16u) {
+							ExecuteUnplacedSwapInOutMutation(
+								snapshot,
+								movableSlots.Slice(0, movableSlotCount),
+								initialSlots,
+								initialRotations,
+								elitePool,
+								currentSlots,
+								currentRotations,
+								currentItemToSlot,
+								energyHistory,
+								tabuHashes,
+								ref tabuHead,
+								ref tabuCount,
+								bestSlots,
+								bestRotations,
+								temperature,
+								ref rngState,
+								ref currentMetrics,
+								ref currentEnergy,
+								ref bestMetrics,
+								ref bestEnergy,
+								ref evaluations,
+								ref iteration,
+								ref iterationsSinceImprovement
+							);
+						} else if (movableSlotCount >= 4 && mutationRoll >= 16u && mutationRoll < 20u) {
+							ExecuteGridSymmetryTransformMutation(
+								snapshot,
+								initialSlots,
+								initialRotations,
+								elitePool,
+								currentSlots,
+								currentRotations,
+								currentItemToSlot,
+								energyHistory,
+								tabuHashes,
+								ref tabuHead,
+								ref tabuCount,
+								bestSlots,
+								bestRotations,
+								temperature,
+								ref rngState,
+								ref currentMetrics,
+								ref currentEnergy,
+								ref bestMetrics,
+								ref bestEnergy,
+								ref evaluations,
+								ref iteration,
+								ref iterationsSinceImprovement
+							);
+						} else if (hasNeedleMoves && mutationRoll >= 20u && mutationRoll < 29u) {
 							ExecuteNeedleOrCompassMutation(
 								snapshot,
 								needleItems.Slice(0, needleItemCount),
@@ -1645,6 +1757,183 @@ namespace SephiriaOptimizer.Solver {
 				int tIdx = rotatableTablets[(int)(NextRandomUInt(ref rngState) % (uint)rotatableTablets.Length)];
 				int delta = 1 + (int)(NextRandomUInt(ref rngState) % 3u);
 				rotations[tIdx] = (rotations[tIdx] + delta) & 3;
+			}
+		}
+
+		private static void ExecuteUnplacedSwapInOutMutation(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> movableSlots,
+			ReadOnlySpan<int> initialSlots,
+			ReadOnlySpan<int> initialRotations,
+			EliteCandidatePool elitePool,
+			Span<int> currentSlots,
+			Span<int> currentRotations,
+			Span<int> currentItemToSlot,
+			Span<double> energyHistory,
+			Span<ulong> tabuHashes,
+			ref int tabuHead,
+			ref int tabuCount,
+			int[] bestSlots,
+			int[] bestRotations,
+			double temperature,
+			ref uint rngState,
+			ref SearchStateMetrics currentMetrics,
+			ref double currentEnergy,
+			ref SearchStateMetrics bestMetrics,
+			ref double bestEnergy,
+			ref int evaluations,
+			ref int iteration,
+			ref int iterationsSinceImprovement
+		) {
+			SlotItemSnapshot[] items = snapshot.Items;
+			int itemCount = items.Length;
+			Span<int> unplaced = stackalloc int[itemCount];
+			int unplacedCount = 0;
+			for (int i = 0; i < itemCount; i++) {
+				if (currentItemToSlot[i] < 0 && !snapshot.IsExcludedCompanionEmblem(items[i])) {
+					unplaced[unplacedCount++] = i;
+				}
+			}
+			if (unplacedCount == 0 || movableSlots.Length == 0) {
+				return;
+			}
+
+			int candItem = unplaced[(int)(NextRandomUInt(ref rngState) % (uint)unplacedCount)];
+			int targetSlot = -1;
+			for (int m = 0; m < movableSlots.Length; m++) {
+				int s = movableSlots[m];
+				int occ = currentSlots[s];
+				if (occ < 0 || snapshot.IsExcludedCompanionEmblem(items[occ])) {
+					targetSlot = s;
+					break;
+				}
+			}
+			if (targetSlot < 0) {
+				targetSlot = movableSlots[(int)(NextRandomUInt(ref rngState) % (uint)movableSlots.Length)];
+			}
+
+			int displaced = currentSlots[targetSlot];
+			int oldRot = currentRotations[candItem];
+			currentSlots[targetSlot] = candItem;
+			if (items[candItem].Kind == SlotItemKind.StoneTablet && items[candItem].IsRotatable) {
+				currentRotations[candItem] = (int)(NextRandomUInt(ref rngState) & 3u);
+			}
+
+			SearchStateMetrics candMetrics = EvaluateSearchState(
+				snapshot,
+				currentSlots,
+				currentRotations,
+				ref evaluations
+			);
+			if (TryAcceptCandidate(
+				snapshot,
+				initialSlots,
+				initialRotations,
+				elitePool,
+				in candMetrics,
+				ref currentMetrics,
+				ref currentEnergy,
+				ref bestMetrics,
+				ref bestEnergy,
+				ref iteration,
+				ref iterationsSinceImprovement,
+				temperature,
+				ref rngState,
+				energyHistory,
+				tabuHashes,
+				ref tabuHead,
+				ref tabuCount,
+				currentSlots,
+				currentRotations,
+				bestSlots,
+				bestRotations
+			)) {
+				currentItemToSlot[candItem] = targetSlot;
+				if (displaced >= 0) {
+					currentItemToSlot[displaced] = -1;
+				}
+			} else {
+				currentSlots[targetSlot] = displaced;
+				currentRotations[candItem] = oldRot;
+				iterationsSinceImprovement++;
+			}
+		}
+
+		private static void ExecuteGridSymmetryTransformMutation(
+			InventorySnapshot snapshot,
+			ReadOnlySpan<int> initialSlots,
+			ReadOnlySpan<int> initialRotations,
+			EliteCandidatePool elitePool,
+			Span<int> currentSlots,
+			Span<int> currentRotations,
+			Span<int> currentItemToSlot,
+			Span<double> energyHistory,
+			Span<ulong> tabuHashes,
+			ref int tabuHead,
+			ref int tabuCount,
+			int[] bestSlots,
+			int[] bestRotations,
+			double temperature,
+			ref uint rngState,
+			ref SearchStateMetrics currentMetrics,
+			ref double currentEnergy,
+			ref SearchStateMetrics bestMetrics,
+			ref double bestEnergy,
+			ref int evaluations,
+			ref int iteration,
+			ref int iterationsSinceImprovement
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			int itemCount = snapshot.Items.Length;
+			Span<int> backupSlots = stackalloc int[unlockedSlots];
+			Span<int> backupRots = stackalloc int[itemCount];
+			currentSlots.Slice(0, unlockedSlots).CopyTo(backupSlots);
+			currentRotations.Slice(0, itemCount).CopyTo(backupRots);
+
+			int maxModes = (snapshot.Width * snapshot.Height == unlockedSlots && snapshot.Width == snapshot.Height)
+				? 5
+				: 3;
+			int mode = (int)(NextRandomUInt(ref rngState) % (uint)maxModes);
+			if (!TryApplyGridSymmetryTransform(snapshot, currentSlots, currentRotations, mode)) {
+				backupSlots.CopyTo(currentSlots);
+				backupRots.CopyTo(currentRotations);
+				return;
+			}
+
+			SearchStateMetrics candMetrics = EvaluateSearchState(
+				snapshot,
+				currentSlots,
+				currentRotations,
+				ref evaluations
+			);
+			if (TryAcceptCandidate(
+				snapshot,
+				initialSlots,
+				initialRotations,
+				elitePool,
+				in candMetrics,
+				ref currentMetrics,
+				ref currentEnergy,
+				ref bestMetrics,
+				ref bestEnergy,
+				ref iteration,
+				ref iterationsSinceImprovement,
+				temperature,
+				ref rngState,
+				energyHistory,
+				tabuHashes,
+				ref tabuHead,
+				ref tabuCount,
+				currentSlots,
+				currentRotations,
+				bestSlots,
+				bestRotations
+			)) {
+				SyncItemToSlot(currentSlots, currentItemToSlot);
+			} else {
+				backupSlots.CopyTo(currentSlots);
+				backupRots.CopyTo(currentRotations);
+				iterationsSinceImprovement++;
 			}
 		}
 
@@ -3276,7 +3565,9 @@ namespace SephiriaOptimizer.Solver {
 			double histEnergy = energyHistory[histIdx];
 			iteration++;
 
-			if (candMetrics.CentiDps >= bestMetrics.CentiDps - 5 || candMetrics.Score >= bestMetrics.Score - 200) {
+			if (candMetrics.LexScore.Tier1UserPriority >= bestMetrics.LexScore.Tier1UserPriority
+				&& (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+					|| candMetrics.Score >= bestMetrics.Score - 200)) {
 				elitePool.TryOfferEvaluated(
 					snapshot,
 					initialSlots,
@@ -3288,7 +3579,7 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			if (CompareSearchStates(in candMetrics, in bestMetrics) > 0) {
-				double newBestEnergy = ComputeAnnealingEnergy(snapshot, in candMetrics);
+				double newBestEnergy = ComputeAnnealingEnergy(in candMetrics);
 				bestMetrics = candMetrics;
 				bestEnergy = newBestEnergy;
 				currentMetrics = candMetrics;
@@ -3302,7 +3593,7 @@ namespace SephiriaOptimizer.Solver {
 				return true;
 			}
 
-			double candEnergy = ComputeAnnealingEnergy(snapshot, in candMetrics);
+			double candEnergy = ComputeAnnealingEnergy(in candMetrics);
 			double energyDelta = candEnergy - currentEnergy;
 			bool equalOrBetter = CompareSearchStates(in candMetrics, in currentMetrics) >= 0 || energyDelta >= 0.0;
 
@@ -3332,32 +3623,10 @@ namespace SephiriaOptimizer.Solver {
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		private static bool IsBetterPolishState(
-			int candScore,
-			double candExactDps,
-			int candViolations,
-			int candUtilitySum,
-			int bestScore,
-			double bestExactDps,
-			int bestViolations,
-			int bestUtilitySum
+			in SearchStateMetrics candMetrics,
+			in SearchStateMetrics bestMetrics
 		) {
-			long candCenti = (long)Math.Round(candExactDps * 100.0);
-			long bestCenti = (long)Math.Round(bestExactDps * 100.0);
-			if (candCenti != bestCenti) {
-				return candCenti > bestCenti;
-			}
-			bool candFeasible = candViolations == 0;
-			bool bestFeasible = bestViolations == 0;
-			if (candFeasible != bestFeasible) {
-				return candFeasible;
-			}
-			if (candViolations != bestViolations) {
-				return candViolations < bestViolations;
-			}
-			if (candUtilitySum != bestUtilitySum) {
-				return candUtilitySum > bestUtilitySum;
-			}
-			return candScore > bestScore;
+			return CompareSearchStates(in candMetrics, in bestMetrics) > 0;
 		}
 
 		private static void RunExhaustiveMultiPassPolish(
@@ -3366,7 +3635,7 @@ namespace SephiriaOptimizer.Solver {
 			int polishDeadlineMs,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -3379,15 +3648,7 @@ namespace SephiriaOptimizer.Solver {
 			SlotItemSnapshot[] items = snapshot.Items;
 			bool[] pinnedSlots = snapshot.PinnedSlots;
 
-			bestScore = ObjectiveEvaluator.EvaluateWithMetrics(
-				snapshot,
-				bestSlots,
-				bestRotations,
-				out double bestExactDps,
-				out int bestViolations,
-				out int bestUtilitySum
-			);
-			evaluations++;
+			bestMetrics = EvaluateSearchState(snapshot, bestSlots, bestRotations, ref evaluations);
 
 			int rotatableTabletCount = 0;
 			for (int i = 0; i < itemCount; i++) {
@@ -3412,55 +3673,35 @@ namespace SephiriaOptimizer.Solver {
 						continue;
 					}
 					int tabletSlot = FindItemSlot(bestSlots, i);
-					if (tabletSlot >= 0 && pinnedSlots[tabletSlot]) {
+					if (tabletSlot < 0 || pinnedSlots[tabletSlot]) {
 						continue;
 					}
 					int currentRot = bestRotations[i];
 					int bestRotForItem = currentRot;
 					for (int rot = 0; rot < 4; rot++) {
-						if (rot == currentRot) {
-							continue;
-						}
-						if (tabletSlot >= 0 && IsRedundantTabletRotation(item, tabletSlot, rot)) {
+						if (rot == currentRot || IsRedundantTabletRotation(item, tabletSlot, rot)) {
 							continue;
 						}
 						bestRotations[i] = rot;
-						int score = ObjectiveEvaluator.EvaluateWithMetrics(
+						SearchStateMetrics candMetrics = EvaluateSearchState(
 							snapshot,
 							bestSlots,
 							bestRotations,
-							out double candDps,
-							out int candViol,
-							out int candUtil
+							ref evaluations
 						);
-						evaluations++;
-						if (score >= bestScore - 30) {
-							elitePool.TryOffer(
+						if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+							|| candMetrics.Score >= bestMetrics.Score - 30) {
+							elitePool.TryOfferEvaluated(
 								snapshot,
 								initialSlots,
 								initialRotations,
 								bestSlots,
 								bestRotations,
-								score,
-								ref evaluations,
-								countEval: false,
-								forceEval: score >= bestScore
+								in candMetrics
 							);
 						}
-						if (IsBetterPolishState(
-							score,
-							candDps,
-							candViol,
-							candUtil,
-							bestScore,
-							bestExactDps,
-							bestViolations,
-							bestUtilitySum
-						)) {
-							bestScore = score;
-							bestExactDps = candDps;
-							bestViolations = candViol;
-							bestUtilitySum = candUtil;
+						if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+							bestMetrics = candMetrics;
 							bestRotForItem = rot;
 							improved = true;
 						}
@@ -3504,42 +3745,25 @@ namespace SephiriaOptimizer.Solver {
 										continue;
 									}
 									bestRotations[iB] = rB;
-									int score = ObjectiveEvaluator.EvaluateWithMetrics(
+									SearchStateMetrics candMetrics = EvaluateSearchState(
 										snapshot,
 										bestSlots,
 										bestRotations,
-										out double candDps,
-										out int candViol,
-										out int candUtil
+										ref evaluations
 									);
-									evaluations++;
-									if (score >= bestScore - 30) {
-										elitePool.TryOffer(
+									if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+										|| candMetrics.Score >= bestMetrics.Score - 30) {
+										elitePool.TryOfferEvaluated(
 											snapshot,
 											initialSlots,
 											initialRotations,
 											bestSlots,
 											bestRotations,
-											score,
-											ref evaluations,
-											countEval: false,
-											forceEval: score >= bestScore
+											in candMetrics
 										);
 									}
-									if (IsBetterPolishState(
-										score,
-										candDps,
-										candViol,
-										candUtil,
-										bestScore,
-										bestExactDps,
-										bestViolations,
-										bestUtilitySum
-									)) {
-										bestScore = score;
-										bestExactDps = candDps;
-										bestViolations = candViol;
-										bestUtilitySum = candUtil;
+									if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+										bestMetrics = candMetrics;
 										bestPairRotA = rA;
 										bestPairRotB = rB;
 										pairImproved = true;
@@ -3551,6 +3775,19 @@ namespace SephiriaOptimizer.Solver {
 							bestRotations[iB] = pairImproved ? bestPairRotB : savedRotB;
 						}
 					}
+				}
+
+				if (TryPolishUnplacedSwapInOut(
+					snapshot,
+					bestSlots,
+					bestRotations,
+					ref bestMetrics,
+					ref evaluations,
+					elitePool,
+					initialSlots,
+					initialRotations
+				)) {
+					improved = true;
 				}
 
 				for (int sA = 0; sA < unlockedSlots; sA++) {
@@ -3601,42 +3838,25 @@ namespace SephiriaOptimizer.Solver {
 										continue;
 									}
 									bestRotations[itemB] = rB;
-									int score = ObjectiveEvaluator.EvaluateWithMetrics(
+									SearchStateMetrics candMetrics = EvaluateSearchState(
 										snapshot,
 										bestSlots,
 										bestRotations,
-										out double candDps,
-										out int candViol,
-										out int candUtil
+										ref evaluations
 									);
-									evaluations++;
-									if (score >= bestScore - 30) {
-										elitePool.TryOffer(
+									if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+										|| candMetrics.Score >= bestMetrics.Score - 30) {
+										elitePool.TryOfferEvaluated(
 											snapshot,
 											initialSlots,
 											initialRotations,
 											bestSlots,
 											bestRotations,
-											score,
-											ref evaluations,
-											countEval: false,
-											forceEval: score >= bestScore
+											in candMetrics
 										);
 									}
-									if (IsBetterPolishState(
-										score,
-										candDps,
-										candViol,
-										candUtil,
-										bestScore,
-										bestExactDps,
-										bestViolations,
-										bestUtilitySum
-									)) {
-										bestScore = score;
-										bestExactDps = candDps;
-										bestViolations = candViol;
-										bestUtilitySum = candUtil;
+									if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+										bestMetrics = candMetrics;
 										bestSwapRotA = rA;
 										bestSwapRotB = rB;
 										swapImproved = true;
@@ -3666,42 +3886,25 @@ namespace SephiriaOptimizer.Solver {
 									continue;
 								}
 								bestRotations[rotTarget] = r;
-								int score = ObjectiveEvaluator.EvaluateWithMetrics(
+								SearchStateMetrics candMetrics = EvaluateSearchState(
 									snapshot,
 									bestSlots,
 									bestRotations,
-									out double candDps,
-									out int candViol,
-									out int candUtil
+									ref evaluations
 								);
-								evaluations++;
-								if (score >= bestScore - 30) {
-									elitePool.TryOffer(
+								if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+									|| candMetrics.Score >= bestMetrics.Score - 30) {
+									elitePool.TryOfferEvaluated(
 										snapshot,
 										initialSlots,
 										initialRotations,
 										bestSlots,
 										bestRotations,
-										score,
-										ref evaluations,
-										countEval: false,
-										forceEval: score >= bestScore
+										in candMetrics
 									);
 								}
-								if (IsBetterPolishState(
-									score,
-									candDps,
-									candViol,
-									candUtil,
-									bestScore,
-									bestExactDps,
-									bestViolations,
-									bestUtilitySum
-								)) {
-									bestScore = score;
-									bestExactDps = candDps;
-									bestViolations = candViol;
-									bestUtilitySum = candUtil;
+								if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+									bestMetrics = candMetrics;
 									bestSwapRot = r;
 									swapImproved = true;
 									improved = true;
@@ -3716,42 +3919,25 @@ namespace SephiriaOptimizer.Solver {
 								bestSlots[sB] = itemB;
 							}
 						} else {
-							int score = ObjectiveEvaluator.EvaluateWithMetrics(
+							SearchStateMetrics candMetrics = EvaluateSearchState(
 								snapshot,
 								bestSlots,
 								bestRotations,
-								out double candDps,
-								out int candViol,
-								out int candUtil
+								ref evaluations
 							);
-							evaluations++;
-							if (score >= bestScore - 30) {
-								elitePool.TryOffer(
+							if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+								|| candMetrics.Score >= bestMetrics.Score - 30) {
+								elitePool.TryOfferEvaluated(
 									snapshot,
 									initialSlots,
 									initialRotations,
 									bestSlots,
 									bestRotations,
-									score,
-									ref evaluations,
-									countEval: false,
-									forceEval: score >= bestScore
+									in candMetrics
 								);
 							}
-							if (IsBetterPolishState(
-								score,
-								candDps,
-								candViol,
-								candUtil,
-								bestScore,
-								bestExactDps,
-								bestViolations,
-								bestUtilitySum
-							)) {
-								bestScore = score;
-								bestExactDps = candDps;
-								bestViolations = candViol;
-								bestUtilitySum = candUtil;
+							if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+								bestMetrics = candMetrics;
 								improved = true;
 							} else {
 								bestSlots[sA] = itemA;
@@ -3795,10 +3981,7 @@ namespace SephiriaOptimizer.Solver {
 								botB,
 								bestSlots,
 								bestRotations,
-								ref bestScore,
-								ref bestExactDps,
-								ref bestViolations,
-								ref bestUtilitySum,
+								ref bestMetrics,
 								ref evaluations,
 								elitePool,
 								initialSlots,
@@ -3815,10 +3998,7 @@ namespace SephiriaOptimizer.Solver {
 					snapshot,
 					bestSlots,
 					bestRotations,
-					ref bestScore,
-					ref bestExactDps,
-					ref bestViolations,
-					ref bestUtilitySum,
+					ref bestMetrics,
 					ref evaluations,
 					elitePool,
 					initialSlots,
@@ -3831,10 +4011,7 @@ namespace SephiriaOptimizer.Solver {
 					snapshot,
 					bestSlots,
 					bestRotations,
-					ref bestScore,
-					ref bestExactDps,
-					ref bestViolations,
-					ref bestUtilitySum,
+					ref bestMetrics,
 					ref evaluations,
 					elitePool,
 					initialSlots,
@@ -3847,10 +4024,7 @@ namespace SephiriaOptimizer.Solver {
 					snapshot,
 					bestSlots,
 					bestRotations,
-					ref bestScore,
-					ref bestExactDps,
-					ref bestViolations,
-					ref bestUtilitySum,
+					ref bestMetrics,
 					ref evaluations,
 					elitePool,
 					initialSlots,
@@ -3859,15 +4033,42 @@ namespace SephiriaOptimizer.Solver {
 					improved = true;
 				}
 
+				if (stopwatch.ElapsedMilliseconds < polishDeadlineMs) {
+					if (TryPolishGridSymmetryTransforms(
+						snapshot,
+						bestSlots,
+						bestRotations,
+						ref bestMetrics,
+						ref evaluations,
+						elitePool,
+						initialSlots,
+						initialRotations
+					)) {
+						improved = true;
+					}
+				}
+
+				if (!improved && stopwatch.ElapsedMilliseconds < polishDeadlineMs) {
+					if (TryPolishConnectedBlockShift(
+						snapshot,
+						bestSlots,
+						bestRotations,
+						ref bestMetrics,
+						ref evaluations,
+						elitePool,
+						initialSlots,
+						initialRotations
+					)) {
+						improved = true;
+					}
+				}
+
 				if (!improved && HasAnyStoneTablet(snapshot) && stopwatch.ElapsedMilliseconds < polishDeadlineMs) {
 					if (TryPolishTabletRelocateAndReassign(
 						snapshot,
 						bestSlots,
 						bestRotations,
-						ref bestScore,
-						ref bestExactDps,
-						ref bestViolations,
-						ref bestUtilitySum,
+						ref bestMetrics,
 						ref evaluations,
 						elitePool,
 						initialSlots,
@@ -3882,10 +4083,7 @@ namespace SephiriaOptimizer.Solver {
 						snapshot,
 						bestSlots,
 						bestRotations,
-						ref bestScore,
-						ref bestExactDps,
-						ref bestViolations,
-						ref bestUtilitySum,
+						ref bestMetrics,
 						ref evaluations,
 						elitePool,
 						initialSlots,
@@ -3901,10 +4099,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -3956,8 +4151,8 @@ namespace SephiriaOptimizer.Solver {
 							bestRotations,
 							ref evaluations
 						);
-						if (candMetrics.CentiDps >= (long)Math.Round(bestExactDps * 100.0) - 5
-							|| candMetrics.Score >= bestScore - 30) {
+						if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+							|| candMetrics.Score >= bestMetrics.Score - 30) {
 							elitePool.TryOfferEvaluated(
 								snapshot,
 								initialSlots,
@@ -3967,20 +4162,8 @@ namespace SephiriaOptimizer.Solver {
 								in candMetrics
 							);
 						}
-						if (IsBetterPolishState(
-							candMetrics.Score,
-							candMetrics.ExactEstimatedDps,
-							candMetrics.HardViolationCount,
-							candMetrics.UtilityEffectiveLevelSum,
-							bestScore,
-							bestExactDps,
-							bestViolations,
-							bestUtilitySum
-						)) {
-							bestScore = candMetrics.Score;
-							bestExactDps = candMetrics.ExactEstimatedDps;
-							bestViolations = candMetrics.HardViolationCount;
-							bestUtilitySum = candMetrics.UtilityEffectiveLevelSum;
+						if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+							bestMetrics = candMetrics;
 							return true;
 						}
 
@@ -4032,8 +4215,8 @@ namespace SephiriaOptimizer.Solver {
 									bestRotations,
 									ref evaluations
 								);
-								if (coupledMetrics.CentiDps >= (long)Math.Round(bestExactDps * 100.0) - 5
-									|| coupledMetrics.Score >= bestScore - 30) {
+								if (coupledMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+									|| coupledMetrics.Score >= bestMetrics.Score - 30) {
 									elitePool.TryOfferEvaluated(
 										snapshot,
 										initialSlots,
@@ -4043,20 +4226,8 @@ namespace SephiriaOptimizer.Solver {
 										in coupledMetrics
 									);
 								}
-								if (IsBetterPolishState(
-									coupledMetrics.Score,
-									coupledMetrics.ExactEstimatedDps,
-									coupledMetrics.HardViolationCount,
-									coupledMetrics.UtilityEffectiveLevelSum,
-									bestScore,
-									bestExactDps,
-									bestViolations,
-									bestUtilitySum
-								)) {
-									bestScore = coupledMetrics.Score;
-									bestExactDps = coupledMetrics.ExactEstimatedDps;
-									bestViolations = coupledMetrics.HardViolationCount;
-									bestUtilitySum = coupledMetrics.UtilityEffectiveLevelSum;
+								if (IsBetterPolishState(in coupledMetrics, in bestMetrics)) {
+									bestMetrics = coupledMetrics;
 									return true;
 								}
 
@@ -4079,10 +4250,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -4132,20 +4300,8 @@ namespace SephiriaOptimizer.Solver {
 								bestRotations,
 								ref evaluations
 							);
-							if (IsBetterPolishState(
-								candMetrics.Score,
-								candMetrics.ExactEstimatedDps,
-								candMetrics.HardViolationCount,
-								candMetrics.UtilityEffectiveLevelSum,
-								bestScore,
-								bestExactDps,
-								bestViolations,
-								bestUtilitySum
-							)) {
-								bestScore = candMetrics.Score;
-								bestExactDps = candMetrics.ExactEstimatedDps;
-								bestViolations = candMetrics.HardViolationCount;
-								bestUtilitySum = candMetrics.UtilityEffectiveLevelSum;
+							if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+								bestMetrics = candMetrics;
 								elitePool.TryOfferEvaluated(
 									snapshot,
 									initialSlots,
@@ -4178,20 +4334,8 @@ namespace SephiriaOptimizer.Solver {
 								bestRotations,
 								ref evaluations
 							);
-							if (IsBetterPolishState(
-								candMetrics.Score,
-								candMetrics.ExactEstimatedDps,
-								candMetrics.HardViolationCount,
-								candMetrics.UtilityEffectiveLevelSum,
-								bestScore,
-								bestExactDps,
-								bestViolations,
-								bestUtilitySum
-							)) {
-								bestScore = candMetrics.Score;
-								bestExactDps = candMetrics.ExactEstimatedDps;
-								bestViolations = candMetrics.HardViolationCount;
-								bestUtilitySum = candMetrics.UtilityEffectiveLevelSum;
+							if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+								bestMetrics = candMetrics;
 								elitePool.TryOfferEvaluated(
 									snapshot,
 									initialSlots,
@@ -4221,10 +4365,7 @@ namespace SephiriaOptimizer.Solver {
 			int botB,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -4237,42 +4378,20 @@ namespace SephiriaOptimizer.Solver {
 				bestSlots[topA] = i2;
 				bestSlots[botA] = i0;
 				bestSlots[botB] = i1;
-				int score = ObjectiveEvaluator.EvaluateWithMetrics(
-					snapshot,
-					bestSlots,
-					bestRotations,
-					out double candDps,
-					out int candViol,
-					out int candUtil
-				);
-				evaluations++;
-				if (score >= bestScore - 30) {
-					elitePool.TryOffer(
+				SearchStateMetrics candMetrics = EvaluateSearchState(snapshot, bestSlots, bestRotations, ref evaluations);
+				if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+					|| candMetrics.Score >= bestMetrics.Score - 30) {
+					elitePool.TryOfferEvaluated(
 						snapshot,
 						initialSlots,
 						initialRotations,
 						bestSlots,
 						bestRotations,
-						score,
-						ref evaluations,
-						countEval: false,
-						forceEval: score >= bestScore
+						in candMetrics
 					);
 				}
-				if (IsBetterPolishState(
-					score,
-					candDps,
-					candViol,
-					candUtil,
-					bestScore,
-					bestExactDps,
-					bestViolations,
-					bestUtilitySum
-				)) {
-					bestScore = score;
-					bestExactDps = candDps;
-					bestViolations = candViol;
-					bestUtilitySum = candUtil;
+				if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+					bestMetrics = candMetrics;
 					return true;
 				}
 				bestSlots[topA] = i0;
@@ -4288,42 +4407,20 @@ namespace SephiriaOptimizer.Solver {
 				bestSlots[topB] = i1;
 				bestSlots[topA] = i2;
 				bestSlots[botA] = i0;
-				int score = ObjectiveEvaluator.EvaluateWithMetrics(
-					snapshot,
-					bestSlots,
-					bestRotations,
-					out double candDps,
-					out int candViol,
-					out int candUtil
-				);
-				evaluations++;
-				if (score >= bestScore - 30) {
-					elitePool.TryOffer(
+				SearchStateMetrics candMetrics = EvaluateSearchState(snapshot, bestSlots, bestRotations, ref evaluations);
+				if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+					|| candMetrics.Score >= bestMetrics.Score - 30) {
+					elitePool.TryOfferEvaluated(
 						snapshot,
 						initialSlots,
 						initialRotations,
 						bestSlots,
 						bestRotations,
-						score,
-						ref evaluations,
-						countEval: false,
-						forceEval: score >= bestScore
+						in candMetrics
 					);
 				}
-				if (IsBetterPolishState(
-					score,
-					candDps,
-					candViol,
-					candUtil,
-					bestScore,
-					bestExactDps,
-					bestViolations,
-					bestUtilitySum
-				)) {
-					bestScore = score;
-					bestExactDps = candDps;
-					bestViolations = candViol;
-					bestUtilitySum = candUtil;
+				if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+					bestMetrics = candMetrics;
 					return true;
 				}
 				bestSlots[topB] = i0;
@@ -4340,42 +4437,20 @@ namespace SephiriaOptimizer.Solver {
 			bestSlots[botA] = bBot;
 			bestSlots[topB] = aTop;
 			bestSlots[botB] = aBot;
-			int disjointScore = ObjectiveEvaluator.EvaluateWithMetrics(
-				snapshot,
-				bestSlots,
-				bestRotations,
-				out double disDps,
-				out int disViol,
-				out int disUtil
-			);
-			evaluations++;
-			if (disjointScore >= bestScore - 30) {
-				elitePool.TryOffer(
+			SearchStateMetrics disMetrics = EvaluateSearchState(snapshot, bestSlots, bestRotations, ref evaluations);
+			if (disMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+				|| disMetrics.Score >= bestMetrics.Score - 30) {
+				elitePool.TryOfferEvaluated(
 					snapshot,
 					initialSlots,
 					initialRotations,
 					bestSlots,
 					bestRotations,
-					disjointScore,
-					ref evaluations,
-					countEval: false,
-					forceEval: disjointScore >= bestScore
+					in disMetrics
 				);
 			}
-			if (IsBetterPolishState(
-				disjointScore,
-				disDps,
-				disViol,
-				disUtil,
-				bestScore,
-				bestExactDps,
-				bestViolations,
-				bestUtilitySum
-			)) {
-				bestScore = disjointScore;
-				bestExactDps = disDps;
-				bestViolations = disViol;
-				bestUtilitySum = disUtil;
+			if (IsBetterPolishState(in disMetrics, in bestMetrics)) {
+				bestMetrics = disMetrics;
 				return true;
 			}
 			bestSlots[topA] = aTop;
@@ -4389,10 +4464,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -4448,42 +4520,25 @@ namespace SephiriaOptimizer.Solver {
 					bestSlots[s] = bC;
 					bestSlots[rightA] = bR;
 
-					int score = ObjectiveEvaluator.EvaluateWithMetrics(
+					SearchStateMetrics candMetrics = EvaluateSearchState(
 						snapshot,
 						bestSlots,
 						bestRotations,
-						out double candDps,
-						out int candViol,
-						out int candUtil
+						ref evaluations
 					);
-					evaluations++;
-					if (score >= bestScore - 30) {
-						elitePool.TryOffer(
+					if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+						|| candMetrics.Score >= bestMetrics.Score - 30) {
+						elitePool.TryOfferEvaluated(
 							snapshot,
 							initialSlots,
 							initialRotations,
 							bestSlots,
 							bestRotations,
-							score,
-							ref evaluations,
-							countEval: false,
-							forceEval: score >= bestScore
+							in candMetrics
 						);
 					}
-					if (IsBetterPolishState(
-						score,
-						candDps,
-						candViol,
-						candUtil,
-						bestScore,
-						bestExactDps,
-						bestViolations,
-						bestUtilitySum
-					)) {
-						bestScore = score;
-						bestExactDps = candDps;
-						bestViolations = candViol;
-						bestUtilitySum = candUtil;
+					if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+						bestMetrics = candMetrics;
 						anyImproved = true;
 						break;
 					}
@@ -4503,10 +4558,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -4539,42 +4591,25 @@ namespace SephiriaOptimizer.Solver {
 					int displaced = bestSlots[dest];
 					bestSlots[dest] = i;
 					bestSlots[cSlot] = displaced;
-					int score = ObjectiveEvaluator.EvaluateWithMetrics(
+					SearchStateMetrics candMetrics = EvaluateSearchState(
 						snapshot,
 						bestSlots,
 						bestRotations,
-						out double candDps,
-						out int candViol,
-						out int candUtil
+						ref evaluations
 					);
-					evaluations++;
-					if (score >= bestScore - 30) {
-						elitePool.TryOffer(
+					if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+						|| candMetrics.Score >= bestMetrics.Score - 30) {
+						elitePool.TryOfferEvaluated(
 							snapshot,
 							initialSlots,
 							initialRotations,
 							bestSlots,
 							bestRotations,
-							score,
-							ref evaluations,
-							countEval: false,
-							forceEval: score >= bestScore
+							in candMetrics
 						);
 					}
-					if (IsBetterPolishState(
-						score,
-						candDps,
-						candViol,
-						candUtil,
-						bestScore,
-						bestExactDps,
-						bestViolations,
-						bestUtilitySum
-					)) {
-						bestScore = score;
-						bestExactDps = candDps;
-						bestViolations = candViol;
-						bestUtilitySum = candUtil;
+					if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+						bestMetrics = candMetrics;
 						anyImproved = true;
 						break;
 					}
@@ -4590,10 +4625,7 @@ namespace SephiriaOptimizer.Solver {
 			InventorySnapshot snapshot,
 			int[] bestSlots,
 			int[] bestRotations,
-			ref int bestScore,
-			ref double bestExactDps,
-			ref int bestViolations,
-			ref int bestUtilitySum,
+			ref SearchStateMetrics bestMetrics,
 			ref int evaluations,
 			EliteCandidatePool elitePool,
 			ReadOnlySpan<int> initialSlots,
@@ -4614,10 +4646,12 @@ namespace SephiriaOptimizer.Solver {
 				int idx = bestSlots[s];
 				int priority = 0;
 				if (idx < 0) {
-					priority = 10;
+					priority = 12;
 				} else {
 					SlotItemSnapshot item = items[idx];
-					if (item.Kind == SlotItemKind.StoneTablet) {
+					if (item.IsUserPriorityOverridden) {
+						priority = 115;
+					} else if (item.Kind == SlotItemKind.StoneTablet) {
 						priority = 100;
 					} else if (snapshot.IsExcludedCompanionEmblem(item)) {
 						priority = 10;
@@ -4679,42 +4713,25 @@ namespace SephiriaOptimizer.Solver {
 								bestSlots[sC] = itemA;
 							}
 
-							int score = ObjectiveEvaluator.EvaluateWithMetrics(
+							SearchStateMetrics candMetrics = EvaluateSearchState(
 								snapshot,
 								bestSlots,
 								bestRotations,
-								out double candDps,
-								out int candViol,
-								out int candUtil
+								ref evaluations
 							);
-							evaluations++;
-							if (score >= bestScore - 30) {
-								elitePool.TryOffer(
+							if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+								|| candMetrics.Score >= bestMetrics.Score - 30) {
+								elitePool.TryOfferEvaluated(
 									snapshot,
 									initialSlots,
 									initialRotations,
 									bestSlots,
 									bestRotations,
-									score,
-									ref evaluations,
-									countEval: false,
-									forceEval: score >= bestScore
+									in candMetrics
 								);
 							}
-							if (IsBetterPolishState(
-								score,
-								candDps,
-								candViol,
-								candUtil,
-								bestScore,
-								bestExactDps,
-								bestViolations,
-								bestUtilitySum
-							)) {
-								bestScore = score;
-								bestExactDps = candDps;
-								bestViolations = candViol;
-								bestUtilitySum = candUtil;
+							if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+								bestMetrics = candMetrics;
 								return true;
 							}
 						}
@@ -4727,6 +4744,454 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			return false;
+		}
+
+		private static bool TryPolishUnplacedSwapInOut(
+			InventorySnapshot snapshot,
+			int[] bestSlots,
+			int[] bestRotations,
+			ref SearchStateMetrics bestMetrics,
+			ref int evaluations,
+			EliteCandidatePool elitePool,
+			ReadOnlySpan<int> initialSlots,
+			ReadOnlySpan<int> initialRotations
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+			int itemCount = items.Length;
+			bool[] pinnedSlots = snapshot.PinnedSlots;
+
+			Span<byte> isPlaced = stackalloc byte[itemCount];
+			isPlaced.Clear();
+			for (int s = 0; s < unlockedSlots; s++) {
+				int idx = bestSlots[s];
+				if (idx >= 0 && idx < itemCount) {
+					isPlaced[idx] = 1;
+				}
+			}
+
+			bool hasAnyUnplaced = false;
+			for (int i = 0; i < itemCount; i++) {
+				if (isPlaced[i] == 0 && !snapshot.IsExcludedCompanionEmblem(items[i])) {
+					hasAnyUnplaced = true;
+					break;
+				}
+			}
+			if (!hasAnyUnplaced) {
+				return false;
+			}
+
+			for (int u = 0; u < itemCount; u++) {
+				if (isPlaced[u] != 0 || snapshot.IsExcludedCompanionEmblem(items[u])) {
+					continue;
+				}
+				SlotItemSnapshot candItem = items[u];
+				int maxRot = (candItem.Kind == SlotItemKind.StoneTablet && candItem.IsRotatable) ? 4 : 1;
+				int savedRot = bestRotations[u];
+
+				for (int s = 0; s < unlockedSlots; s++) {
+					if (pinnedSlots[s]) {
+						continue;
+					}
+					int displaced = bestSlots[s];
+					bestSlots[s] = u;
+
+					for (int r = 0; r < maxRot; r++) {
+						int rot = maxRot > 1 ? r : savedRot;
+						if (maxRot > 1 && IsRedundantTabletRotation(candItem, s, rot)) {
+							continue;
+						}
+						bestRotations[u] = rot;
+						SearchStateMetrics candMetrics = EvaluateSearchState(
+							snapshot,
+							bestSlots,
+							bestRotations,
+							ref evaluations
+						);
+						if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+							|| candMetrics.Score >= bestMetrics.Score - 30) {
+							elitePool.TryOfferEvaluated(
+								snapshot,
+								initialSlots,
+								initialRotations,
+								bestSlots,
+								bestRotations,
+								in candMetrics
+							);
+						}
+						if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+							bestMetrics = candMetrics;
+							return true;
+						}
+					}
+
+					bestSlots[s] = displaced;
+					bestRotations[u] = savedRot;
+				}
+			}
+
+			return false;
+		}
+
+		private static bool TryPolishGridSymmetryTransforms(
+			InventorySnapshot snapshot,
+			int[] bestSlots,
+			int[] bestRotations,
+			ref SearchStateMetrics bestMetrics,
+			ref int evaluations,
+			EliteCandidatePool elitePool,
+			ReadOnlySpan<int> initialSlots,
+			ReadOnlySpan<int> initialRotations
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			int width = snapshot.Width;
+			int height = snapshot.Height;
+			int itemCount = snapshot.Items.Length;
+			bool[] pinnedSlots = snapshot.PinnedSlots;
+
+			Span<int> backupSlots = stackalloc int[unlockedSlots];
+			Span<int> backupRots = stackalloc int[itemCount];
+			bestSlots.AsSpan(0, unlockedSlots).CopyTo(backupSlots);
+			bestRotations.AsSpan(0, itemCount).CopyTo(backupRots);
+
+			int maxModes = (width * height == unlockedSlots && width == height) ? 5 : 3;
+			for (int mode = 0; mode < maxModes; mode++) {
+				if (!TryApplyGridSymmetryTransform(snapshot, bestSlots, bestRotations, mode)) {
+					backupSlots.CopyTo(bestSlots);
+					backupRots.CopyTo(bestRotations);
+					continue;
+				}
+
+				SearchStateMetrics candMetrics = EvaluateSearchState(snapshot, bestSlots, bestRotations, ref evaluations);
+				if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+					bestMetrics = candMetrics;
+					elitePool.TryOfferEvaluated(
+						snapshot,
+						initialSlots,
+						initialRotations,
+						bestSlots,
+						bestRotations,
+						in candMetrics
+					);
+					return true;
+				}
+
+				backupSlots.CopyTo(bestSlots);
+				backupRots.CopyTo(bestRotations);
+			}
+
+			if (height >= 2) {
+				for (int yA = 0; yA < height; yA++) {
+					for (int yB = yA + 1; yB < height; yB++) {
+						bool rowValid = true;
+						bool rowHasItem = false;
+						for (int x = 0; x < width; x++) {
+							int sA = snapshot.CoordToSlotIndex(x, yA);
+							int sB = snapshot.CoordToSlotIndex(x, yB);
+							if (sA < 0 || sB < 0 || pinnedSlots[sA] || pinnedSlots[sB]) {
+								rowValid = false;
+								break;
+							}
+							if (bestSlots[sA] >= 0 || bestSlots[sB] >= 0) {
+								rowHasItem = true;
+							}
+						}
+						if (!rowValid || !rowHasItem) {
+							continue;
+						}
+						for (int x = 0; x < width; x++) {
+							int sA = snapshot.CoordToSlotIndex(x, yA);
+							int sB = snapshot.CoordToSlotIndex(x, yB);
+							int tmp = bestSlots[sA];
+							bestSlots[sA] = bestSlots[sB];
+							bestSlots[sB] = tmp;
+						}
+						SearchStateMetrics rowMetrics = EvaluateSearchState(
+							snapshot,
+							bestSlots,
+							bestRotations,
+							ref evaluations
+						);
+						if (IsBetterPolishState(in rowMetrics, in bestMetrics)) {
+							bestMetrics = rowMetrics;
+							elitePool.TryOfferEvaluated(
+								snapshot,
+								initialSlots,
+								initialRotations,
+								bestSlots,
+								bestRotations,
+								in rowMetrics
+							);
+							return true;
+						}
+						for (int x = 0; x < width; x++) {
+							int sA = snapshot.CoordToSlotIndex(x, yA);
+							int sB = snapshot.CoordToSlotIndex(x, yB);
+							int tmp = bestSlots[sA];
+							bestSlots[sA] = bestSlots[sB];
+							bestSlots[sB] = tmp;
+						}
+					}
+				}
+			}
+
+			return false;
+		}
+
+		private static bool TryApplyGridSymmetryTransform(
+			InventorySnapshot snapshot,
+			Span<int> slots,
+			Span<int> rotations,
+			int mode
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			int width = snapshot.Width;
+			int height = snapshot.Height;
+			bool[] pinnedSlots = snapshot.PinnedSlots;
+			SlotItemSnapshot[] items = snapshot.Items;
+
+			Span<int> mapped = stackalloc int[unlockedSlots];
+			slots.Slice(0, unlockedSlots).CopyTo(mapped);
+
+			for (int s = 0; s < unlockedSlots; s++) {
+				SlotCoord sc = snapshot.Slots[s];
+				int dstX = sc.X;
+				int dstY = sc.Y;
+				switch (mode) {
+					case 0:
+						dstX = width - 1 - sc.X;
+						break;
+					case 1:
+						dstY = height - 1 - sc.Y;
+						break;
+					case 2:
+						dstX = width - 1 - sc.X;
+						dstY = height - 1 - sc.Y;
+						break;
+					case 3:
+						dstX = height - 1 - sc.Y;
+						dstY = sc.X;
+						break;
+					default:
+						dstX = sc.Y;
+						dstY = width - 1 - sc.X;
+						break;
+				}
+				int dstSlot = snapshot.CoordToSlotIndex(dstX, dstY);
+				if (dstSlot < 0 || pinnedSlots[s] || pinnedSlots[dstSlot]) {
+					return false;
+				}
+				mapped[dstSlot] = slots[s];
+			}
+
+			bool changed = false;
+			for (int s = 0; s < unlockedSlots; s++) {
+				if (mapped[s] != slots[s]) {
+					changed = true;
+				}
+				slots[s] = mapped[s];
+				int idx = mapped[s];
+				if (idx >= 0 && items[idx].Kind == SlotItemKind.StoneTablet && items[idx].IsRotatable) {
+					int r = rotations[idx] & 3;
+					rotations[idx] = mode switch {
+						2 => (r + 2) & 3,
+						3 => (r + 3) & 3,
+						4 => (r + 1) & 3,
+						_ => (4 - r) & 3
+					};
+				}
+			}
+			return changed;
+		}
+
+		private static bool TryPolishConnectedBlockShift(
+			InventorySnapshot snapshot,
+			int[] bestSlots,
+			int[] bestRotations,
+			ref SearchStateMetrics bestMetrics,
+			ref int evaluations,
+			EliteCandidatePool elitePool,
+			ReadOnlySpan<int> initialSlots,
+			ReadOnlySpan<int> initialRotations
+		) {
+			int unlockedSlots = snapshot.UnlockedSlots;
+			int width = snapshot.Width;
+			int height = snapshot.Height;
+			SlotItemSnapshot[] items = snapshot.Items;
+			bool[] pinnedSlots = snapshot.PinnedSlots;
+
+			Span<int> clusterSlots = stackalloc int[6];
+			Span<int> clusterItems = stackalloc int[6];
+			Span<int> destSlots = stackalloc int[6];
+			Span<int> backupSlots = stackalloc int[unlockedSlots];
+			bestSlots.AsSpan(0, unlockedSlots).CopyTo(backupSlots);
+
+			for (int anchorSlot = 0; anchorSlot < unlockedSlots; anchorSlot++) {
+				int anchorIdx = bestSlots[anchorSlot];
+				if (anchorIdx < 0 || pinnedSlots[anchorSlot]) {
+					continue;
+				}
+				SlotItemSnapshot anchor = items[anchorIdx];
+				if (anchor.Kind != SlotItemKind.StoneTablet
+					&& !anchor.HasDependencyTarget
+					&& !anchor.IsCrystalOfHarmony
+					&& !anchor.IsWhitePaperCharm) {
+					continue;
+				}
+
+				int clusterCount = 0;
+				ulong clusterMask = 1UL << anchorSlot;
+				clusterSlots[clusterCount] = anchorSlot;
+				clusterItems[clusterCount] = anchorIdx;
+				clusterCount++;
+
+				if (anchor.Kind == SlotItemKind.StoneTablet) {
+					TabletPlacementRule rule = anchor.GetPlacementRule(
+						anchorSlot,
+						bestRotations[anchorIdx] & 3
+					);
+					PrecomputedEffect[] effects = rule.Effects;
+					for (int e = 0; e < effects.Length && clusterCount < 6; e++) {
+						int tSlot = effects[e].TargetSlotIndex;
+						if (tSlot >= 0 && tSlot < unlockedSlots && !pinnedSlots[tSlot]
+							&& bestSlots[tSlot] >= 0 && (clusterMask & (1UL << tSlot)) == 0UL) {
+							clusterMask |= 1UL << tSlot;
+							clusterSlots[clusterCount] = tSlot;
+							clusterItems[clusterCount] = bestSlots[tSlot];
+							clusterCount++;
+						}
+					}
+				} else if (anchor.HasDependencyTarget) {
+					int rSlot = ObjectiveEvaluator.ResolveNeedleRootSlot(snapshot, bestSlots, anchorSlot);
+					if (rSlot >= 0 && !pinnedSlots[rSlot] && bestSlots[rSlot] >= 0
+						&& (clusterMask & (1UL << rSlot)) == 0UL) {
+						clusterMask |= 1UL << rSlot;
+						clusterSlots[clusterCount] = rSlot;
+						clusterItems[clusterCount] = bestSlots[rSlot];
+						clusterCount++;
+					}
+				} else if (anchor.IsWhitePaperCharm) {
+					int lSlot = snapshot.HorizontalNeighborLeft[anchorSlot];
+					int rSlot = snapshot.HorizontalNeighborRight[anchorSlot];
+					if (lSlot >= 0 && !pinnedSlots[lSlot] && bestSlots[lSlot] >= 0
+						&& (clusterMask & (1UL << lSlot)) == 0UL) {
+						clusterMask |= 1UL << lSlot;
+						clusterSlots[clusterCount] = lSlot;
+						clusterItems[clusterCount] = bestSlots[lSlot];
+						clusterCount++;
+					}
+					if (rSlot >= 0 && !pinnedSlots[rSlot] && bestSlots[rSlot] >= 0
+						&& (clusterMask & (1UL << rSlot)) == 0UL && clusterCount < 6) {
+						clusterMask |= 1UL << rSlot;
+						clusterSlots[clusterCount] = rSlot;
+						clusterItems[clusterCount] = bestSlots[rSlot];
+						clusterCount++;
+					}
+				} else if (anchor.IsCrystalOfHarmony) {
+					ulong nMask = snapshot.MooreNeighborMasks[anchorSlot];
+					while (nMask != 0UL && clusterCount < 6) {
+						int nSlot = BitOperations.TrailingZeroCount(nMask);
+						nMask &= nMask - 1UL;
+						if (!pinnedSlots[nSlot] && bestSlots[nSlot] >= 0
+							&& (clusterMask & (1UL << nSlot)) == 0UL) {
+							clusterMask |= 1UL << nSlot;
+							clusterSlots[clusterCount] = nSlot;
+							clusterItems[clusterCount] = bestSlots[nSlot];
+							clusterCount++;
+						}
+					}
+				}
+
+				if (clusterCount < 2) {
+					continue;
+				}
+
+				for (int dy = -height + 1; dy < height; dy++) {
+					for (int dx = -width + 1; dx < width; dx++) {
+						if (dx == 0 && dy == 0) {
+							continue;
+						}
+						bool shiftValid = true;
+						ulong destMask = 0UL;
+						for (int k = 0; k < clusterCount; k++) {
+							SlotCoord srcC = snapshot.Slots[clusterSlots[k]];
+							int dSlot = snapshot.CoordToSlotIndex(srcC.X + dx, srcC.Y + dy);
+							if (dSlot < 0 || pinnedSlots[dSlot]) {
+								shiftValid = false;
+								break;
+							}
+							destSlots[k] = dSlot;
+							destMask |= 1UL << dSlot;
+						}
+						if (!shiftValid) {
+							continue;
+						}
+
+						ApplyClusterParallelShift(
+							bestSlots,
+							clusterSlots,
+							clusterItems,
+							destSlots,
+							clusterCount,
+							clusterMask,
+							destMask
+						);
+						SearchStateMetrics candMetrics = EvaluateSearchState(
+							snapshot,
+							bestSlots,
+							bestRotations,
+							ref evaluations
+						);
+						if (candMetrics.LexScore.CompareTo(bestMetrics.LexScore) >= 0
+							|| candMetrics.Score >= bestMetrics.Score - 30) {
+							elitePool.TryOfferEvaluated(
+								snapshot,
+								initialSlots,
+								initialRotations,
+								bestSlots,
+								bestRotations,
+								in candMetrics
+							);
+						}
+						if (IsBetterPolishState(in candMetrics, in bestMetrics)) {
+							bestMetrics = candMetrics;
+							return true;
+						}
+						backupSlots.CopyTo(bestSlots);
+					}
+				}
+			}
+
+			return false;
+		}
+
+		private static void ApplyClusterParallelShift(
+			Span<int> slots,
+			ReadOnlySpan<int> srcSlots,
+			ReadOnlySpan<int> srcItems,
+			ReadOnlySpan<int> destSlots,
+			int clusterCount,
+			ulong srcMask,
+			ulong destMask
+		) {
+			Span<int> displaced = stackalloc int[6];
+			int dispCount = 0;
+			for (int k = 0; k < clusterCount; k++) {
+				int dSlot = destSlots[k];
+				if ((srcMask & (1UL << dSlot)) == 0UL) {
+					displaced[dispCount++] = slots[dSlot];
+				}
+			}
+			int dispWrite = 0;
+			for (int k = 0; k < clusterCount; k++) {
+				int sSlot = srcSlots[k];
+				if ((destMask & (1UL << sSlot)) == 0UL && dispWrite < dispCount) {
+					slots[sSlot] = displaced[dispWrite++];
+				}
+			}
+			for (int k = 0; k < clusterCount; k++) {
+				slots[destSlots[k]] = srcItems[k];
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -4759,10 +5224,26 @@ namespace SephiriaOptimizer.Solver {
 		}
 
 		private static int GetNeedleTargetSelectionScore(InventorySnapshot snapshot, SlotItemSnapshot item) {
+			int userOverrideBonus = item.IsUserPriorityOverridden
+				? item.PriorityTier switch {
+					ArtifactPriorityTier.Core => 200_000,
+					ArtifactPriorityTier.High => 100_000,
+					ArtifactPriorityTier.Normal => 30_000,
+					ArtifactPriorityTier.Low => 5_000,
+					_ => 0
+				}
+				: 0;
+			int tierBonus = item.PriorityTier switch {
+				ArtifactPriorityTier.Core => 20_000,
+				ArtifactPriorityTier.High => 10_000,
+				ArtifactPriorityTier.Normal => 3_000,
+				ArtifactPriorityTier.Low => 500,
+				_ => 0
+			};
 			double rootWeight = ObjectiveEvaluator.GetNeedleRootWeight(snapshot, item);
 			int centiWeight = (int)Math.Round(rootWeight * 100.0);
-			int maxDpsBonus = (int)Math.Round(item.GetAttackRawDpsAtLevel(item.MaxLevel));
-			return (centiWeight * (4 + item.MaxLevel)) + maxDpsBonus;
+			int customBonus = item.CustomWeight * 40;
+			return userOverrideBonus + tierBonus + (centiWeight * (4 + item.MaxLevel)) + customBonus + (item.MaxLevel * 25);
 		}
 
 		private static void ComputeTabletMaxPositivePerSlotContribution(
@@ -4936,8 +5417,8 @@ namespace SephiriaOptimizer.Solver {
 			int remPosDelta,
 			int remPosMul,
 			bool remHasIgnore,
-			out double upperBoundDps,
-			out int upperBoundScore
+			out long upperBoundTier1Priority,
+			out long upperBoundTier3Score
 		) {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			int itemCount = snapshot.Items.Length;
@@ -4954,18 +5435,18 @@ namespace SephiriaOptimizer.Solver {
 				slotMul[s] = snapshot.BaseSlotMultiplyLevel[s];
 			}
 
-			int maxTabletPositiveScore = 0;
-			bool hasEngraving = snapshot.TalentRules.TabletEngravingCount > 0;
+			long maxTabletUbScore = 0L;
 			for (int s = 0; s < unlockedSlots; s++) {
 				int idx = workingSlots[s];
 				if (idx < 0 || items[idx].Kind != SlotItemKind.StoneTablet) {
 					continue;
 				}
-				int rot = workingRotations[idx] & 3;
+				int rot = idx < workingRotations.Length ? (workingRotations[idx] & 3) : 0;
 				TabletPlacementRule rule = items[idx].GetPlacementRule(s, rot);
 				if (!CouldPartialTabletConditionBeSatisfied(snapshot, workingSlots, s, rule)) {
 					continue;
 				}
+				maxTabletUbScore += 240L;
 				bool harmGuaranteed = rule.Conditions.Length == 0
 					|| AreTabletConditionsAlreadySatisfied(snapshot, workingSlots, s, rule);
 				PrecomputedEffect[] effects = rule.Effects;
@@ -4974,27 +5455,14 @@ namespace SephiriaOptimizer.Solver {
 					int tSlot = eff.TargetSlotIndex;
 					switch (eff.EffectType) {
 						case TabletEffectType.IncreaseConstLevel: {
-							if (tSlot >= 0 && tSlot < unlockedSlots) {
-								if (eff.LevelParam > 0 || harmGuaranteed) {
-									slotDelta[tSlot] += eff.LevelParam;
-								}
-							}
-							if (eff.LevelParam < 0) {
-								maxTabletPositiveScore += (-eff.LevelParam)
-									* ObjectiveEvaluator.NeutralizedNegativeLevelBonus * 4;
-								if (tSlot < 0 && hasEngraving) {
-									maxTabletPositiveScore += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
-								}
+							if (tSlot >= 0 && tSlot < unlockedSlots && (eff.LevelParam > 0 || harmGuaranteed)) {
+								slotDelta[tSlot] += eff.LevelParam;
 							}
 							break;
 						}
 						case TabletEffectType.Disable: {
 							if (tSlot >= 0 && tSlot < unlockedSlots && harmGuaranteed) {
 								slotDisable[tSlot]++;
-							}
-							maxTabletPositiveScore += ObjectiveEvaluator.NeutralizedDisableBonus;
-							if (tSlot < 0 && hasEngraving) {
-								maxTabletPositiveScore += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
 							}
 							break;
 						}
@@ -5015,34 +5483,9 @@ namespace SephiriaOptimizer.Solver {
 			}
 
 			for (int k = depth; k < unpinnedItems.Length; k++) {
-				SlotItemSnapshot remItem = items[unpinnedItems[k]];
-				if (remItem.Kind != SlotItemKind.StoneTablet) {
-					continue;
+				if (items[unpinnedItems[k]].Kind == SlotItemKind.StoneTablet) {
+					maxTabletUbScore += 240L;
 				}
-				int bestTabScore = 0;
-				TabletPlacementRule[] rules = remItem.PlacementRules;
-				for (int r = 0; r < rules.Length; r++) {
-					int ruleScore = 0;
-					PrecomputedEffect[] effects = rules[r].Effects;
-					for (int e = 0; e < effects.Length; e++) {
-						PrecomputedEffect eff = effects[e];
-						if (eff.EffectType == TabletEffectType.IncreaseConstLevel && eff.LevelParam < 0) {
-							ruleScore += (-eff.LevelParam) * ObjectiveEvaluator.NeutralizedNegativeLevelBonus * 4;
-							if (hasEngraving) {
-								ruleScore += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
-							}
-						} else if (eff.EffectType == TabletEffectType.Disable) {
-							ruleScore += ObjectiveEvaluator.NeutralizedDisableBonus;
-							if (hasEngraving) {
-								ruleScore += ObjectiveEvaluator.EngravingOutOfBoundsBonus;
-							}
-						}
-					}
-					if (ruleScore > bestTabScore) {
-						bestTabScore = ruleScore;
-					}
-				}
-				maxTabletPositiveScore += bestTabScore;
 			}
 
 			Span<int> mysticUbMul = stackalloc int[InventorySnapshot.MaxSupportedSlots];
@@ -5078,27 +5521,15 @@ namespace SephiriaOptimizer.Solver {
 
 			Span<byte> itemActive = stackalloc byte[itemCount];
 			Span<int> itemUbEff = stackalloc int[itemCount];
-			Span<byte> itemCouldPlaced = stackalloc byte[itemCount];
 			itemActive.Clear();
 			itemUbEff.Clear();
-			itemCouldPlaced.Clear();
-
 			bool globalEnabled = snapshot.GlobalActiveValue > 0;
-			int topLimit = Math.Min(6, unlockedSlots);
-			int totalArtifacts = 0;
-			for (int i = 0; i < itemCount; i++) {
-				if (items[i].Kind == SlotItemKind.Artifact) {
-					totalArtifacts++;
-				}
-			}
-			int maxTop6Artifacts = Math.Min(topLimit, totalArtifacts);
 
 			for (int s = 0; s < unlockedSlots; s++) {
 				int idx = workingSlots[s];
 				if (idx < 0 || items[idx].Kind != SlotItemKind.Artifact) {
 					continue;
 				}
-				itemCouldPlaced[idx] = 1;
 				SlotItemSnapshot item = items[idx];
 				bool isExcluded = item.IsDisabledByWeaponOrDual
 					|| item.PriorityTier == ArtifactPriorityTier.Sacrifice
@@ -5129,7 +5560,6 @@ namespace SephiriaOptimizer.Solver {
 				if (item.Kind != SlotItemKind.Artifact) {
 					continue;
 				}
-				itemCouldPlaced[idx] = 1;
 				bool isExcluded = item.IsDisabledByWeaponOrDual
 					|| item.PriorityTier == ArtifactPriorityTier.Sacrifice
 					|| snapshot.IsExcludedCompanionEmblem(item);
@@ -5165,333 +5595,127 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			Span<int> allArtifactMaxDisplayLevels = stackalloc int[Math.Max(1, itemCount)];
-			int allArtDispCount = 0;
-			for (int s = 0; s < unlockedSlots; s++) {
-				int idx = workingSlots[s];
-				if (idx < 0 || items[idx].Kind != SlotItemKind.Artifact) {
-					continue;
-				}
-				SlotItemSnapshot art = items[idx];
-				int preUb = art.BaseLevel + slotDelta[s] + remPosDelta;
-				int mulUb = slotMul[s] + remPosMul + mysticUbMul[s];
-				int dispUb = mulUb > 0 ? (preUb * mulUb) : preUb;
-				if (dispUb > 0) {
-					allArtifactMaxDisplayLevels[allArtDispCount++] = Math.Min(dispUb, art.MaxLevel);
-				}
-			}
-			for (int k = depth; k < unpinnedItems.Length; k++) {
-				int idx = unpinnedItems[k];
-				if (items[idx].Kind != SlotItemKind.Artifact) {
-					continue;
-				}
-				SlotItemSnapshot art = items[idx];
-				int bestDisp = 0;
-				for (int s = 0; s < unlockedSlots; s++) {
-					if (workingSlots[s] >= 0 || snapshot.PinnedSlots[s]) {
-						continue;
-					}
-					int preUb = art.BaseLevel + slotDelta[s] + remPosDelta;
-					int mulUb = slotMul[s] + remPosMul + mysticUbMul[s];
-					int dispUb = mulUb > 0 ? (preUb * mulUb) : preUb;
-					if (dispUb > bestDisp) {
-						bestDisp = dispUb;
-					}
-				}
-				if (bestDisp > 0) {
-					allArtifactMaxDisplayLevels[allArtDispCount++] = Math.Min(bestDisp, art.MaxLevel);
-				}
-			}
-			SortDescending(allArtifactMaxDisplayLevels, allArtDispCount);
-			int best8NeighborLevelSum = 0;
-			int neighborCap = Math.Min(8, allArtDispCount);
-			for (int j = 0; j < neighborCap; j++) {
-				best8NeighborLevelSum += allArtifactMaxDisplayLevels[j];
-			}
-
-			bool hasCompanionChaosActive = false;
-			int maxPossibleActiveCount = 0;
-			for (int i = 0; i < itemCount; i++) {
-				if (itemActive[i] == 0) {
-					continue;
-				}
-				maxPossibleActiveCount++;
-				if (items[i].IsCompanionChaosCharm) {
-					hasCompanionChaosActive = true;
-				}
-			}
-
-			double maxNeedlePct = 0.0;
-			double maxHarmonyPct = 0.0;
-			double maxStatPct = 0.0;
-			double finalDamageMul = 1.0;
+			long coreUb = 0L;
+			long highUb = 0L;
+			long normUb = 0L;
+			long lowUb = 0L;
+			long tier3Ub = maxTabletUbScore;
+			int maxNeighborLevelSum = 0;
+			int harmonyCount = 0;
+			int needleCount = 0;
+			int companionCount = 0;
+			bool hasChaos = false;
 
 			for (int i = 0; i < itemCount; i++) {
-				if (itemActive[i] == 0) {
-					continue;
-				}
 				SlotItemSnapshot item = items[i];
 				int eff = itemUbEff[i];
-				if (item.HasDependencyTarget) {
-					int parents = Math.Max(1, item.DependencyParentOffsets.Length);
-					maxNeedlePct += item.GetNeedleBonusPercent(eff, 0, true) * parents;
-				}
-				if (item.IsCrystalOfHarmony) {
-					maxHarmonyPct += Math.Floor(
-						Math.Max(0, best8NeighborLevelSum) * (double)item.GetCrystalRatePerLevel(eff)
-					);
-				}
-				if (!item.HasExplicitStatDeltas) {
-					float statPct = item.GetStatBonusPercentAtLevel(eff);
-					if (statPct > 0f) {
-						maxStatPct += statPct;
-					}
-					float finalPct = item.GetFinalDamagePercentAtLevel(eff);
-					if (finalPct > 0f) {
-						finalDamageMul *= 1.0 + (finalPct * 0.01);
-					}
-				} else {
-					float statPct = item.GetStatBonusPercentAtLevel(eff);
-					if (statPct > 0f) {
-						maxStatPct += statPct;
-					}
-				}
-				if (item.IsElementalByRowCharm) {
-					maxStatPct += item.GetRowElementalBonus(eff);
-				}
-			}
+				bool active = item.Kind == SlotItemKind.StoneTablet || itemActive[i] != 0;
 
-			ComboCategoryInfo[] cats = snapshot.ComboCategories;
-			double maxComboStat = 0.0;
-			for (int i = 0; i < cats.Length; i++) {
-				maxComboStat += cats[i].EvaluateStatBonusPercent(
-					cats[i].StaticCount + maxPossibleActiveCount + 4,
-					snapshot.TalentRules.UnlimitedComboStat
-				);
-			}
-			maxStatPct += maxComboStat + snapshot.TalentRules.ArrangementBonusStat + maxHarmonyPct;
-
-			double chaosRowBonusPct = hasCompanionChaosActive
-				? ObjectiveEvaluator.CompanionChaosRowDpsBonusPercent
-				: 0.0;
-			double companionRowMul = 1.0 + (chaosRowBonusPct * 0.01);
-
-			if (snapshot.CombatBaseline.HasDetailedWeaponProfile) {
-				CombatStatDelta upperDelta = new CombatStatDelta(
-					allDamageBonus: (float)(maxHarmonyPct
-						+ snapshot.TalentRules.ArrangementBonusStat
-						+ (snapshot.TalentRules.ComboBonusDamageStat * cats.Length))
-				);
-				for (int i = 0; i < cats.Length; i++) {
-					CombatStatDelta cDelta = cats[i].EvaluateStatDelta(
-						cats[i].StaticCount + maxPossibleActiveCount + 4,
-						snapshot.TalentRules.UnlimitedComboStat
-					);
-					upperDelta = AddNonNegativeStats(in upperDelta, in cDelta);
-				}
-				ArrangementPattern[] patterns = snapshot.TalentRules.ArrangementPatterns;
-				for (int p = 0; p < patterns.Length; p++) {
-					CombatStatDelta patDelta = patterns[p].StatDelta;
-					if (patDelta.HasAnyNonZero) {
-						upperDelta = AddNonNegativeStats(in upperDelta, in patDelta);
-					}
-				}
-				for (int i = 0; i < itemCount; i++) {
-					if (itemActive[i] == 0) {
-						continue;
-					}
-					SlotItemSnapshot item = items[i];
-					int eff = itemUbEff[i];
-					CombatStatDelta itemStat = item.GetStatDeltaAtLevel(eff);
-					upperDelta = AddNonNegativeStats(in upperDelta, in itemStat);
-					if (!item.HasExplicitStatDeltas) {
-						float itemStatPct = item.GetStatBonusPercentAtLevel(eff);
-						if (itemStatPct > 0f) {
-							upperDelta = upperDelta.Add(new CombatStatDelta(allDamageBonus: itemStatPct));
-						}
-					}
-					if (item.IsWoodenBoxCharm && maxTop6Artifacts > 0) {
-						int ap = Math.Max(0, item.GetWoodenBoxApPerCharm(eff)) * maxTop6Artifacts;
-						upperDelta = upperDelta.Add(
-							new CombatStatDelta(fireDamage: ap, iceDamage: ap, lightningDamage: ap)
-						);
-					}
-					if (item.IsFireIcePositionCharm) {
-						item.GetFireIceStats(eff, true, out byte lElem, out int l1, out byte rElem, out int r1);
-						item.GetFireIceStats(eff, false, out _, out int l2, out _, out int r2);
-						upperDelta = upperDelta.AddElementalByKind(lElem, Math.Max(0, Math.Max(l1, l2)));
-						upperDelta = upperDelta.AddElementalByKind(rElem, Math.Max(0, Math.Max(r1, r2)));
-					}
-					if (item.IsElementalByRowCharm && item.RowCategoryIds.Length > 0) {
-						int rowBonus = Math.Max(0, item.GetRowElementalBonus(eff));
-						uint seenKindsMask = 0u;
-						int[] rowCats = item.RowCategoryIds;
-						for (int rc = 0; rc < rowCats.Length; rc++) {
-							int catId = rowCats[rc];
-							if (catId < 0) {
-								continue;
-							}
-							byte elemKind = snapshot.GetCategoryElementalKind(catId);
-							uint bit = 1u << (elemKind & 31);
-							if ((seenKindsMask & bit) == 0u) {
-								seenKindsMask |= bit;
-								upperDelta = upperDelta.AddElementalByKind(elemKind, rowBonus);
-							}
+				bool isTargetNeedle = snapshot.PreferredNeedleTargetInstanceId >= 0
+					&& snapshot.PreferredNeedleTargetInstanceId == item.InstanceId;
+				if (item.IsUserPriorityOverridden || isTargetNeedle) {
+					int unitUb = active ? 1950 : (item.PriorityTier == ArtifactPriorityTier.Sacrifice ? 40 : -2000);
+					if (!item.IsUserPriorityOverridden && isTargetNeedle) {
+						highUb += unitUb;
+					} else {
+						switch (item.PriorityTier) {
+							case ArtifactPriorityTier.Core:
+								coreUb += unitUb;
+								break;
+							case ArtifactPriorityTier.High:
+								highUb += unitUb;
+								break;
+							case ArtifactPriorityTier.Normal:
+								normUb += unitUb / 10;
+								break;
+							default:
+								lowUb += unitUb / 20;
+								break;
 						}
 					}
 				}
-				WeaponCombatEvaluation weaponEval = snapshot.CombatBaseline.WeaponProfile.Evaluate(
-					in upperDelta,
-					finalDamageMul
-				);
-				double fDmg = snapshot.CombatBaseline.BaseFollowerDamageBonus + upperDelta.FollowerDamageBonus;
-				double fSpd = snapshot.CombatBaseline.BaseFollowerAttackSpeed + upperDelta.FollowerAttackSpeed;
-				double fCrit = snapshot.CombatBaseline.BaseFollowerCritChancePercent
-					+ upperDelta.FollowerCritChancePercent;
-				double fAtkSpdMul = Math.Clamp(1.0 + (fSpd * 0.01), 0.25, 6.0);
-				double fCritMul = 1.0 + (Math.Clamp(fCrit * 0.01, 0.0, 1.0) * 0.5);
-				double baseAllDmgPlusUpper = snapshot.CombatBaseline.WeaponProfile.BaseAllDamageBonus
-					+ upperDelta.AllDamageBonus;
-				double compAllDmgHarmFactor = Math.Max(0.1, 1.0 + (baseAllDmgPlusUpper * 0.01));
-				double compSharedPost = snapshot.CombatBaseline.WeaponProfile.GlobalPostMultiplier * finalDamageMul;
-				double maxAttackDps = 0.0;
-				double maxCompanionDps = 0.0;
-				for (int i = 0; i < itemCount; i++) {
-					if (itemActive[i] == 0) {
-						continue;
-					}
-					SlotItemSnapshot item = items[i];
-					if (item.IsCompanionAttackCharm || (item.IsCompanionCharm && item.IsAttackableCharm)) {
-						double rawComp = item.GetAttackRawDpsAtLevelWithElement(
-							itemUbEff[i],
-							weaponEval.ResolveElementalStat(item.CharmScalingElementKind)
-						);
-						double compMul = Math.Max(0.1, 1.0 + ((fDmg + chaosRowBonusPct + maxNeedlePct) * 0.01))
-							* compAllDmgHarmFactor
-							* fAtkSpdMul
-							* fCritMul
-							* compSharedPost;
-						maxCompanionDps += rawComp * compMul;
-					} else if (item.IsAttackableCharm) {
-						double raw = item.GetAttackRawDpsAtLevelWithElement(
-							itemUbEff[i],
-							weaponEval.ResolveElementalStat(item.CharmScalingElementKind)
-						);
-						double amp = 1.0 + ((weaponEval.LiveCharmDamageBonusPercent + maxNeedlePct) * 0.01);
-						maxAttackDps += raw * Math.Max(0.1, amp);
-					}
-				}
-				upperBoundDps = weaponEval.WeaponAndAddonEffectiveDps
-					+ (maxAttackDps * weaponEval.CharmPostMultiplier)
-					+ maxCompanionDps;
-			} else {
-				double baseWeaponRaw = snapshot.CombatBaseline.ComputeBaseWeaponRawDps();
-				double baseCrit = snapshot.CombatBaseline.ComputeCritExpectedMultiplier();
-				double allStats = maxStatPct;
-				double fDmg = snapshot.CombatBaseline.BaseFollowerDamageBonus;
-				double fSpd = snapshot.CombatBaseline.BaseFollowerAttackSpeed;
-				double fCrit = snapshot.CombatBaseline.BaseFollowerCritChancePercent;
-				for (int i = 0; i < itemCount; i++) {
-					if (itemActive[i] == 0) {
-						continue;
-					}
-					CombatStatDelta d = items[i].GetStatDeltaAtLevel(itemUbEff[i]);
-					allStats += Math.Max(0f, d.AllDamageBonus);
-					fDmg += Math.Max(0f, d.FollowerDamageBonus);
-					fSpd += Math.Max(0f, d.FollowerAttackSpeed);
-					fCrit += Math.Max(0f, d.FollowerCritChancePercent);
-				}
-				double fAtkSpdMul = Math.Clamp(1.0 + (fSpd * 0.01), 0.25, 6.0);
-				double fCritMul = 1.0 + (Math.Clamp(fCrit * 0.01, 0.0, 1.0) * 0.5);
-				double maxAttackDps = 0.0;
-				double maxCompanionDps = 0.0;
-				for (int i = 0; i < itemCount; i++) {
-					if (itemActive[i] == 0) {
-						continue;
-					}
-					SlotItemSnapshot item = items[i];
-					if (item.IsCompanionAttackCharm || (item.IsCompanionCharm && item.IsAttackableCharm)) {
-						double rawComp = item.GetAttackRawDpsAtLevel(itemUbEff[i]);
-						double compMul = Math.Max(0.1, 1.0 + ((allStats + fDmg + maxNeedlePct) * 0.01))
-							* fAtkSpdMul
-							* fCritMul
-							* companionRowMul;
-						maxCompanionDps += rawComp * compMul * finalDamageMul;
-					} else if (item.IsAttackableCharm) {
-						maxAttackDps += item.GetAttackRawDpsAtLevel(itemUbEff[i])
-							* (1.0 + (maxNeedlePct * 0.01));
-					}
-				}
-				double legacyMul = 1.0 + ((snapshot.CombatBaseline.ElementalDamageBonusPercent + maxStatPct) * 0.01);
-				upperBoundDps = ((baseWeaponRaw + maxAttackDps)
-					* legacyMul
-					* baseCrit
-					* finalDamageMul
-					* (1.0 + (maxHarmonyPct * 0.01)))
-					+ maxCompanionDps;
-			}
 
-			int maxArtScore = maxTabletPositiveScore;
-			for (int i = 0; i < itemCount; i++) {
-				if (itemCouldPlaced[i] == 0 || items[i].Kind != SlotItemKind.Artifact) {
+				if (item.Kind != SlotItemKind.Artifact || itemActive[i] == 0) {
 					continue;
 				}
-				SlotItemSnapshot item = items[i];
-				if (item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
-					maxArtScore += ObjectiveEvaluator.SacrificeActiveTieBreakerScore + 200;
-					continue;
-				}
-				if (itemActive[i] == 0 || snapshot.IsExcludedCompanionEmblem(item)) {
-					continue;
-				}
-				double weight = ObjectiveEvaluator.GetNormalizedWeight(item);
-				int eff = itemUbEff[i];
-				int rawBase = ObjectiveEvaluator.BaseActiveArtifactScore
-					+ (eff * ObjectiveEvaluator.EffectiveLevelScoreMultiplier)
-					+ ObjectiveEvaluator.MaxLevelReachedBonus
-					+ ObjectiveEvaluator.IgnoreConstraintSynergyBonus
-					+ 700;
-				maxArtScore += (int)Math.Ceiling(rawBase * weight)
-					+ (64 * ObjectiveEvaluator.MaxLevelOverflowTieBreakerBonus)
-					+ 200;
-				if (item.HasDependencyTarget) {
-					int parents = Math.Max(1, item.DependencyParentOffsets.Length);
-					maxArtScore += (int)Math.Ceiling(12000.0 * weight) * parents;
+
+				if (item.MaxLevel > 0) {
+					maxNeighborLevelSum += Math.Min(eff, item.MaxLevel);
 				}
 				if (item.IsCrystalOfHarmony) {
-					maxArtScore += (int)Math.Ceiling(
-						best8NeighborLevelSum * item.GetCrystalRatePerLevel(eff)
-						* ObjectiveEvaluator.CrystalNeighborLevelFactor * weight
-					) + (8 * ObjectiveEvaluator.CrystalNeighborSlotBonus) + 200;
+					harmonyCount++;
 				}
-				if (item.IsElementalByRowCharm) {
-					maxArtScore += ObjectiveEvaluator.ChalcedonyTargetMatchBonus
-						+ (item.GetRowElementalBonus(eff) * 140)
-						+ 400;
-				}
-				if (item.IsWhitePaperCharm) {
-					maxArtScore += ObjectiveEvaluator.WhitePaperTargetCopiedBonus + 300;
+				if (item.HasDependencyTarget) {
+					needleCount++;
 				}
 				if (item.IsCompanionChaosCharm) {
-					maxArtScore += 600;
+					hasChaos = true;
+				}
+				if (item.IsCompanionCharm) {
+					companionCount++;
+				}
+
+				int clampedCustom = Math.Clamp(item.CustomWeight, 1, 24);
+				double factor = (item.PriorityTier switch {
+					ArtifactPriorityTier.Core => 1.38,
+					ArtifactPriorityTier.High => 1.22,
+					ArtifactPriorityTier.Low => 0.80,
+					_ => 1.00
+				}) + (0.008 * clampedCustom);
+
+				tier3Ub += (long)Math.Ceiling((220L + (eff * 210L) + 160L) * factor) + 450L;
+				if (item.HasDependencyTarget) {
+					int parents = Math.Max(1, item.DependencyParentOffsets.Length);
+					int ampPct = item.IsCompassBreakthrough
+						? 20
+						: item.GetNeedleBonusPercent(eff, 0, true);
+					tier3Ub += parents * (400L + (long)Math.Ceiling(ampPct * 44.5 * 1.65));
+				}
+				if (item.IsElementalByRowCharm) {
+					tier3Ub += 140L + (item.GetRowElementalBonus(eff) * 80L);
+				}
+				if (item.IsWhitePaperCharm) {
+					tier3Ub += 1500L;
+				}
+				if (item.IsCompanionChaosCharm || item.IsCompanionCharm) {
+					tier3Ub += 700L + (eff * 260L);
+				}
+			}
+
+			if (harmonyCount > 0) {
+				tier3Ub += (long)harmonyCount * ((maxNeighborLevelSum * 600L) + 120L);
+			}
+			if (hasChaos && companionCount > 0) {
+				tier3Ub += 1200L * companionCount;
+			}
+			if (snapshot.PreferredNeedleTargetInstanceId >= 0) {
+				highUb += (long)Math.Max(1, needleCount) * 800L;
+			}
+			if (snapshot.PreferredChalcedonyCategoryId >= 0) {
+				highUb += 1200L;
+			}
+			ComboCategoryInfo[] cats = snapshot.ComboCategories;
+			if (snapshot.UserTargetCategoryMask != 0u) {
+				for (int i = 0; i < cats.Length; i++) {
+					if (cats[i].IsUserTarget) {
+						highUb += 400L + (cats[i].Breakpoints.Length * 350L);
+					}
 				}
 			}
 			for (int i = 0; i < cats.Length; i++) {
-				maxArtScore += (cats[i].Breakpoints.Length * ObjectiveEvaluator.TargetComboBreakpointBonus)
-					+ (8 * ObjectiveEvaluator.TargetComboDynamicStackBonus);
+				tier3Ub += 900L + (cats[i].Breakpoints.Length * 750L);
+			}
+			if (snapshot.MysticCategoryId >= 0) {
+				tier3Ub += 1440L;
 			}
 			if (snapshot.TalentRules.ArrangementBonusStat > 0) {
-				maxArtScore += snapshot.TalentRules.ArrangementPatterns.Length
-					* ObjectiveEvaluator.ArrangementPatternMatchBonus;
+				tier3Ub += snapshot.TalentRules.ArrangementPatterns.Length * 600L;
 			}
-			double baseWeaponRef = snapshot.CombatBaseline.HasDetailedWeaponProfile
-				? snapshot.CombatBaseline.BaseWeaponDps
-				: snapshot.CombatBaseline.ComputeBaseWeaponRawDps();
-			double dpsGainScore = Math.Ceiling(
-				((upperBoundDps - baseWeaponRef) / Math.Max(100.0, baseWeaponRef))
-				* ObjectiveEvaluator.DpsGainScoreMultiplier
-			);
-			upperBoundScore = maxArtScore + (int)Math.Clamp(dpsGainScore + 5000.0, 0.0, 500_000_000.0);
+
+			upperBoundTier1Priority = snapshot.HasAnyUserPriority
+				? (coreUb * 10_000_000_000_000L) + (highUb * 10_000_000L) + (normUb * 20L) + lowUb
+				: 0L;
+			upperBoundTier3Score = tier3Ub;
 		}
 
 		private static void SortUnpinnedItemsForBranching(
@@ -5523,9 +5747,18 @@ namespace SephiriaOptimizer.Solver {
 		}
 
 		private static int GetBranchingPriority(InventorySnapshot snapshot, SlotItemSnapshot item) {
+			int overrideBonus = item.IsUserPriorityOverridden
+				? item.PriorityTier switch {
+					ArtifactPriorityTier.Core => 60_000,
+					ArtifactPriorityTier.High => 35_000,
+					ArtifactPriorityTier.Normal => 15_000,
+					ArtifactPriorityTier.Low => 2_000,
+					_ => 0
+				}
+				: 0;
 			if (item.Kind == SlotItemKind.StoneTablet) {
 				int effectLen = item.PlacementRules.Length > 0 ? item.PlacementRules[0].Effects.Length : 0;
-				return 10000 + (effectLen * 50) + (item.IsRotatable ? 20 : 0);
+				return overrideBonus + 10_000 + (effectLen * 50) + (item.IsRotatable ? 20 : 0);
 			}
 			if (item.Kind == SlotItemKind.Artifact) {
 				if (snapshot.IsExcludedCompanionEmblem(item) || item.PriorityTier == ArtifactPriorityTier.Sacrifice) {
@@ -5533,7 +5766,12 @@ namespace SephiriaOptimizer.Solver {
 				}
 				int constraintBonus = item.ConstraintType != ArtifactConstraintType.None ? 500 : 0;
 				int priorityBonus = (int)item.PriorityTier * 200;
-				return 1000 + constraintBonus + priorityBonus + (item.CustomWeight * 25) + (item.MaxLevel * 10);
+				return overrideBonus
+					+ 1000
+					+ constraintBonus
+					+ priorityBonus
+					+ (item.CustomWeight * 25)
+					+ (item.MaxLevel * 10);
 			}
 			return 0;
 		}
@@ -5821,6 +6059,26 @@ namespace SephiriaOptimizer.Solver {
 						candidateRotations,
 						ref evaluations
 					);
+					if (modeMetrics.HardViolationCount > 0 && stopwatch.ElapsedMilliseconds < timeBudgetMs) {
+						int[] repairSlots = candidateSlots.ToArray();
+						int[] repairRotations = candidateRotations.ToArray();
+						RunChainedPenaltyRepair(
+							snapshot,
+							stopwatch,
+							Math.Min(timeBudgetMs, (int)stopwatch.ElapsedMilliseconds + 25),
+							repairSlots,
+							repairRotations,
+							ref modeMetrics,
+							ref evaluations,
+							elitePool,
+							initialSlots,
+							initialRotations
+						);
+						repairSlots.CopyTo(candidateSlots);
+						repairRotations.CopyTo(candidateRotations);
+						RunArtifactOnlyLocalPolish(snapshot, candidateSlots, candidateRotations, ref evaluations);
+						modeMetrics = EvaluateSearchState(snapshot, candidateSlots, candidateRotations, ref evaluations);
+					}
 					elitePool.TryOfferEvaluated(
 						snapshot,
 						initialSlots,
@@ -6384,8 +6642,7 @@ namespace SephiriaOptimizer.Solver {
 				}
 			}
 
-			for (int passSink = 0; passSink < 2; passSink++) {
-				bool placingExcludedOrSacrifice = passSink == 1;
+			for (int passTier = 0; passTier < 4; passTier++) {
 				int dummyEval = 0;
 				for (int i = 0; i < itemCount; i++) {
 					if (itemPlaced[i] != 0) {
@@ -6395,7 +6652,12 @@ namespace SephiriaOptimizer.Solver {
 						&& (items[i].PriorityTier == ArtifactPriorityTier.Sacrifice
 							|| items[i].IsDisabledByWeaponOrDual
 							|| snapshot.IsExcludedCompanionEmblem(items[i]));
-					if (isLowTier != placingExcludedOrSacrifice) {
+					int itemBucket = isLowTier
+						? 3
+						: (items[i].IsUserPriorityOverridden
+							? (items[i].PriorityTier >= ArtifactPriorityTier.High ? 0 : 1)
+							: 2);
+					if (itemBucket != passTier) {
 						continue;
 					}
 					int bestSlot = -1;
@@ -6745,28 +7007,26 @@ namespace SephiriaOptimizer.Solver {
 					int extraOtherScale = totalMul > 1 ? Math.Max(0, rawDelta * (totalMul - 1)) : 0;
 					int posTotal = (otherPosLevel[s] * effMul) + extraOtherScale + ignore[s];
 					if (posTotal > 0) {
-						fieldScore -= posTotal * ObjectiveEvaluator.TabletOnBuffedSlotPenalty;
-						collisionCount++;
+						fieldScore -= posTotal * 35;
 					} else if (rawNeg > 0 || disable[s] > 0) {
 						fieldScore += (rawNeg * effMul * 95) + (disable[s] * 140);
 					}
 					continue;
 				}
 
-				if (rawPos > 0 && rawNeg > 0 && rawDelta < 4) {
+				if (rawPos > 0 && rawNeg > 0 && finalDelta < 0) {
 					collisionCount++;
 					int rawCanceled = Math.Min(rawPos, rawNeg);
 					int canceledScaled = rawCanceled * effMul;
-					fieldScore -= canceledScaled * (ObjectiveEvaluator.TabletPlusMinusCollisionPenalty + 220);
-					if (finalDelta > 0) {
-						int netPosPen = ObjectiveEvaluator.TabletMinusOnNetPositiveSlotPenalty + 160;
-						fieldScore -= (rawNeg * effMul) * netPosPen;
-					}
+					fieldScore -= canceledScaled * 220;
+				} else if (rawPos > 0 && rawNeg > 0) {
+					int rawCanceled = Math.Min(rawPos, rawNeg);
+					fieldScore -= rawCanceled * effMul * 15;
 				}
 
 				if (disable[s] > 0 && (rawPos > 0 || ignore[s] > 0)) {
 					collisionCount++;
-					fieldScore -= ((rawPos * effMul) + ignore[s] + 2) * 1800;
+					fieldScore -= ((rawPos * effMul) + ignore[s] + 2) * 350;
 				}
 
 				int existingIdx = slotToItem[s];
@@ -7519,8 +7779,10 @@ namespace SephiriaOptimizer.Solver {
 			}
 		}
 
-		private static void RunTabletCollisionRepairPass(
+		private static void RunChainedPenaltyRepair(
 			InventorySnapshot snapshot,
+			Stopwatch stopwatch,
+			int deadlineMs,
 			int[] bestSlots,
 			int[] bestRotations,
 			ref SearchStateMetrics bestMetrics,
@@ -7529,124 +7791,181 @@ namespace SephiriaOptimizer.Solver {
 			ReadOnlySpan<int> initialSlots,
 			ReadOnlySpan<int> initialRotations
 		) {
+			if (bestMetrics.HardViolationCount == 0
+				&& (bestMetrics.LexScore.Tier2PenaltyOffset % 1_000_000L) >= 0L) {
+				return;
+			}
+
 			int unlockedSlots = snapshot.UnlockedSlots;
 			int itemCount = snapshot.Items.Length;
 			SlotItemSnapshot[] items = snapshot.Items;
 			bool[] pinnedSlots = snapshot.PinnedSlots;
 
-			int baselineFieldScore = EvaluatePureTabletFieldScore(
-				snapshot,
-				bestSlots,
-				bestRotations,
-				out int baselineCollisions
-			);
-			if (baselineCollisions == 0) {
-				return;
-			}
+			Span<int> workSlots = stackalloc int[unlockedSlots];
+			Span<int> workRots = stackalloc int[itemCount];
+			bestSlots.AsSpan(0, unlockedSlots).CopyTo(workSlots);
+			bestRotations.AsSpan(0, itemCount).CopyTo(workRots);
 
-			Span<int> tabletOnlySlots = stackalloc int[unlockedSlots];
-			Span<int> workingSlots = stackalloc int[unlockedSlots];
-			Span<int> workingRotations = stackalloc int[itemCount];
-
-			for (int pass = 0; pass < 2; pass++) {
+			for (int pass = 0; pass < 3; pass++) {
+				if (stopwatch.ElapsedMilliseconds >= deadlineMs) {
+					break;
+				}
 				bool repairedInPass = false;
+				SlotEvaluationDetail[] curDetails = ObjectiveEvaluator.EvaluateDetailed(snapshot, workSlots, workRots);
 
-				for (int sTab = 0; sTab < unlockedSlots; sTab++) {
-					if (pinnedSlots[sTab]) {
+				for (int pSlot = 0; pSlot < unlockedSlots; pSlot++) {
+					if (stopwatch.ElapsedMilliseconds >= deadlineMs) {
+						break;
+					}
+					int pIdx = workSlots[pSlot];
+					if (pIdx < 0 || pinnedSlots[pSlot]) {
 						continue;
 					}
-					int tabletIdx = bestSlots[sTab];
-					if (tabletIdx < 0 || items[tabletIdx].Kind != SlotItemKind.StoneTablet) {
+					SlotItemSnapshot pItem = items[pIdx];
+					bool isPenalizedArtifact = pItem.Kind == SlotItemKind.Artifact
+						&& pItem.PriorityTier != ArtifactPriorityTier.Sacrifice
+						&& !snapshot.IsExcludedCompanionEmblem(pItem)
+						&& (!curDetails[pSlot].IsEnabled || curDetails[pSlot].EffectiveLevel < pItem.BaseLevel);
+					bool isUnmetTablet = pItem.Kind == SlotItemKind.StoneTablet
+						&& pItem.PriorityTier != ArtifactPriorityTier.Sacrifice
+						&& !ObjectiveEvaluator.IsTabletConditionMet(
+							snapshot,
+							workSlots,
+							pSlot,
+							pItem.GetPlacementRule(pSlot, workRots[pIdx] & 3)
+						);
+					if (!isPenalizedArtifact && !isUnmetTablet) {
 						continue;
 					}
 
-					SlotItemSnapshot tablet = items[tabletIdx];
-					int maxRot = tablet.IsRotatable ? 4 : 1;
-
-					for (int candSlot = 0; candSlot < unlockedSlots; candSlot++) {
-						if (pinnedSlots[candSlot]) {
+					for (int otherSlot = 0; otherSlot < unlockedSlots; otherSlot++) {
+						if (otherSlot == pSlot || pinnedSlots[otherSlot]) {
 							continue;
 						}
+						int otherIdx = workSlots[otherSlot];
+						workSlots[pSlot] = otherIdx;
+						workSlots[otherSlot] = pIdx;
 
-						for (int r = 0; r < maxRot; r++) {
-							int rot = tablet.IsRotatable ? r : (bestRotations[tabletIdx] & 3);
-							if (candSlot == sTab && rot == bestRotations[tabletIdx]) {
-								continue;
-							}
-							if (tablet.IsRotatable && IsRedundantTabletRotation(tablet, candSlot, rot)) {
-								continue;
-							}
+						int maxRotP = (pItem.Kind == SlotItemKind.StoneTablet && pItem.IsRotatable) ? 4 : 1;
+						int savedRotP = workRots[pIdx];
+						int maxRotO = (otherIdx >= 0
+							&& items[otherIdx].Kind == SlotItemKind.StoneTablet
+							&& items[otherIdx].IsRotatable) ? 4 : 1;
+						int savedRotO = otherIdx >= 0 ? workRots[otherIdx] : 0;
 
-							tabletOnlySlots.Fill(-1);
-							for (int s = 0; s < unlockedSlots; s++) {
-								int idx = bestSlots[s];
-								if (idx >= 0 && (pinnedSlots[s] || items[idx].Kind == SlotItemKind.StoneTablet)) {
-									tabletOnlySlots[s] = idx;
+						for (int rp = 0; rp < maxRotP; rp++) {
+							if (maxRotP > 1) {
+								workRots[pIdx] = rp;
+							}
+							for (int ro = 0; ro < maxRotO; ro++) {
+								if (otherIdx >= 0 && maxRotO > 1) {
+									workRots[otherIdx] = ro;
 								}
-							}
-							bestRotations.AsSpan(0, itemCount).CopyTo(workingRotations);
-
-							int displacedTablet = tabletOnlySlots[candSlot];
-							tabletOnlySlots[sTab] = displacedTablet;
-							tabletOnlySlots[candSlot] = tabletIdx;
-							workingRotations[tabletIdx] = rot;
-
-							int candFieldScore = EvaluatePureTabletFieldScore(
-								snapshot,
-								tabletOnlySlots,
-								workingRotations,
-								out int candCollisions
-							);
-							if (candCollisions > baselineCollisions
-								&& candFieldScore < baselineFieldScore - 400) {
-								continue;
-							}
-
-							tabletOnlySlots.CopyTo(workingSlots);
-							AssignArtifactsToTabletField(snapshot, workingSlots, workingRotations);
-							RunArtifactOnlyLocalPolish(snapshot, workingSlots, workingRotations, ref evaluations);
-
-							SearchStateMetrics candMetrics = EvaluateSearchState(
-								snapshot,
-								workingSlots,
-								workingRotations,
-								ref evaluations
-							);
-							if (candMetrics.CentiDps >= bestMetrics.CentiDps - 5
-								|| candMetrics.Score >= bestMetrics.Score - 30) {
-								elitePool.TryOfferEvaluated(
+								SearchStateMetrics candMetrics = EvaluateSearchState(
 									snapshot,
-									initialSlots,
-									initialRotations,
-									workingSlots,
-									workingRotations,
-									in candMetrics
+									workSlots,
+									workRots,
+									ref evaluations
 								);
-							}
-
-							if (CompareSearchStates(in candMetrics, in bestMetrics) > 0) {
-								bestMetrics = candMetrics;
-								workingSlots.CopyTo(bestSlots);
-								workingRotations.CopyTo(bestRotations);
-								baselineFieldScore = candFieldScore;
-								baselineCollisions = candCollisions;
-								repairedInPass = true;
-								if (baselineCollisions == 0) {
-									return;
+								if (CompareSearchStates(in candMetrics, in bestMetrics) > 0) {
+									bestMetrics = candMetrics;
+									workSlots.CopyTo(bestSlots);
+									workRots.CopyTo(bestRotations);
+									elitePool.TryOfferEvaluated(
+										snapshot,
+										initialSlots,
+										initialRotations,
+										bestSlots,
+										bestRotations,
+										in bestMetrics
+									);
+									repairedInPass = true;
+									break;
 								}
+							}
+							if (repairedInPass) {
 								break;
 							}
 						}
+
 						if (repairedInPass) {
 							break;
 						}
+						workSlots[pSlot] = pIdx;
+						workSlots[otherSlot] = otherIdx;
+						workRots[pIdx] = savedRotP;
+						if (otherIdx >= 0) {
+							workRots[otherIdx] = savedRotO;
+						}
 					}
+
+					if (repairedInPass) {
+						break;
+					}
+
+					for (int t = 0; t < itemCount && !repairedInPass; t++) {
+						if (items[t].Kind != SlotItemKind.StoneTablet) {
+							continue;
+						}
+						int tSlot = FindItemSlot(workSlots, t);
+						if (tSlot >= 0 && pinnedSlots[tSlot]) {
+							continue;
+						}
+						int savedRotT = workRots[t];
+						int maxRotT = items[t].IsRotatable ? 4 : 1;
+						for (int dstSlot = 0; dstSlot < unlockedSlots && !repairedInPass; dstSlot++) {
+							if (pinnedSlots[dstSlot]) {
+								continue;
+							}
+							int disp = dstSlot != tSlot ? workSlots[dstSlot] : -2;
+							if (tSlot >= 0 && dstSlot != tSlot) {
+								workSlots[tSlot] = disp;
+							}
+							workSlots[dstSlot] = t;
+							for (int rt = 0; rt < maxRotT; rt++) {
+								if (maxRotT > 1) {
+									workRots[t] = rt;
+								}
+								SearchStateMetrics step1 = EvaluateSearchState(
+									snapshot,
+									workSlots,
+									workRots,
+									ref evaluations
+								);
+								if (CompareSearchStates(in step1, in bestMetrics) > 0) {
+									bestMetrics = step1;
+									workSlots.CopyTo(bestSlots);
+									workRots.CopyTo(bestRotations);
+									elitePool.TryOfferEvaluated(
+										snapshot,
+										initialSlots,
+										initialRotations,
+										bestSlots,
+										bestRotations,
+										in bestMetrics
+									);
+									repairedInPass = true;
+									break;
+								}
+							}
+							if (!repairedInPass) {
+								if (tSlot >= 0 && dstSlot != tSlot) {
+									workSlots[tSlot] = t;
+								}
+								if (dstSlot != tSlot) {
+									workSlots[dstSlot] = disp;
+								}
+								workRots[t] = savedRotT;
+							}
+						}
+					}
+
 					if (repairedInPass) {
 						break;
 					}
 				}
 
-				if (!repairedInPass || baselineCollisions == 0) {
+				if (!repairedInPass || bestMetrics.HardViolationCount == 0) {
 					break;
 				}
 			}
@@ -7685,7 +8004,7 @@ namespace SephiriaOptimizer.Solver {
 			}
 			elitePool.DeduplicateAndSort(snapshot);
 
-			if (elitePool.Count > 0 && stopwatch.ElapsedMilliseconds < deadlineMs + 80) {
+			if (elitePool.Count > 0 && stopwatch.ElapsedMilliseconds < deadlineMs + 25) {
 				elitePool.CopyTo(0, workSlots, workRots);
 				CandidateMetrics bestMetrics = elitePool.GetMetrics(0);
 
@@ -7699,26 +8018,25 @@ namespace SephiriaOptimizer.Solver {
 					}
 					int savedRot = workRots[i];
 					for (int rot = 0; rot < 4; rot++) {
-						if (rot == savedRot) {
-							continue;
-						}
-						if (tSlot >= 0 && IsRedundantTabletRotation(items[i], tSlot, rot)) {
+						if (rot == savedRot || (tSlot >= 0 && IsRedundantTabletRotation(items[i], tSlot, rot))) {
 							continue;
 						}
 						workRots[i] = rot;
-						int sc = ObjectiveEvaluator.Evaluate(snapshot, workSlots, workRots);
-						evaluations++;
-						if (sc >= bestMetrics.Score - 200) {
-							elitePool.TryOffer(
+						SearchStateMetrics scMetrics = EvaluateSearchState(
+							snapshot,
+							workSlots,
+							workRots,
+							ref evaluations
+						);
+						if (scMetrics.LexScore.Tier1UserPriority >= bestMetrics.LexScore.Tier1UserPriority
+							&& scMetrics.Score >= bestMetrics.Score - 200) {
+							elitePool.TryOfferEvaluated(
 								snapshot,
 								initialSlots,
 								initialRotations,
 								workSlots,
 								workRots,
-								sc,
-								ref evaluations,
-								countEval: false,
-								forceEval: true
+								in scMetrics
 							);
 						}
 					}
@@ -7744,19 +8062,21 @@ namespace SephiriaOptimizer.Solver {
 
 						workSlots[sA] = itemB;
 						workSlots[sB] = itemA;
-						int sc = ObjectiveEvaluator.Evaluate(snapshot, workSlots, workRots);
-						evaluations++;
-						if (sc >= bestMetrics.Score - 200) {
-							elitePool.TryOffer(
+						SearchStateMetrics scMetrics = EvaluateSearchState(
+							snapshot,
+							workSlots,
+							workRots,
+							ref evaluations
+						);
+						if (scMetrics.LexScore.Tier1UserPriority >= bestMetrics.LexScore.Tier1UserPriority
+							&& scMetrics.Score >= bestMetrics.Score - 200) {
+							elitePool.TryOfferEvaluated(
 								snapshot,
 								initialSlots,
 								initialRotations,
 								workSlots,
 								workRots,
-								sc,
-								ref evaluations,
-								countEval: false,
-								forceEval: true
+								in scMetrics
 							);
 						}
 						workSlots[sA] = itemA;
@@ -7873,13 +8193,11 @@ namespace SephiriaOptimizer.Solver {
 			int unlockedSlots = snapshot.UnlockedSlots;
 			bool[] pinnedSlots = snapshot.PinnedSlots;
 
-			int curScore = ObjectiveEvaluator.EvaluateWithMetrics(
+			SearchStateMetrics curMetrics = EvaluateSearchState(
 				snapshot,
 				workSlots,
 				workRotations,
-				out double curDps,
-				out int curViol,
-				out int curUtil
+				ref evaluations
 			);
 			CycleDecomposition.CountExecutionCost(
 				snapshot,
@@ -7913,19 +8231,14 @@ namespace SephiriaOptimizer.Solver {
 
 						workSlots[sA] = itemB;
 						workSlots[sB] = itemA;
-						int candScore = ObjectiveEvaluator.EvaluateWithMetrics(
+						SearchStateMetrics candMetrics = EvaluateSearchState(
 							snapshot,
 							workSlots,
 							workRotations,
-							out double candDps,
-							out int candViol,
-							out int candUtil
+							ref evaluations
 						);
-						evaluations++;
 
-						long curCenti = (long)Math.Round(curDps * 100.0);
-						long candCenti = (long)Math.Round(candDps * 100.0);
-						if (candCenti >= curCenti && candViol <= curViol && candUtil >= curUtil && candScore >= curScore) {
+						if (CompareSearchStates(in candMetrics, in curMetrics) >= 0) {
 							CycleDecomposition.CountExecutionCost(
 								snapshot,
 								initialSlots,
@@ -7937,10 +8250,7 @@ namespace SephiriaOptimizer.Solver {
 							);
 							int nextCost = nextSwaps + nextRots;
 							if (nextCost < curCost || (nextCost == curCost && nextSwaps < curSwaps)) {
-								curScore = candScore;
-								curDps = candDps;
-								curViol = candViol;
-								curUtil = candUtil;
+								curMetrics = candMetrics;
 								curSwaps = nextSwaps;
 								curRots = nextRots;
 								curCost = nextCost;
@@ -7960,13 +8270,14 @@ namespace SephiriaOptimizer.Solver {
 
 			ulong finalHash = ObjectiveEvaluator.ComputeCanonicalLayoutHash(snapshot, workSlots, workRotations);
 			finalMetrics = new CandidateMetrics(
-				curScore,
-				curDps,
-				curViol,
-				curUtil,
+				curMetrics.Score,
+				0.0,
+				curMetrics.HardViolationCount,
+				curMetrics.UtilityEffectiveLevelSum,
 				curSwaps,
 				curRots,
-				finalHash
+				finalHash,
+				curMetrics.LexScore
 			);
 		}
 
@@ -8020,7 +8331,8 @@ namespace SephiriaOptimizer.Solver {
 					candMetrics.UtilityEffectiveLevelSum,
 					swaps,
 					rots,
-					candMetrics.CanonicalHash
+					candMetrics.CanonicalHash,
+					candMetrics.LexScore
 				);
 
 				int rank = resultList.Count + 1;
@@ -8046,11 +8358,14 @@ namespace SephiriaOptimizer.Solver {
 			if (alt.HardViolationCount > best.HardViolationCount) {
 				return false;
 			}
-			if (best.ExactEstimatedDps > 1.0) {
-				return alt.ExactEstimatedDps >= best.ExactEstimatedDps * 0.999
-					&& alt.Score >= best.Score - 200;
+			if (alt.LexScore.Tier1UserPriority < best.LexScore.Tier1UserPriority) {
+				return false;
 			}
-			return alt.Score == best.Score;
+			long bestT3 = best.LexScore.Tier3SynergyAndAmplification;
+			if (bestT3 > 0L) {
+				return alt.LexScore.Tier3SynergyAndAmplification >= (bestT3 * 995L) / 1000L;
+			}
+			return alt.Score >= best.Score - 200;
 		}
 
 		private static string BuildCandidateDiffSummary(
@@ -8062,15 +8377,11 @@ namespace SephiriaOptimizer.Solver {
 				return "기본 추천";
 			}
 
-			long bestCenti = (long)Math.Round(best.ExactEstimatedDps * 100.0);
-			long altCenti = (long)Math.Round(alt.ExactEstimatedDps * 100.0);
-			string dpsText;
-			if (bestCenti == altCenti) {
-				dpsText = "동일 DPS";
-			} else {
-				int dpsDelta = alt.EstimatedDps - best.EstimatedDps;
-				dpsText = dpsDelta == 0 ? "동일 DPS" : $"DPS {(dpsDelta > 0 ? "+" : "")}{dpsDelta:N0}";
-			}
+			long bestT3 = best.LexScore.Tier3SynergyAndAmplification;
+			long altT3 = alt.LexScore.Tier3SynergyAndAmplification;
+			string synergyText = bestT3 == altT3
+				? "시너지 동일"
+				: $"시너지 {(altT3 - bestT3 > 0 ? "+" : "")}{altT3 - bestT3}";
 
 			int violDiff = alt.HardViolationCount - best.HardViolationCount;
 			int utilDiff = alt.UtilityEffectiveLevelSum - best.UtilityEffectiveLevelSum;
@@ -8094,7 +8405,7 @@ namespace SephiriaOptimizer.Solver {
 				detailText = "대안 배치";
 			}
 
-			return $"{dpsText} · {detailText}";
+			return $"{synergyText} · {detailText}";
 		}
 
 		private static bool IsStaticSlotConstraintMet(
@@ -8129,6 +8440,15 @@ namespace SephiriaOptimizer.Solver {
 			if (snapshot.IsExcludedCompanionEmblem(item)) {
 				return -1000;
 			}
+			int userOverrideBonus = item.IsUserPriorityOverridden
+				? item.PriorityTier switch {
+					ArtifactPriorityTier.Core => 200_000,
+					ArtifactPriorityTier.High => 100_000,
+					ArtifactPriorityTier.Normal => 40_000,
+					ArtifactPriorityTier.Low => 5_000,
+					_ => -500
+				}
+				: 0;
 			int constraintBonus = item.ConstraintType != ArtifactConstraintType.None ? 600 : 0;
 			int rowElemBonus = item.IsElementalByRowCharm ? 500 : 0;
 			int whitePaperBonus = item.IsWhitePaperCharm ? 420 : 0;
@@ -8137,7 +8457,8 @@ namespace SephiriaOptimizer.Solver {
 			int weightRank = (int)Math.Round(ObjectiveEvaluator.GetNormalizedWeight(item) * 200.0);
 			int capRank = Math.Max(0, item.MaxLevel - item.BaseLevel) * 45;
 			int attackBonus = item.IsAttackableCharm ? 120 : 0;
-			return constraintBonus
+			return userOverrideBonus
+				+ constraintBonus
 				+ rowElemBonus
 				+ whitePaperBonus
 				+ companionBonus
