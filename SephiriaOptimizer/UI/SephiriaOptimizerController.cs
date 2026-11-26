@@ -68,6 +68,8 @@ namespace SephiriaOptimizer.UI {
 
 		private Task<OptimizationResult>? activeSolveTask;
 		private InventorySnapshot? pendingTaskSnapshot;
+		private int solveEpoch;
+		private int pendingTaskEpoch;
 
 		private string installedModVersion = ModVersionConstants.CurrentModVersion;
 		private string modDirectoryPath = string.Empty;
@@ -246,6 +248,16 @@ namespace SephiriaOptimizer.UI {
 			lastObservedStateHash = 0;
 		}
 
+		private void InvalidateCacheAndRestartSolve(bool resetCandidateSelection = true) {
+			solveEpoch++;
+			latestResult = null;
+			pendingTaskSnapshot = null;
+			lastObservedStateHash = 0;
+			if (resetCandidateSelection) {
+				selectedCandidateIndex = 0;
+			}
+		}
+
 		private void InvalidateStaleGuidesOnInventoryChange(GridInventory inventory) {
 			if (latestSnapshot == null || latestResult == null) {
 				return;
@@ -289,6 +301,8 @@ namespace SephiriaOptimizer.UI {
 					customEntityWeights,
 					userSettings
 				);
+				int capturedEpoch = solveEpoch;
+				pendingTaskEpoch = capturedEpoch;
 				pendingTaskSnapshot = snapshot;
 				if (latestSnapshot == null) {
 					latestSnapshot = snapshot;
@@ -305,7 +319,9 @@ namespace SephiriaOptimizer.UI {
 				return;
 			}
 			try {
-				if (activeSolveTask.Status == TaskStatus.RanToCompletion && pendingTaskSnapshot != null) {
+				if (activeSolveTask.Status == TaskStatus.RanToCompletion
+					&& pendingTaskEpoch == solveEpoch
+					&& pendingTaskSnapshot != null) {
 					OptimizationResult result = activeSolveTask.Result;
 					latestSnapshot = pendingTaskSnapshot;
 					latestResult = result;
@@ -404,8 +420,17 @@ namespace SephiriaOptimizer.UI {
 				latestResult = result;
 				lastObservedStateHash = liveHash;
 
-				bool noImprovement = result.BestEstimatedDps <= result.InitialEstimatedDps
-					&& result.BestScore <= result.InitialScore;
+				OptimizationCandidate topCand = result.TopCandidates[0];
+				LexicographicScore initLex = ObjectiveEvaluator.EvaluateLexicographic(
+					snapshot,
+					snapshot.InitialSlotToItemIndex,
+					snapshot.InitialItemRotations,
+					out int initSc,
+					out _,
+					out _
+				);
+				bool noImprovement = topCand.Metrics.LexScore.CompareTo(initLex) <= 0
+					&& result.BestScore <= initSc;
 				if (noImprovement || plan.TotalOperations == 0) {
 					SetStatusBanner("이미 최적 배치 상태입니다.");
 					return;
@@ -510,7 +535,7 @@ namespace SephiriaOptimizer.UI {
 			yield return null;
 
 			isAutoSwapRunning = false;
-			lastObservedStateHash = 0;
+			InvalidateCacheAndRestartSolve();
 			SetStatusBanner(
 				$"재배치 완료 (스왑 {plan.SwapSteps.Count}회, 회전 {plan.RotateSteps.Count}개)"
 			);
@@ -519,7 +544,7 @@ namespace SephiriaOptimizer.UI {
 		private void AbortAutoSwap(string reason) {
 			isOverlayEnabled = true;
 			isAutoSwapRunning = false;
-			lastObservedStateHash = 0;
+			InvalidateCacheAndRestartSolve();
 			SetStatusBanner(reason);
 		}
 
@@ -686,14 +711,13 @@ namespace SephiriaOptimizer.UI {
 
 			bool includeCompanion = userSettings.ConsiderCompanionEmblemArtifacts;
 			string companionLabel = includeCompanion
-				? "동료 휘장 고려: ON"
-				: "동료 휘장 고려: OFF";
+				? "동료 휘장 아티팩트 고려: ON"
+				: "동료 휘장 아티팩트 고려: OFF";
 			GUIStyle companionStyle = includeCompanion ? selectedButtonStyle! : buttonStyle!;
 			if (GUI.Button(new Rect(padX, curY, innerWidth, 25f), companionLabel, companionStyle)) {
 				userSettings.ConsiderCompanionEmblemArtifacts = !includeCompanion;
-				selectedCandidateIndex = 0;
-				lastObservedStateHash = 0;
 				SaveLayoutPreferences();
+				InvalidateCacheAndRestartSolve();
 				SetStatusBanner(
 					userSettings.ConsiderCompanionEmblemArtifacts
 						? "동료 휘장 아티팩트 고려: ON"
@@ -932,7 +956,7 @@ namespace SephiriaOptimizer.UI {
 					isOverlayEnabled = true;
 					OptimizationCandidate picked = candidates[i];
 					SetStatusBanner(
-						$"후보 [{i + 1}] 선택: DPS {picked.Metrics.EstimatedDps:N0} · {picked.DiffSummary}"
+						$"후보 [{i + 1}] 선택: 점수 {picked.Metrics.Score:N0} · {picked.DiffSummary}"
 					);
 				}
 				curBtnX += btnW + 4f;
@@ -946,7 +970,7 @@ namespace SephiriaOptimizer.UI {
 
 			OptimizationCandidate currentCand = candidates[selectedCandidateIndex];
 			string previewLine =
-				$"DPS {currentCand.Metrics.EstimatedDps:N0} · 스왑 {currentCand.Metrics.SwapCount}회 · {currentCand.DiffSummary}";
+				$"점수 {currentCand.Metrics.Score:N0} · 스왑 {currentCand.Metrics.SwapCount}회 · {currentCand.DiffSummary}";
 			GUI.Label(
 				new Rect(x + 5f, y + 26f, width - 10f, 24f),
 				previewLine,
@@ -986,8 +1010,7 @@ namespace SephiriaOptimizer.UI {
 			userSettings.TargetComboCategories.Clear();
 			userSettings.PreferredNeedleTargetInstanceId = -1;
 			userSettings.ConsiderCompanionEmblemArtifacts = true;
-			selectedCandidateIndex = 0;
-			lastObservedStateHash = 0;
+			InvalidateCacheAndRestartSolve();
 			SaveLayoutPreferences();
 			SetStatusBanner("슬롯 고정 및 우선순위·콤보·휘장 설정을 초기화했습니다.");
 		}
@@ -1232,11 +1255,34 @@ namespace SephiriaOptimizer.UI {
 				}
 			}
 
-			float contentHeight = 340f + (artifactCount * 32f);
+			float contentHeight = 400f + (artifactCount * 32f);
 			Rect contentRect = new Rect(0f, 0f, width - 36f, Mathf.Max(viewRect.height, contentHeight));
 			configScrollPos = GUI.BeginScrollView(viewRect, configScrollPos, contentRect);
 
 			float curY = 4f;
+			bool modalCompanionOn = userSettings.ConsiderCompanionEmblemArtifacts;
+			GUI.Label(
+				new Rect(4f, curY, contentRect.width - 8f, 20f),
+				"0. 동료 휘장 아티팩트 고려 옵션 (ON: 시너지·슬롯 후보 포함 / OFF: 후보군 제외)",
+				subHeaderStyle!
+			);
+			curY += 22f;
+			string modalCompanionLabel = modalCompanionOn
+				? "동료 휘장 아티팩트 고려: ON (포함)"
+				: "동료 휘장 아티팩트 고려: OFF (제외)";
+			GUIStyle modalCompanionStyle = modalCompanionOn ? selectedButtonStyle! : buttonStyle!;
+			if (GUI.Button(new Rect(4f, curY, contentRect.width - 12f, 24f), modalCompanionLabel, modalCompanionStyle)) {
+				userSettings.ConsiderCompanionEmblemArtifacts = !modalCompanionOn;
+				SaveLayoutPreferences();
+				InvalidateCacheAndRestartSolve();
+				SetStatusBanner(
+					userSettings.ConsiderCompanionEmblemArtifacts
+						? "동료 휘장 아티팩트 고려: ON"
+						: "동료 휘장 아티팩트 고려: OFF"
+				);
+			}
+			curY += 32f;
+
 			GUI.Label(
 				new Rect(4f, curY, contentRect.width - 8f, 20f),
 				"1. 캘세더니 열쇠 목표 콤보 선택 (배치 행에 따라 견고/잉걸불/빙하/마법공학 중 택1)",
@@ -1248,7 +1294,7 @@ namespace SephiriaOptimizer.UI {
 			GUIStyle autoChalStyle = isAutoChalcedony ? selectedButtonStyle! : buttonStyle!;
 			if (GUI.Button(new Rect(4f, curY, 108f, 24f), "자동 (최적 행)", autoChalStyle)) {
 				userSettings.PreferredChalcedonyCategory = string.Empty;
-				lastObservedStateHash = 0;
+				InvalidateCacheAndRestartSolve();
 			}
 
 			float chalX = 116f;
@@ -1263,7 +1309,7 @@ namespace SephiriaOptimizer.UI {
 				string prefix = isSelected ? "★" : "#";
 				if (GUI.Button(new Rect(chalX, curY, 88f, 24f), $"{prefix}{chalName}", style)) {
 					userSettings.ToggleChalcedonyCategory(chalId);
-					lastObservedStateHash = 0;
+					InvalidateCacheAndRestartSolve();
 				}
 				chalX += 92f;
 			}
@@ -1280,7 +1326,7 @@ namespace SephiriaOptimizer.UI {
 			GUIStyle autoComboStyle = !hasManualCombos ? selectedButtonStyle! : buttonStyle!;
 			if (GUI.Button(new Rect(4f, curY, 165f, 24f), "자동 (활성 콤보 기반)", autoComboStyle)) {
 				userSettings.TargetComboCategories.Clear();
-				lastObservedStateHash = 0;
+				InvalidateCacheAndRestartSolve();
 			}
 			curY += 28f;
 
@@ -1295,7 +1341,7 @@ namespace SephiriaOptimizer.UI {
 				Rect btnRect = new Rect(4f + (col * (tagBtnW + 4f)), curY, tagBtnW, tagBtnH);
 				if (GUI.Button(btnRect, $"{prefix}{korName}", style)) {
 					userSettings.ToggleTargetCombo(tagId);
-					lastObservedStateHash = 0;
+					InvalidateCacheAndRestartSolve();
 				}
 				col++;
 				if (col >= 4) {
@@ -1322,7 +1368,7 @@ namespace SephiriaOptimizer.UI {
 				isAutoNeedle ? selectedButtonStyle! : buttonStyle!
 			)) {
 				userSettings.PreferredNeedleTargetInstanceId = -1;
-				lastObservedStateHash = 0;
+				InvalidateCacheAndRestartSolve();
 			}
 
 			float needleX = 184f;
@@ -1344,7 +1390,7 @@ namespace SephiriaOptimizer.UI {
 					isTarget ? selectedButtonStyle! : buttonStyle!
 				)) {
 					userSettings.PreferredNeedleTargetInstanceId = isTarget ? -1 : item.InstanceId;
-					lastObservedStateHash = 0;
+					InvalidateCacheAndRestartSolve();
 				}
 				needleX += 146f;
 			}
@@ -1414,8 +1460,9 @@ namespace SephiriaOptimizer.UI {
 				(ArtifactPriorityTier tier, string label, float btnWidth) = tiers[i];
 				GUIStyle style = currentTier == tier ? selectedButtonStyle! : buttonStyle!;
 				if (GUI.Button(new Rect(curX, y, btnWidth, 24f), label, style)) {
-					userSettings.InstancePriorities[instanceId] = tier;
-					lastObservedStateHash = 0;
+					userSettings.SetPriority(instanceId, tier);
+					SaveLayoutPreferences();
+					InvalidateCacheAndRestartSolve();
 				}
 				curX += btnWidth + 4f;
 			}
@@ -1505,17 +1552,21 @@ namespace SephiriaOptimizer.UI {
 						if (!pinnedSlotIndices.Add(hoveredSlot)) {
 							pinnedSlotIndices.Remove(hoveredSlot);
 						}
-						lastObservedStateHash = 0;
+						SaveLayoutPreferences();
+						InvalidateCacheAndRestartSolve();
 						Event.current.Use();
 					} else {
 						int clickedItemIdx = liveSlotToItem[hoveredSlot];
-						if (clickedItemIdx >= 0 && snapshot.Items[clickedItemIdx].Kind == SlotItemKind.Artifact) {
-							SlotItemSnapshot clickedArt = snapshot.Items[clickedItemIdx];
-							userSettings.CyclePriority(clickedArt.InstanceId);
-							ArtifactPriorityTier nextTier = userSettings.GetPriority(clickedArt.InstanceId);
-							lastObservedStateHash = 0;
+						if (clickedItemIdx >= 0
+							&& (snapshot.Items[clickedItemIdx].Kind == SlotItemKind.Artifact
+								|| snapshot.Items[clickedItemIdx].Kind == SlotItemKind.StoneTablet)) {
+							SlotItemSnapshot clickedItem = snapshot.Items[clickedItemIdx];
+							userSettings.CyclePriority(clickedItem.InstanceId, clickedItem.PriorityTier);
+							ArtifactPriorityTier nextTier = userSettings.GetPriority(clickedItem.InstanceId);
+							SaveLayoutPreferences();
+							InvalidateCacheAndRestartSolve();
 							SetStatusBanner(
-								$"[{clickedArt.DisplayName}] 우선순위 → [{GetPriorityShortLabel(nextTier)}]"
+								$"[{clickedItem.DisplayName}] 우선순위 → [{GetPriorityShortLabel(nextTier)}]"
 							);
 							Event.current.Use();
 						}
@@ -1873,6 +1924,11 @@ namespace SephiriaOptimizer.UI {
 			hash = (hash * 31) + avatar.GetCustomStat(ECustomStat.CriticalDamageBonus);
 
 			hash = (hash * 31) + pinnedSlotIndices.Count;
+			for (int s = 0; s < unlocked; s++) {
+				if (pinnedSlotIndices.Contains(s)) {
+					hash = (hash * 31) + (s + 1);
+				}
+			}
 			hash = (hash * 31) + userSettings.ComputeSettingsHash();
 			return hash;
 		}
